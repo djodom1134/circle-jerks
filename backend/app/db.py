@@ -68,6 +68,61 @@ CREATE TABLE IF NOT EXISTS aircraft_cache (
   operator TEXT,
   last_updated INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS visitor_activity (
+  visitor_id TEXT PRIMARY KEY,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT,
+  path TEXT,
+  airport_icao TEXT,
+  user_lat REAL,
+  user_lon REAL,
+  submission_count INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (airport_icao) REFERENCES airports(icao)
+);
+
+CREATE TABLE IF NOT EXISTS submission_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at INTEGER NOT NULL,
+  visitor_id TEXT,
+  ip_address TEXT,
+  user_agent TEXT,
+  airport_icao TEXT,
+  user_lat REAL,
+  user_lon REAL,
+  window_code TEXT,
+  mode TEXT,
+  text TEXT NOT NULL,
+  text_hash TEXT NOT NULL,
+  target_count INTEGER NOT NULL,
+  FOREIGN KEY (airport_icao) REFERENCES airports(icao)
+);
+
+CREATE TABLE IF NOT EXISTS submission_aircraft (
+  submission_id INTEGER NOT NULL,
+  icao24 TEXT NOT NULL,
+  callsign TEXT,
+  registration TEXT,
+  PRIMARY KEY (submission_id, icao24),
+  FOREIGN KEY (submission_id) REFERENCES submission_events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS aircraft_report_counts (
+  icao24 TEXT PRIMARY KEY,
+  callsign TEXT,
+  registration TEXT,
+  report_count INTEGER NOT NULL DEFAULT 0,
+  first_reported_at INTEGER NOT NULL,
+  last_reported_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_submission_events_created_at ON submission_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_submission_events_ip ON submission_events(ip_address);
+CREATE INDEX IF NOT EXISTS idx_submission_events_visitor ON submission_events(visitor_id);
+CREATE INDEX IF NOT EXISTS idx_submission_events_airport ON submission_events(airport_icao);
+CREATE INDEX IF NOT EXISTS idx_visitor_activity_last_seen ON visitor_activity(last_seen DESC);
 """
 
 
@@ -249,6 +304,338 @@ def aircraft_detail(conn: sqlite3.Connection, icao24: str) -> dict | None:
     return dict(row) if row else None
 
 
+def normalize_icao24(icao24: str) -> str:
+    return icao24.strip().lower()
+
+
+def normalized_aircraft_targets(targets: list[dict]) -> list[dict]:
+    normalized: dict[str, dict] = {}
+    for target in targets:
+        icao24 = normalize_icao24(str(target.get("icao24", "")))
+        if not icao24:
+            continue
+        callsign = str(target.get("callsign") or "").strip() or None
+        normalized[icao24] = {"icao24": icao24, "callsign": callsign}
+    return list(normalized.values())
+
+
+def record_visitor_activity(
+    conn: sqlite3.Connection,
+    *,
+    visitor_id: str,
+    now: int,
+    ip_address: str | None,
+    user_agent: str | None,
+    path: str | None,
+    airport_icao: str | None,
+    user_lat: float | None,
+    user_lon: float | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO visitor_activity
+        (visitor_id, first_seen, last_seen, ip_address, user_agent, path, airport_icao, user_lat, user_lon, submission_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ON CONFLICT(visitor_id) DO UPDATE SET
+          last_seen = excluded.last_seen,
+          ip_address = excluded.ip_address,
+          user_agent = excluded.user_agent,
+          path = excluded.path,
+          airport_icao = excluded.airport_icao,
+          user_lat = excluded.user_lat,
+          user_lon = excluded.user_lon
+        """,
+        (
+            visitor_id,
+            now,
+            now,
+            ip_address,
+            user_agent,
+            path,
+            airport_icao.upper() if airport_icao else None,
+            user_lat,
+            user_lon,
+        ),
+    )
+
+
+def record_submission(
+    conn: sqlite3.Connection,
+    *,
+    now: int,
+    visitor_id: str | None,
+    ip_address: str | None,
+    user_agent: str | None,
+    airport_icao: str | None,
+    user_lat: float | None,
+    user_lon: float | None,
+    window_code: str | None,
+    mode: str | None,
+    text: str,
+    text_hash: str,
+    targets: list[dict],
+) -> int:
+    normalized_targets = normalized_aircraft_targets(targets)
+    if visitor_id:
+        record_visitor_activity(
+            conn,
+            visitor_id=visitor_id,
+            now=now,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            path="/",
+            airport_icao=airport_icao,
+            user_lat=user_lat,
+            user_lon=user_lon,
+        )
+        conn.execute(
+            "UPDATE visitor_activity SET submission_count = submission_count + 1 WHERE visitor_id = ?",
+            (visitor_id,),
+        )
+    cursor = conn.execute(
+        """
+        INSERT INTO submission_events
+        (created_at, visitor_id, ip_address, user_agent, airport_icao, user_lat, user_lon, window_code, mode, text, text_hash, target_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now,
+            visitor_id,
+            ip_address,
+            user_agent,
+            airport_icao.upper() if airport_icao else None,
+            user_lat,
+            user_lon,
+            window_code,
+            mode,
+            text,
+            text_hash,
+            len(normalized_targets),
+        ),
+    )
+    submission_id = int(cursor.lastrowid)
+    for target in normalized_targets:
+        icao24 = target["icao24"]
+        cache = aircraft_detail(conn, icao24) or {}
+        registration = cache.get("registration")
+        callsign = target["callsign"]
+        conn.execute(
+            """
+            INSERT INTO submission_aircraft (submission_id, icao24, callsign, registration)
+            VALUES (?, ?, ?, ?)
+            """,
+            (submission_id, icao24, callsign, registration),
+        )
+        conn.execute(
+            """
+            INSERT INTO aircraft_report_counts
+            (icao24, callsign, registration, report_count, first_reported_at, last_reported_at)
+            VALUES (?, ?, ?, 1, ?, ?)
+            ON CONFLICT(icao24) DO UPDATE SET
+              callsign = COALESCE(excluded.callsign, aircraft_report_counts.callsign),
+              registration = COALESCE(excluded.registration, aircraft_report_counts.registration),
+              report_count = aircraft_report_counts.report_count + 1,
+              last_reported_at = excluded.last_reported_at
+            """,
+            (icao24, callsign, registration, now, now),
+        )
+    return submission_id
+
+
+def _aircraft_for_submissions(conn: sqlite3.Connection, submission_ids: list[int]) -> dict[int, list[dict]]:
+    if not submission_ids:
+        return {}
+    placeholders = ",".join("?" for _ in submission_ids)
+    rows = conn.execute(
+        f"""
+        SELECT submission_id, icao24, callsign, registration
+        FROM submission_aircraft
+        WHERE submission_id IN ({placeholders})
+        ORDER BY submission_id DESC, callsign COLLATE NOCASE, icao24
+        """,
+        submission_ids,
+    ).fetchall()
+    grouped: dict[int, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["submission_id"], []).append({
+            "icao24": row["icao24"],
+            "callsign": row["callsign"],
+            "registration": row["registration"],
+        })
+    return grouped
+
+
+def admin_dashboard(conn: sqlite3.Connection, *, now: int, active_window_seconds: int) -> dict:
+    active_since = now - active_window_seconds
+    summary = conn.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM submission_events) AS submissions,
+          (SELECT COALESCE(SUM(report_count), 0) FROM aircraft_report_counts) AS aircraft_reports,
+          (SELECT COUNT(*) FROM aircraft_report_counts) AS distinct_aircraft,
+          (SELECT COUNT(DISTINCT COALESCE(visitor_id, ip_address)) FROM submission_events) AS submitters,
+          (SELECT COUNT(*) FROM visitor_activity WHERE last_seen >= ?) AS current_users,
+          (SELECT COUNT(DISTINCT airport_icao) FROM submission_events WHERE airport_icao IS NOT NULL) AS airports
+        """,
+        (active_since,),
+    ).fetchone()
+
+    submission_rows = conn.execute(
+        """
+        SELECT
+          s.id,
+          s.created_at,
+          s.visitor_id,
+          s.ip_address,
+          s.airport_icao,
+          a.name AS airport_name,
+          a.city AS airport_city,
+          s.user_lat,
+          s.user_lon,
+          s.window_code,
+          s.mode,
+          s.text,
+          s.text_hash,
+          s.target_count
+        FROM submission_events s
+        LEFT JOIN airports a ON a.icao = s.airport_icao
+        ORDER BY s.created_at DESC, s.id DESC
+        LIMIT 100
+        """
+    ).fetchall()
+    submission_ids = [row["id"] for row in submission_rows]
+    aircraft_by_submission = _aircraft_for_submissions(conn, submission_ids)
+    recent_submissions = [
+        {
+            **dict(row),
+            "aircraft": aircraft_by_submission.get(row["id"], []),
+        }
+        for row in submission_rows
+    ]
+
+    aircraft_reports = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+              r.icao24,
+              r.callsign,
+              COALESCE(r.registration, c.registration) AS registration,
+              c.type_icao,
+              c.operator,
+              r.report_count,
+              r.first_reported_at,
+              r.last_reported_at
+            FROM aircraft_report_counts r
+            LEFT JOIN aircraft_cache c ON c.icao24 = r.icao24
+            ORDER BY r.report_count DESC, r.last_reported_at DESC
+            LIMIT 100
+            """
+        ).fetchall()
+    ]
+
+    current_users = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+              v.visitor_id,
+              v.first_seen,
+              v.last_seen,
+              v.ip_address,
+              v.path,
+              v.airport_icao,
+              a.city AS airport_city,
+              v.user_lat,
+              v.user_lon,
+              v.submission_count
+            FROM visitor_activity v
+            LEFT JOIN airports a ON a.icao = v.airport_icao
+            WHERE v.last_seen >= ?
+            ORDER BY v.last_seen DESC
+            """,
+            (active_since,),
+        ).fetchall()
+    ]
+
+    ip_history = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+              s.ip_address,
+              COUNT(*) AS submissions,
+              MIN(s.created_at) AS first_submission_at,
+              MAX(s.created_at) AS last_submission_at,
+              COUNT(DISTINCT s.visitor_id) AS visitors,
+              SUM(CASE WHEN v.last_seen >= ? THEN 1 ELSE 0 END) AS active_visitors
+            FROM submission_events s
+            LEFT JOIN visitor_activity v ON v.visitor_id = s.visitor_id
+            WHERE s.ip_address IS NOT NULL
+            GROUP BY s.ip_address
+            ORDER BY submissions DESC, last_submission_at DESC
+            LIMIT 100
+            """,
+            (active_since,),
+        ).fetchall()
+    ]
+
+    locations = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+              v.visitor_id,
+              v.ip_address,
+              v.airport_icao,
+              a.city AS airport_city,
+              v.user_lat,
+              v.user_lon,
+              v.first_seen,
+              v.last_seen,
+              v.submission_count
+            FROM visitor_activity v
+            LEFT JOIN airports a ON a.icao = v.airport_icao
+            WHERE v.user_lat IS NOT NULL AND v.user_lon IS NOT NULL
+            ORDER BY v.submission_count DESC, v.last_seen DESC
+            LIMIT 100
+            """
+        ).fetchall()
+    ]
+
+    airports = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+              s.airport_icao,
+              a.name,
+              a.city,
+              COUNT(*) AS submissions,
+              COUNT(DISTINCT COALESCE(s.visitor_id, s.ip_address)) AS submitters,
+              MAX(s.created_at) AS last_submission_at
+            FROM submission_events s
+            LEFT JOIN airports a ON a.icao = s.airport_icao
+            WHERE s.airport_icao IS NOT NULL
+            GROUP BY s.airport_icao
+            ORDER BY submissions DESC, last_submission_at DESC
+            """
+        ).fetchall()
+    ]
+
+    return {
+        "generated_at": now,
+        "active_window_seconds": active_window_seconds,
+        "summary": dict(summary),
+        "current_users": current_users,
+        "recent_submissions": recent_submissions,
+        "aircraft_reports": aircraft_reports,
+        "ip_history": ip_history,
+        "locations": locations,
+        "airports": airports,
+    }
+
+
 def backup_database(source_path: str, backup_dir: str) -> str:
     Path(backup_dir).mkdir(parents=True, exist_ok=True)
     if not os.path.exists(source_path):
@@ -262,4 +649,3 @@ def backup_database(source_path: str, backup_dir: str) -> str:
         target.close()
         source.close()
     return str(dest)
-

@@ -56,12 +56,17 @@ env_quote() {
 
 DIGITAL_OCEAN_API_KEY="$(env_value DIGITAL_OCEAN_API_KEY)"
 CADDY_EMAIL="$(env_value CADDY_EMAIL)"
+CADDY_DOMAIN="$(env_value CADDY_DOMAIN)"
 GROQ_API_KEY="$(env_value GROQ_API_KEY)"
 OPENSKY="$(env_value OPENSKY)"
 OPENSKY_CLIENT_ID="$(env_value OPENSKY_CLIENT_ID)"
 OPENSKY_CLIENT_SECRET="$(env_value OPENSKY_CLIENT_SECRET)"
 CIRCLEJERK_TIMEZONE="$(env_value CIRCLEJERK_TIMEZONE)"
 CIRCLEJERK_DEFAULT_AIRPORT_ICAO="$(env_value CIRCLEJERK_DEFAULT_AIRPORT_ICAO)"
+CIRCLEJERK_ADMIN_USERNAME="$(env_value CIRCLEJERK_ADMIN_USERNAME)"
+CIRCLEJERK_ADMIN_PASSWORD="$(env_value CIRCLEJERK_ADMIN_PASSWORD)"
+CIRCLEJERK_ADMIN_PASSWORD_HASH="$(env_value CIRCLEJERK_ADMIN_PASSWORD_HASH)"
+CIRCLEJERK_BUY_ME_COFFEE_URL="$(env_value CIRCLEJERK_BUY_ME_COFFEE_URL)"
 CIRCLEJERK_LIVE_SOURCE_PRIORITY="$(env_value CIRCLEJERK_LIVE_SOURCE_PRIORITY)"
 CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS="$(env_value CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS)"
 CIRCLEJERK_BBOX_MERGE_DISTANCE_NM="$(env_value CIRCLEJERK_BBOX_MERGE_DISTANCE_NM)"
@@ -75,6 +80,17 @@ fi
 if [ ! -f "$SSH_PUBLIC_KEY_PATH" ] || [ ! -f "$SSH_PRIVATE_KEY_PATH" ]; then
   echo "SSH key pair not found. Set SSH_PUBLIC_KEY_PATH to a usable public key." >&2
   exit 1
+fi
+
+admin_password_file="${CIRCLEJERK_ADMIN_PASSWORD_FILE:-.circlejerk-admin-password}"
+if [ -z "${CIRCLEJERK_ADMIN_PASSWORD:-}" ] && [ -z "${CIRCLEJERK_ADMIN_PASSWORD_HASH:-}" ]; then
+  if [ -f "$admin_password_file" ]; then
+    CIRCLEJERK_ADMIN_PASSWORD="$(head -n 1 "$admin_password_file")"
+  else
+    CIRCLEJERK_ADMIN_PASSWORD="$(openssl rand -base64 36)"
+    umask 077
+    printf '%s\n' "$CIRCLEJERK_ADMIN_PASSWORD" >"$admin_password_file"
+  fi
 fi
 
 DOCTL=(doctl --access-token "$DIGITAL_OCEAN_API_KEY" --http-retry-max 2)
@@ -119,7 +135,7 @@ if [ -z "$firewall_id" ]; then
     --no-header >/dev/null
 fi
 
-domain="${CADDY_DOMAIN:-${reserved_ip}.sslip.io}"
+domain="${CADDY_DOMAIN:-circlejerks.live}"
 app_secret="${APP_SECRET:-$(openssl rand -hex 32)}"
 
 echo "Waiting for SSH on $reserved_ip ..."
@@ -136,6 +152,7 @@ rsync -az --delete \
   --exclude '.git' \
   --exclude '.venv' \
   --exclude '.env' \
+  --exclude '.circlejerk-admin-password' \
   --exclude 'frontend/node_modules' \
   --exclude 'frontend/dist' \
   --exclude 'data/*.sqlite3*' \
@@ -155,6 +172,10 @@ OPENSKY_CLIENT_SECRET=$(printf '%s' "${OPENSKY_CLIENT_SECRET:-}" | env_quote)
 CIRCLEJERK_ENVIRONMENT=production
 CIRCLEJERK_TIMEZONE=$(printf '%s' "${CIRCLEJERK_TIMEZONE:-America/Denver}" | env_quote)
 CIRCLEJERK_DEFAULT_AIRPORT_ICAO=$(printf '%s' "${CIRCLEJERK_DEFAULT_AIRPORT_ICAO:-KBJC}" | env_quote)
+CIRCLEJERK_ADMIN_USERNAME=$(printf '%s' "${CIRCLEJERK_ADMIN_USERNAME:-admin}" | env_quote)
+CIRCLEJERK_ADMIN_PASSWORD=$(printf '%s' "${CIRCLEJERK_ADMIN_PASSWORD:-}" | env_quote)
+CIRCLEJERK_ADMIN_PASSWORD_HASH=$(printf '%s' "${CIRCLEJERK_ADMIN_PASSWORD_HASH:-}" | env_quote)
+CIRCLEJERK_BUY_ME_COFFEE_URL=$(printf '%s' "${CIRCLEJERK_BUY_ME_COFFEE_URL:-https://buymeacoffee.com/djodom}" | env_quote)
 CIRCLEJERK_LIVE_SOURCE_PRIORITY=$(printf '%s' "${CIRCLEJERK_LIVE_SOURCE_PRIORITY:-adsb_lol,opensky,airplanes_live}" | env_quote)
 CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS=$(printf '%s' "${CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS:-30}" | env_quote)
 CIRCLEJERK_BBOX_MERGE_DISTANCE_NM=$(printf '%s' "${CIRCLEJERK_BBOX_MERGE_DISTANCE_NM:-5}" | env_quote)
@@ -168,4 +189,8 @@ rm -f "$tmp_env"
 
 echo "reserved_ip=$reserved_ip"
 echo "url=https://$domain"
+echo "admin_url=https://$domain/admin"
+if [ -f "$admin_password_file" ]; then
+  echo "admin_password_file=$admin_password_file"
+fi
 echo "droplet_id=$droplet_id"

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -58,12 +64,139 @@ class SummaryComplaintRequest(BaseModel):
     report_counts: dict[str, int] = Field(default_factory=dict)
 
 
+class ActivityAircraft(BaseModel):
+    icao24: str = Field(min_length=1, max_length=16)
+    callsign: str | None = Field(default=None, max_length=32)
+
+
+class ActivityHeartbeatRequest(BaseModel):
+    visitor_id: str = Field(min_length=8, max_length=80)
+    airport_icao: str | None = Field(default=None, max_length=8)
+    user_lat: float | None = None
+    user_lon: float | None = None
+    path: str | None = Field(default="/", max_length=200)
+
+
+class ActivitySubmissionRequest(BaseModel):
+    visitor_id: str | None = Field(default=None, min_length=8, max_length=80)
+    airport_icao: str | None = Field(default=None, max_length=8)
+    user_lat: float | None = None
+    user_lon: float | None = None
+    window: str | None = Field(default=None, max_length=20)
+    mode: str | None = Field(default=None, max_length=20)
+    text: str = Field(min_length=1, max_length=20000)
+    targets: list[ActivityAircraft] = Field(default_factory=list, max_length=80)
+
+
+class AdminLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=400)
+
+
 def settings_dep() -> Settings:
     return app.state.settings
 
 
 def store_dep() -> Store:
     return app.state.store
+
+
+ADMIN_COOKIE_NAME = "circlejerk_admin"
+
+
+def client_ip(request: Request) -> str | None:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()[:80] or None
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()[:80] or None
+    return request.client.host[:80] if request.client else None
+
+
+def user_agent(request: Request) -> str | None:
+    value = request.headers.get("user-agent")
+    return value[:500] if value else None
+
+
+def admin_auth_configured(settings: Settings) -> bool:
+    return bool(settings.admin_password or settings.admin_password_hash)
+
+
+def verify_pbkdf2_password(candidate: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            candidate.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations),
+        ).hex()
+        return secrets.compare_digest(digest, expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def verify_admin_password(settings: Settings, password: str) -> bool:
+    if settings.admin_password_hash:
+        return verify_pbkdf2_password(password, settings.admin_password_hash)
+    if settings.admin_password:
+        return secrets.compare_digest(password, settings.admin_password)
+    return False
+
+
+def _b64encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def sign_admin_token(settings: Settings) -> str:
+    payload = {
+        "sub": settings.admin_username,
+        "exp": int(time.time()) + settings.admin_session_seconds,
+        "nonce": secrets.token_urlsafe(12),
+    }
+    body = _b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signature = hmac.new(settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{body}.{signature}"
+
+
+def decode_admin_token(settings: Settings, token: str) -> dict | None:
+    try:
+        body, signature = token.split(".", 1)
+    except ValueError:
+        return None
+    expected = hmac.new(settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).hexdigest()
+    if not secrets.compare_digest(signature, expected):
+        return None
+    try:
+        payload = json.loads(_b64decode(body))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if payload.get("sub") != settings.admin_username:
+        return None
+    if int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    return payload
+
+
+def require_admin(
+    settings: Annotated[Settings, Depends(settings_dep)],
+    admin_session: Annotated[str | None, Cookie(alias=ADMIN_COOKIE_NAME)] = None,
+) -> dict:
+    if not admin_auth_configured(settings):
+        raise HTTPException(status_code=503, detail="admin credentials are not configured")
+    if not admin_session:
+        raise HTTPException(status_code=401, detail="admin login required")
+    payload = decode_admin_token(settings, admin_session)
+    if not payload:
+        raise HTTPException(status_code=401, detail="admin login required")
+    return payload
 
 
 @app.get("/healthz")
@@ -80,10 +213,109 @@ async def healthz(settings: Annotated[Settings, Depends(settings_dep)]):
     }
 
 
+@app.post("/activity/heartbeat")
+async def activity_heartbeat(
+    payload: ActivityHeartbeatRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        db.record_visitor_activity(
+            conn,
+            visitor_id=payload.visitor_id,
+            now=now,
+            ip_address=client_ip(request),
+            user_agent=user_agent(request),
+            path=payload.path,
+            airport_icao=payload.airport_icao,
+            user_lat=payload.user_lat,
+            user_lon=payload.user_lon,
+        )
+    return {"ok": True, "seen_at": now}
+
+
+@app.post("/activity/submissions")
+async def activity_submission(
+    payload: ActivitySubmissionRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    now = int(time.time())
+    text_hash = hashlib.sha256(payload.text.encode("utf-8")).hexdigest()
+    with db_session(settings.database_path) as conn:
+        submission_id = db.record_submission(
+            conn,
+            now=now,
+            visitor_id=payload.visitor_id,
+            ip_address=client_ip(request),
+            user_agent=user_agent(request),
+            airport_icao=payload.airport_icao,
+            user_lat=payload.user_lat,
+            user_lon=payload.user_lon,
+            window_code=payload.window,
+            mode=payload.mode,
+            text=payload.text,
+            text_hash=text_hash,
+            targets=[target.model_dump() for target in payload.targets],
+        )
+    return {"ok": True, "submission_id": submission_id}
+
+
+@app.post("/admin/login")
+async def admin_login(
+    payload: AdminLoginRequest,
+    response: Response,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    if not admin_auth_configured(settings):
+        raise HTTPException(status_code=503, detail="admin credentials are not configured")
+    if payload.username != settings.admin_username or not verify_admin_password(settings, payload.password):
+        raise HTTPException(status_code=401, detail="invalid admin credentials")
+    response.set_cookie(
+        ADMIN_COOKIE_NAME,
+        sign_admin_token(settings),
+        max_age=settings.admin_session_seconds,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="strict",
+        path="/",
+    )
+    return {"ok": True, "username": settings.admin_username}
+
+
+@app.post("/admin/logout")
+async def admin_logout(response: Response):
+    response.delete_cookie(ADMIN_COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+@app.get("/admin/session")
+async def admin_session(
+    _: Annotated[dict, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    return {"ok": True, "username": settings.admin_username}
+
+
+@app.get("/admin/dashboard")
+async def admin_dashboard(
+    _: Annotated[dict, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        return db.admin_dashboard(
+            conn,
+            now=int(time.time()),
+            active_window_seconds=settings.active_user_window_seconds,
+        )
+
+
 @app.get("/config")
 async def config(settings: Annotated[Settings, Depends(settings_dep)]):
     return {
         "default_airport_icao": settings.default_airport_icao,
+        "buy_me_coffee_url": settings.buy_me_coffee_url,
         "presets": PRESETS,
     }
 

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     admin_password_hash: str | None = Field(default=None, exclude=True)
     admin_session_seconds: int = 12 * 3600
     active_user_window_seconds: int = 90
+    buy_me_coffee_url: str | None = "https://buymeacoffee.com/djodom"
 
     max_aircraft_per_scan: int = 500
     request_timeout_seconds: float = 10.0

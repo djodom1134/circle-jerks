@@ -98,6 +98,7 @@ export interface ScanResponse {
 
 export interface ConfigResponse {
   default_airport_icao: string;
+  buy_me_coffee_url?: string | null;
   presets: Record<string, ToneSliders>;
 }
 
@@ -122,6 +123,97 @@ export interface ComplaintResponse {
   source: "groq" | "fallback" | "cache";
   text: string;
   metadata: Record<string, unknown>;
+}
+
+export interface ActivityAircraft {
+  icao24: string;
+  callsign?: string | null;
+}
+
+export interface ActivityContext {
+  visitor_id: string;
+  airport_icao?: string | null;
+  user_lat?: number | null;
+  user_lon?: number | null;
+}
+
+export interface AdminDashboardResponse {
+  generated_at: number;
+  active_window_seconds: number;
+  summary: {
+    submissions: number;
+    aircraft_reports: number;
+    distinct_aircraft: number;
+    submitters: number;
+    current_users: number;
+    airports: number;
+  };
+  current_users: Array<{
+    visitor_id: string;
+    first_seen: number;
+    last_seen: number;
+    ip_address?: string | null;
+    path?: string | null;
+    airport_icao?: string | null;
+    airport_city?: string | null;
+    user_lat?: number | null;
+    user_lon?: number | null;
+    submission_count: number;
+  }>;
+  recent_submissions: Array<{
+    id: number;
+    created_at: number;
+    visitor_id?: string | null;
+    ip_address?: string | null;
+    airport_icao?: string | null;
+    airport_name?: string | null;
+    airport_city?: string | null;
+    user_lat?: number | null;
+    user_lon?: number | null;
+    window_code?: string | null;
+    mode?: string | null;
+    text: string;
+    text_hash: string;
+    target_count: number;
+    aircraft: Array<ActivityAircraft & { registration?: string | null }>;
+  }>;
+  aircraft_reports: Array<{
+    icao24: string;
+    callsign?: string | null;
+    registration?: string | null;
+    type_icao?: string | null;
+    operator?: string | null;
+    report_count: number;
+    first_reported_at: number;
+    last_reported_at: number;
+  }>;
+  ip_history: Array<{
+    ip_address: string;
+    submissions: number;
+    first_submission_at: number;
+    last_submission_at: number;
+    visitors: number;
+    active_visitors: number;
+  }>;
+  locations: Array<{
+    visitor_id: string;
+    ip_address?: string | null;
+    airport_icao?: string | null;
+    airport_city?: string | null;
+    user_lat: number;
+    user_lon: number;
+    first_seen: number;
+    last_seen: number;
+    submission_count: number;
+  }>;
+  airports: Array<{
+    airport_icao: string;
+    name?: string | null;
+    city?: string | null;
+    submissions: number;
+    submitters: number;
+    last_submission_at: number;
+  }>;
 }
 
 const REQUEST_TIMEOUT_MS = 25000;
@@ -190,6 +282,18 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    throw await errorFromResponse(response);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function adminJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+    ...init,
+    credentials: "include",
+    headers: init?.body ? { "Content-Type": "application/json" } : init?.headers
   });
   if (!response.ok) {
     throw await errorFromResponse(response);
@@ -281,4 +385,53 @@ export function complaintSummary(
     message_preferences: message,
     report_counts: reportCounts
   });
+}
+
+export function recordHeartbeat(context: ActivityContext & { path?: string }) {
+  return postJson<{ ok: boolean; seen_at: number }>("/activity/heartbeat", {
+    visitor_id: context.visitor_id,
+    airport_icao: context.airport_icao,
+    user_lat: context.user_lat,
+    user_lon: context.user_lon,
+    path: context.path ?? window.location.pathname
+  });
+}
+
+export function recordSubmission(
+  context: ActivityContext & {
+    window?: WindowCode;
+    mode?: string;
+    text: string;
+    targets: ActivityAircraft[];
+  }
+) {
+  return postJson<{ ok: boolean; submission_id: number }>("/activity/submissions", {
+    visitor_id: context.visitor_id,
+    airport_icao: context.airport_icao,
+    user_lat: context.user_lat,
+    user_lon: context.user_lon,
+    window: context.window,
+    mode: context.mode,
+    text: context.text,
+    targets: context.targets
+  });
+}
+
+export function adminLogin(username: string, password: string) {
+  return adminJson<{ ok: boolean; username: string }>("/admin/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password })
+  });
+}
+
+export function adminLogout() {
+  return adminJson<{ ok: boolean }>("/admin/logout", { method: "POST" });
+}
+
+export function adminSession() {
+  return adminJson<{ ok: boolean; username: string }>("/admin/session");
+}
+
+export function adminDashboard() {
+  return adminJson<AdminDashboardResponse>("/admin/dashboard");
 }

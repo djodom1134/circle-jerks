@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, ExternalLink, History, LocateFixed, Search, SlidersHorizontal } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, ExternalLink, Github, History, LocateFixed, Search, SlidersHorizontal } from "lucide-react";
+import AboutPage from "./AboutPage";
+import AdminDashboard from "./AdminDashboard";
 import MapView from "./components/MapView";
+import buyMeCoffeeQrUrl from "./assets/buy-me-a-coffee-qr.png";
 import logoUrl from "./assets/circle-jerks-logo.png";
 import {
   aircraftDetail,
@@ -10,6 +13,8 @@ import {
   geocode,
   getConfig,
   nearestAirport,
+  recordHeartbeat,
+  recordSubmission,
   scan,
   searchAirports,
   type Airport,
@@ -29,11 +34,14 @@ import {
   type ComplaintMode,
   type StoredPreferences
 } from "./lib/preferences";
+import { getVisitorId } from "./lib/visitor";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
 const APP_TITLE = "Automated Noise Complaint Generator";
 const APP_TAGLINE = "Small engines, big egos. The 0.0001% who control the sky and cause 80% of the noise pollution.";
 const FAA_ANCIR_URL = "https://ancir.faa.gov/ancir?id=ancir_sc_cat_item&sys_id=6149ade187a1f550b0d987b9cebb357e";
+const BUY_ME_COFFEE_URL = "https://buymeacoffee.com/djodom";
+const GITHUB_ISSUES_URL = "https://github.com/djodom1134/circle-jerks/issues";
 const WINDOWS: Array<{ code: WindowCode; label: string }> = [
   { code: "5m", label: "5 min" },
   { code: "30m", label: "30 min" },
@@ -55,6 +63,9 @@ function storedLocation(preferences: StoredPreferences) {
 }
 
 export default function App() {
+  if (window.location.pathname.startsWith("/admin")) return <AdminDashboard />;
+  if (window.location.pathname.startsWith("/about")) return <AboutPage />;
+
   const [preferences, setPreferences] = useState<StoredPreferences>(() => readPreferences());
   const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [airport, setAirport] = useState<Airport | null>(null);
@@ -149,6 +160,22 @@ export default function App() {
   }, [refreshScan]);
 
   useEffect(() => {
+    if (!scanParams) return;
+    const sendHeartbeat = () => {
+      void recordHeartbeat({
+        visitor_id: getVisitorId(),
+        airport_icao: scanParams.airport_icao,
+        user_lat: scanParams.user_lat,
+        user_lon: scanParams.user_lon,
+        path: window.location.pathname
+      }).catch(() => undefined);
+    };
+    sendHeartbeat();
+    const id = window.setInterval(sendHeartbeat, 30000);
+    return () => window.clearInterval(id);
+  }, [scanParams]);
+
+  useEffect(() => {
     const url = new URL(window.location.href);
     url.searchParams.set("window", windowCode);
     window.history.replaceState(null, "", url.toString());
@@ -177,7 +204,9 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand-lockup">
-          <img className="brand-logo" src={logoUrl} alt="Circle Jerks" />
+          <a className="brand-logo-link" href="/about" aria-label="About Circle Jerks">
+            <img className="brand-logo" src={logoUrl} alt="Circle Jerks" />
+          </a>
           <div className="brand-copy">
             <div className="eyebrow">{airport ? `${airport.city} | Airport: ${airport.icao}` : "Select airport"}</div>
             <h1>{APP_TITLE}</h1>
@@ -249,9 +278,35 @@ export default function App() {
 
         <section className="side-panel">
           <div className="report-card">
-            <div className="eyebrow">A plane over your house?</div>
-            <h2>Log the circler.</h2>
-            <p>Select an offender, tune the complaint, and send it to the airport authority.</p>
+            <div className="report-card-intro">
+              <div className="report-card-copy">
+                <div className="eyebrow">A plane over your house?</div>
+                <h2>Log the circler.</h2>
+                <p>Select an offender, tune the complaint, and send it to the airport authority.</p>
+              </div>
+              <div className="report-card-actions">
+                <a
+                  className="issue-action"
+                  href={GITHUB_ISSUES_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="Report an issue"
+                  aria-label="Report an issue"
+                >
+                  <Github size={18} aria-hidden="true" />
+                </a>
+                <a
+                  className="coffee-qr-action"
+                  href={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="Buy me a coffee"
+                  aria-label="Buy me a coffee"
+                >
+                  <img src={buyMeCoffeeQrUrl} alt="" />
+                </a>
+              </div>
+            </div>
             <button
               className="primary-action"
               onClick={() => document.getElementById("complaint-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
@@ -668,6 +723,18 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
   async function copyText() {
     if (!complaint?.text) return;
     await navigator.clipboard.writeText(complaint.text);
+    if (scanParams) {
+      await recordSubmission({
+        visitor_id: getVisitorId(),
+        airport_icao: scanParams.airport_icao,
+        user_lat: scanParams.user_lat,
+        user_lon: scanParams.user_lon,
+        window: scanParams.window,
+        mode: complaintMode,
+        text: complaint.text,
+        targets: targets.map((target) => ({ icao24: target.icao24, callsign: target.callsign }))
+      }).catch(() => undefined);
+    }
     setDetailStatus("Copied description");
   }
 
