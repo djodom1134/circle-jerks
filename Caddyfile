@@ -1,0 +1,19 @@
+http:// {
+  redir https://{$CADDY_DOMAIN}{uri} permanent
+}
+
+{$CADDY_DOMAIN} {
+  encode zstd gzip
+
+  handle_path /api/* {
+    reverse_proxy api:8000
+  }
+
+  handle /healthz {
+    reverse_proxy api:8000
+  }
+
+  handle {
+    reverse_proxy web:8080
+  }
+}

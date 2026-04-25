@@ -1,0 +1,33 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - fail2ban
+  - sqlite3
+  - ufw
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-circlejerks.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+      X11Forwarding no
+      MaxAuthTries 3
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - systemctl enable --now fail2ban
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+  - mkdir -p /srv/circlejerk/{app,data,redis,caddy/data,caddy/config,backups}
+  - chmod 700 /srv/circlejerk/data /srv/circlejerk/redis /srv/circlejerk/backups
+  - systemctl restart ssh
+
