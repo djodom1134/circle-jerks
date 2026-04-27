@@ -55,6 +55,8 @@ env_quote() {
 }
 
 DIGITAL_OCEAN_API_KEY="$(env_value DIGITAL_OCEAN_API_KEY)"
+CLOUDFLARE_API_TOKEN="$(env_value CLOUDFLARE_API_TOKEN)"
+CLOUDFLARE_API_KEY="$(env_value CLOUDFLARE_API_KEY)"
 CADDY_EMAIL="$(env_value CADDY_EMAIL)"
 CADDY_DOMAIN="$(env_value CADDY_DOMAIN)"
 GROQ_API_KEY="$(env_value GROQ_API_KEY)"
@@ -137,6 +139,14 @@ fi
 
 domain="${CADDY_DOMAIN:-circlejerks.live}"
 app_secret="${APP_SECRET:-$(openssl rand -hex 32)}"
+cloudflare_token="${CLOUDFLARE_API_TOKEN:-${CLOUDFLARE_API_KEY:-}}"
+
+if [ -n "$cloudflare_token" ]; then
+  CLOUDFLARE_API_TOKEN="$cloudflare_token" \
+    python3 scripts/upsert_cloudflare_dns.py --domain "$domain" --origin-ip "$reserved_ip"
+else
+  echo "CLOUDFLARE_API_TOKEN is not set; skipping automatic DNS upsert for $domain" >&2
+fi
 
 echo "Waiting for SSH on $reserved_ip ..."
 for _ in $(seq 1 60); do
@@ -186,6 +196,9 @@ scp -i "$SSH_PRIVATE_KEY_PATH" -o StrictHostKeyChecking=accept-new "$tmp_env" ro
 rm -f "$tmp_env"
 
 "${SSH[@]}" root@"$reserved_ip" "cd $ROOT/app && ./scripts/deploy_droplet.sh"
+
+./scripts/check_production_health.sh "$domain"
+./scripts/provision_uptime_checks.sh "$domain"
 
 echo "reserved_ip=$reserved_ip"
 echo "url=https://$domain"
