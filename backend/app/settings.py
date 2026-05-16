@@ -10,6 +10,7 @@ class Settings(BaseSettings):
         env_prefix="CIRCLEJERK_",
         env_file=(".env", "../.env"),
         extra="ignore",
+        populate_by_name=True,
     )
 
     app_name: str = "Circle Jerks: Automated Noise Complaint Generator"
@@ -37,16 +38,23 @@ class Settings(BaseSettings):
     opensky_historical_backfill_interval_seconds: int = 60
     opensky_historical_cache_seconds: int = 7200
 
-    live_source_priority: str = "adsb_lol,opensky,airplanes_live"
+    live_source_priority: str = "adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky"
     live_poll_interval_seconds: int = 30
     live_source_timeout_seconds: float = 12.0
     live_source_backoff_seconds: int = 60
     live_source_rate_limit_backoff_seconds: int = 300
     live_source_max_radius_nm: float = 250.0
+    live_source_max_staleness_seconds: int = 90
+    live_source_min_aircraft_for_freshness: int = 3
     bbox_merge_distance_nm: float = 5.0
 
     adsb_lol_base_url: str = "https://api.adsb.lol"
     airplanes_live_base_url: str = "https://api.airplanes.live"
+    adsb_fi_base_url: str = "https://opendata.adsb.fi/api"
+    self_hosted_feeder_base_url: str | None = Field(default=None, validation_alias="SELF_HOSTED_FEEDER_BASE_URL")
+    self_hosted_feeder_path_style: Literal["lat_lon_dist", "point"] = "lat_lon_dist"
+    adsbx_rapidapi_key: str | None = Field(default=None, validation_alias="ADSBX_RAPIDAPI_KEY")
+    adsbx_rapidapi_host: str = "adsbexchange-com1.p.rapidapi.com"
 
     default_airport_icao: str = "KBJC"
     monitor_ttl_seconds: int = 900
@@ -73,13 +81,22 @@ class Settings(BaseSettings):
         return None, None
 
     def live_source_priority_list(self) -> list[str]:
-        allowed = {"adsb_lol", "opensky", "airplanes_live"}
+        allowed = {"adsb_lol", "opensky", "airplanes_live", "adsb_fi", "adsbx", "self_hosted"}
         sources = [
             source.strip().lower().replace("-", "_")
             for source in self.live_source_priority.split(",")
             if source.strip()
         ]
-        return [source for source in sources if source in allowed]
+        ordered: list[str] = []
+        for source in sources:
+            if source not in allowed or source in ordered:
+                continue
+            if source == "adsbx" and not self.adsbx_rapidapi_key:
+                continue
+            if source == "self_hosted" and not self.self_hosted_feeder_base_url:
+                continue
+            ordered.append(source)
+        return ordered
 
 
 @lru_cache

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, ExternalLink, Github, History, LocateFixed, Search, SlidersHorizontal } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Github, History, LocateFixed, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import MapView from "./components/MapView";
@@ -42,6 +42,7 @@ const APP_TAGLINE = "Small engines, big egos. The 0.0001% who control the sky an
 const FAA_ANCIR_URL = "https://ancir.faa.gov/ancir?id=ancir_sc_cat_item&sys_id=6149ade187a1f550b0d987b9cebb357e";
 const BUY_ME_COFFEE_URL = "https://buymeacoffee.com/djodom";
 const GITHUB_ISSUES_URL = "https://github.com/djodom1134/circle-jerks/issues";
+const SITE_URL = "https://circlejerks.live";
 const WINDOWS: Array<{ code: WindowCode; label: string }> = [
   { code: "5m", label: "5 min" },
   { code: "30m", label: "30 min" },
@@ -329,6 +330,7 @@ export default function App() {
         offender={selected}
         offenders={scanData?.offenders ?? []}
         scanParams={scanParams}
+        scanData={scanData}
         config={config}
         formUrl={formUrl}
         preferences={preferences}
@@ -596,10 +598,386 @@ function localSingleComplaint(
   return parts.join(" ");
 }
 
-function DetailPanel({ offender, offenders, scanParams, config, formUrl, preferences, onPreferencesChange }: {
+function loadCanvasImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+function drawWrappedText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines: number
+) {
+  const words = text.replace(/\s+/g, " ").trim().split(" ");
+  let line = "";
+  let lines = 0;
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (ctx.measureText(next).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      y += lineHeight;
+      lines += 1;
+      line = word;
+      if (lines >= maxLines) {
+        ctx.fillText("...", x, y);
+        return y + lineHeight;
+      }
+    } else {
+      line = next;
+    }
+  }
+  if (line && lines < maxLines) {
+    ctx.fillText(line, x, y);
+    y += lineHeight;
+  }
+  return y;
+}
+
+function captureMapSnapshot() {
+  const mapElement = document.querySelector(".openlayers-map") as HTMLElement | null;
+  if (!mapElement) return null;
+  const canvases = Array.from(mapElement.querySelectorAll("canvas"))
+    .filter((canvas) => canvas.width > 0 && canvas.height > 0);
+  if (canvases.length === 0) return null;
+
+  const mapRect = mapElement.getBoundingClientRect();
+  const output = document.createElement("canvas");
+  output.width = 1000;
+  output.height = 520;
+  const ctx = output.getContext("2d");
+  if (!ctx || mapRect.width <= 0 || mapRect.height <= 0) return null;
+  ctx.fillStyle = "#e8eaed";
+  ctx.fillRect(0, 0, output.width, output.height);
+
+  try {
+    for (const canvas of canvases) {
+      const rect = canvas.getBoundingClientRect();
+      const style = window.getComputedStyle(canvas);
+      const x = ((rect.left - mapRect.left) / mapRect.width) * output.width;
+      const y = ((rect.top - mapRect.top) / mapRect.height) * output.height;
+      const width = (rect.width / mapRect.width) * output.width;
+      const height = (rect.height / mapRect.height) * output.height;
+      ctx.globalAlpha = Number(style.opacity || 1);
+      ctx.drawImage(canvas, x, y, width, height);
+    }
+    ctx.globalAlpha = 1;
+    output.toDataURL("image/png");
+    return output;
+  } catch {
+    return null;
+  }
+}
+
+function reportCountLabel(count: number) {
+  return count === 1 ? "1 report" : `${count} reports`;
+}
+
+function targetDisplay(target: Offender) {
+  return target.callsign || target.icao24.toUpperCase();
+}
+
+function shareStats(targets: Offender[], reportCounts: Record<string, number>) {
+  return targets.map((target) => ({
+    label: targetDisplay(target),
+    icao24: target.icao24,
+    count: (target.report_count ?? 0) + (reportCounts[target.icao24] ?? 0)
+  }));
+}
+
+function defaultShareText(
+  complaintText: string,
+  scanData: ScanResponse | null,
+  scanParams: Pick<ScanParams, "airport_icao" | "window">
+) {
+  const counters = scanData?.counters;
+  const airportLabel = scanData?.airport
+    ? `${scanData.airport.city} (${scanData.airport.icao})`
+    : scanParams.airport_icao;
+  const stats = counters
+    ? `${counters.circles} circles, ${counters.touch_and_gos} touch-and-gos, ${counters.passes} passes over my location, and ${counters.offenders_active_now} circling now`
+    : "repeated aircraft activity";
+  return [
+    "Share on social media!",
+    "",
+    `Circle Jerks tracked ${stats} near ${airportLabel} in the selected ${scanParams.window} window.`,
+    "",
+    complaintText,
+    "",
+    `See what is circling overhead: ${SITE_URL}`
+  ].join("\n");
+}
+
+async function makeShareImage(input: {
+  text: string;
+  scanData: ScanResponse | null;
+  scanParams: Pick<ScanParams, "airport_icao" | "window">;
+  targetStats: Array<{ label: string; icao24: string; count: number }>;
+}) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1080;
+  canvas.height = 1350;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  const counters = input.scanData?.counters;
+  const airportLabel = input.scanData?.airport
+    ? `${input.scanData.airport.city} (${input.scanData.airport.icao})`
+    : input.scanParams.airport_icao;
+  const logo = await loadCanvasImage(logoUrl);
+  const map = captureMapSnapshot();
+
+  ctx.fillStyle = "#f6f4ef";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const gradient = ctx.createLinearGradient(0, 0, canvas.width, 360);
+  gradient.addColorStop(0, "#ffffff");
+  gradient.addColorStop(1, "#eef5fa");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, 360);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#e6e1d6";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(46, 44, 988, 1260, 24);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(134, 128, 56, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(logo, 78, 72, 112, 112);
+  ctx.restore();
+
+  ctx.fillStyle = "#1b3a6b";
+  ctx.font = "800 42px Inter, Arial, sans-serif";
+  ctx.fillText("Circle Jerks", 216, 116);
+  ctx.fillStyle = "#6b7185";
+  ctx.font = "700 24px Inter, Arial, sans-serif";
+  ctx.fillText(SITE_URL, 216, 154);
+  ctx.fillStyle = "#d64b2c";
+  ctx.font = "900 32px Inter, Arial, sans-serif";
+  ctx.fillText("Share on social media!", 710, 122);
+
+  ctx.fillStyle = "#6b7185";
+  ctx.font = "800 20px Inter, Arial, sans-serif";
+  ctx.fillText(`${airportLabel} | ${input.scanParams.window}`, 66, 218);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(66, 244, 948, 480, 18);
+  ctx.clip();
+  if (map) {
+    ctx.drawImage(map, 66, 244, 948, 480);
+  } else {
+    ctx.fillStyle = "#e8eaed";
+    ctx.fillRect(66, 244, 948, 480);
+    ctx.fillStyle = "#1b3a6b";
+    ctx.font = "800 28px Inter, Arial, sans-serif";
+    ctx.fillText("Map snapshot unavailable in this browser.", 120, 456);
+    ctx.fillStyle = "#6b7185";
+    ctx.font = "600 20px Inter, Arial, sans-serif";
+    ctx.fillText("The live map is available at circlejerks.live.", 120, 494);
+  }
+  ctx.restore();
+
+  const statRows = [
+    ["Circles", counters?.circles ?? 0],
+    ["T&Gs", counters?.touch_and_gos ?? 0],
+    ["Passes", counters?.passes ?? 0],
+    ["Circling now", counters?.offenders_active_now ?? 0]
+  ];
+  statRows.forEach(([label, value], index) => {
+    const x = 66 + index * 237;
+    ctx.fillStyle = "#fbfaf6";
+    ctx.strokeStyle = "#e6e1d6";
+    ctx.beginPath();
+    ctx.roundRect(x, 748, 214, 118, 16);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#1b3a6b";
+    ctx.font = "900 42px Inter, Arial, sans-serif";
+    ctx.fillText(String(value), x + 22, 804);
+    ctx.fillStyle = "#6b7185";
+    ctx.font = "800 20px Inter, Arial, sans-serif";
+    ctx.fillText(String(label), x + 22, 838);
+  });
+
+  ctx.fillStyle = "#1f2330";
+  ctx.font = "800 24px Inter, Arial, sans-serif";
+  ctx.fillText("Repeat offender reports", 66, 918);
+  ctx.fillStyle = "#6b7185";
+  ctx.font = "700 20px Inter, Arial, sans-serif";
+  const statText = input.targetStats.length > 0
+    ? input.targetStats.slice(0, 6).map((row) => `${row.label}: ${reportCountLabel(row.count)}`).join("  |  ")
+    : "No repeat offender stats yet.";
+  drawWrappedText(ctx, statText, 66, 952, 948, 28, 2);
+
+  ctx.fillStyle = "#1f2330";
+  ctx.font = "800 24px Inter, Arial, sans-serif";
+  ctx.fillText("Description", 66, 1034);
+  ctx.fillStyle = "#253044";
+  ctx.font = "500 25px Inter, Arial, sans-serif";
+  drawWrappedText(ctx, input.text, 66, 1074, 948, 34, 5);
+
+  ctx.fillStyle = "#d64b2c";
+  ctx.font = "900 28px Inter, Arial, sans-serif";
+  ctx.fillText("Document the noise. Share the pattern. Push for change.", 66, 1258);
+
+  return canvas.toDataURL("image/png");
+}
+
+function ShareComposerModal({
+  complaintText,
+  scanData,
+  scanParams,
+  targets,
+  reportCounts,
+  onClose
+}: {
+  complaintText: string;
+  scanData: ScanResponse | null;
+  scanParams: Pick<ScanParams, "airport_icao" | "window">;
+  targets: Offender[];
+  reportCounts: Record<string, number>;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState(() => defaultShareText(complaintText, scanData, scanParams));
+  const [approved, setApproved] = useState(false);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState("Rendering share card");
+  const targetStats = useMemo(() => shareStats(targets, reportCounts), [targets, reportCounts]);
+
+  useEffect(() => {
+    setText(defaultShareText(complaintText, scanData, scanParams));
+    setApproved(false);
+  }, [complaintText, scanData?.airport.icao, scanParams.airport_icao, scanParams.window]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("Rendering share card");
+    makeShareImage({ text, scanData, scanParams, targetStats })
+      .then((result) => {
+        if (cancelled) return;
+        setImageUrl(result);
+        setStatus(result ? "Preview ready" : "Preview unavailable");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setImageUrl(null);
+        setStatus("Preview unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [text, scanData, scanParams, targetStats]);
+
+  async function copyShareText() {
+    await navigator.clipboard.writeText(text);
+    setStatus("Post text copied");
+  }
+
+  function downloadImage() {
+    if (!imageUrl) return;
+    const link = document.createElement("a");
+    link.href = imageUrl;
+    link.download = "circle-jerks-social-post.png";
+    link.click();
+    setStatus("Image downloaded");
+  }
+
+  async function shareViaDevice() {
+    if (!navigator.share) {
+      await copyShareText();
+      setStatus("Web Share is unavailable; copied text instead");
+      return;
+    }
+    if (imageUrl) {
+      const blob = await fetch(imageUrl).then((response) => response.blob());
+      const file = new File([blob], "circle-jerks-social-post.png", { type: "image/png" });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ title: "Circle Jerks", text, url: SITE_URL, files: [file] });
+        setStatus("Share sheet opened");
+        return;
+      }
+    }
+    await navigator.share({ title: "Circle Jerks", text, url: SITE_URL });
+    setStatus("Share sheet opened");
+  }
+
+  return (
+    <div className="share-modal-backdrop" role="dialog" aria-modal="true" aria-label="Social media share composer">
+      <div className="share-modal">
+        <div className="share-modal-header">
+          <div>
+            <div className="eyebrow">Share on social media</div>
+            <h2>Preview and approve your post</h2>
+          </div>
+          <button className="share-close" onClick={onClose} aria-label="Close share composer"><X size={18} /></button>
+        </div>
+
+        <div className="share-modal-grid">
+          <div className="share-preview">
+            {imageUrl ? <img src={imageUrl} alt="Generated Circle Jerks social post preview" /> : <div>{status}</div>}
+          </div>
+          <div className="share-editor">
+            <div className="section-title">Post text</div>
+            <textarea
+              value={text}
+              onChange={(event) => {
+                setText(event.target.value);
+                setApproved(false);
+              }}
+            />
+            <div className="section-title offender-share-title">Repeat offender report counts</div>
+            <div className="share-offender-stats">
+              {targetStats.length === 0 && <span>No selected offenders.</span>}
+              {targetStats.map((row) => (
+                <span key={row.icao24}>
+                  <strong>{row.label}</strong>
+                  {reportCountLabel(row.count)}
+                </span>
+              ))}
+            </div>
+            <div className="share-status">{approved ? "Approved for posting" : status}</div>
+            <div className="share-actions">
+              <button onClick={() => { setApproved(true); setStatus("Approved for posting"); }}>
+                <CheckCircle2 size={17} /> Approve text
+              </button>
+              <button onClick={copyShareText} disabled={!approved}>
+                <Copy size={17} /> Copy text
+              </button>
+              <button onClick={downloadImage} disabled={!approved || !imageUrl}>
+                <Download size={17} /> Download image
+              </button>
+              <button className="external-action" onClick={shareViaDevice} disabled={!approved}>
+                <Share2 size={17} /> Share
+              </button>
+            </div>
+            <p className="share-note">
+              Facebook, Instagram, and Snapchat do not reliably allow web apps to prefill image posts.
+              Use the copied text and downloaded image, or the device share sheet where supported.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailPanel({ offender, offenders, scanParams, scanData, config, formUrl, preferences, onPreferencesChange }: {
   offender: Offender | null;
   offenders: Offender[];
   scanParams: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window"> | null;
+  scanData: ScanResponse | null;
   config: ConfigResponse | null;
   formUrl: string | null;
   preferences: StoredPreferences;
@@ -611,6 +989,7 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
   const reportCounts = preferences.report_counts;
   const [complaint, setComplaint] = useState<GeneratedComplaint | null>(null);
   const [detailStatus, setDetailStatus] = useState("Select an offender");
+  const [shareOpen, setShareOpen] = useState(false);
   const targets = useMemo(() => {
     if (complaintMode === "all") return offenders;
     return offender ? [offender] : [];
@@ -758,6 +1137,9 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
           )}
         </div>
         <div className="detail-actions">
+          <button onClick={() => setShareOpen(true)} disabled={!complaint?.text || targets.length === 0}>
+            <Share2 size={17} /> Share
+          </button>
           <button onClick={copyText} disabled={!complaint?.text}><Copy size={17} /> Copy</button>
           <button onClick={markReported} disabled={targets.length === 0}>
             <CheckCircle2 size={17} /> Mark reported
@@ -770,6 +1152,17 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
           </button>
         </div>
       </div>
+
+      {shareOpen && complaint && scanParams && (
+        <ShareComposerModal
+          complaintText={complaint.text}
+          scanData={scanData}
+          scanParams={scanParams}
+          targets={targets}
+          reportCounts={reportCounts}
+          onClose={() => setShareOpen(false)}
+        />
+      )}
 
       <div className="mode-switch" role="group" aria-label="Complaint target">
         <button className={complaintMode === "one" ? "active" : ""} onClick={() => updateComplaintMode("one")}>

@@ -38,6 +38,8 @@ ORIGIN_STRONG_CACHE_SECONDS = 24 * 3600
 ORIGIN_WEAK_CACHE_SECONDS = 10 * 60
 ORIGIN_CITY_CACHE_SECONDS = 7 * 24 * 3600
 ELEVATION_CACHE_SECONDS = 7 * 24 * 3600
+LIVE_DETECTOR_LOOKBACK_SECONDS = 45 * 60
+BBOX_FILTER_PADDING_DEGREES = 0.03
 
 
 def monitor_for_params(params: ScanParams, airport: Airport) -> dict:
@@ -130,10 +132,20 @@ async def run_detectors_for_monitor(
         pass_ceiling_ft=monitor["pass_ceiling_ft"],
     )
     written = 0
-    detector_start = start_ts or int(datetime.now(timezone.utc).timestamp()) - settings.track_ttl_seconds
-    detector_end = end_ts
+    now = int(datetime.now(timezone.utc).timestamp())
+    detector_end = end_ts or now
+    max_lookback = max(
+        LIVE_DETECTOR_LOOKBACK_SECONDS,
+        settings.opensky_historical_limit_seconds if settings.opensky_historical_enabled else 0,
+    )
+    detector_start = max(
+        start_ts if start_ts is not None else detector_end - LIVE_DETECTOR_LOOKBACK_SECONDS,
+        detector_end - max_lookback,
+    )
     for icao24 in await store.list_aircraft():
         track = await store.get_track(icao24, detector_start - 20 * 60, detector_end)
+        if not track_intersects_bbox(track, tuple(monitor["bbox"])):
+            continue
         events = (
             detect_events_over_period(track, airport, runways, params, start_ts, end_ts)
             if start_ts is not None and end_ts is not None
@@ -144,6 +156,21 @@ async def run_detectors_for_monitor(
                 await store.add_event(monitor["hash"], event, settings.event_ttl_seconds)
                 written += 1
     return written
+
+
+def track_intersects_bbox(track: list[dict], bbox: tuple[float, float, float, float]) -> bool:
+    lamin, lomin, lamax, lomax = bbox
+    lamin -= BBOX_FILTER_PADDING_DEGREES
+    lomin -= BBOX_FILTER_PADDING_DEGREES
+    lamax += BBOX_FILTER_PADDING_DEGREES
+    lomax += BBOX_FILTER_PADDING_DEGREES
+    return any(
+        sample.get("lat") is not None
+        and sample.get("lon") is not None
+        and lamin <= float(sample["lat"]) <= lamax
+        and lomin <= float(sample["lon"]) <= lomax
+        for sample in track
+    )
 
 
 def historical_snapshot_times(window: WindowRange, settings: Settings) -> list[int]:
@@ -190,6 +217,14 @@ async def backfill_historical_states(
             "available": False,
             "reason": "OpenSky authentication is required for historical state vectors.",
         }
+    historical_unavailable = await store.get_cache("opensky_historical_unavailable")
+    if isinstance(historical_unavailable, dict):
+        return {
+            **base,
+            "enabled": True,
+            "available": False,
+            "reason": historical_unavailable.get("reason") or "OpenSky historical state vectors are unavailable.",
+        }
     if await store.get_cache("opensky_auth_failed"):
         return {
             **base,
@@ -231,6 +266,7 @@ async def backfill_historical_states(
             "complete_for_requested_window": False,
         }
 
+    missing.sort(key=lambda row: row[0], reverse=True)
     selected = missing[: max(0, settings.opensky_historical_snapshots_per_scan)]
     if not selected:
         return {
@@ -247,6 +283,7 @@ async def backfill_historical_states(
     fetched = 0
     states_seen = 0
     retry_after_seconds = None
+    historical_error_reason = None
     opensky = OpenSkyClient(settings)
     try:
         for ts, cache_key in selected:
@@ -285,6 +322,38 @@ async def backfill_historical_states(
             {"retry_after_seconds": exc.retry_after_seconds},
             min(exc.retry_after_seconds, settings.opensky_historical_cache_seconds),
         )
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status in {401, 403}:
+            reason = "OpenSky rejected historical state vector access."
+            await store.set_cache(
+                "opensky_historical_unavailable",
+                {"status": status, "reason": reason},
+                settings.opensky_historical_cache_seconds,
+            )
+            return {
+                **base,
+                "enabled": True,
+                "available": False,
+                "reason": reason,
+                "requested": len(timestamps),
+                "fetched": fetched,
+                "skipped_cached": skipped_cached,
+                "remaining": len(missing),
+            }
+        await store.set_cache(
+            f"opensky_state_backoff:{monitor['hash']}",
+            {"status": status},
+            settings.opensky_historical_backfill_interval_seconds,
+        )
+        historical_error_reason = "OpenSky historical state vectors failed."
+    except httpx.HTTPError:
+        await store.set_cache(
+            f"opensky_state_backoff:{monitor['hash']}",
+            {"reason": "http_error"},
+            settings.opensky_historical_backfill_interval_seconds,
+        )
+        historical_error_reason = "OpenSky historical state vectors failed."
     finally:
         await opensky.close()
 
@@ -304,6 +373,12 @@ async def backfill_historical_states(
             "backing_off": True,
             "retry_after_seconds": retry_after_seconds,
             "reason": "OpenSky historical state vectors are rate limited.",
+        })
+    if historical_error_reason is not None:
+        result.update({
+            "available": False,
+            "backing_off": True,
+            "reason": historical_error_reason,
         })
     return result
 
@@ -334,9 +409,9 @@ async def build_scan_response(
         offender_rows(events, window, settings.timezone),
         window,
     )
-    tracks = await tracks_for_response(store, offenders, window)
-    if not tracks:
-        tracks = await recent_tracks_for_response(store, window)
+    offender_tracks = await tracks_for_response(store, offenders, window)
+    recent_tracks = await recent_tracks_for_response(store, window, tuple(monitor["bbox"]))
+    tracks = merge_track_rows(offender_tracks, recent_tracks)
     active_now = await active_aircraft_count(store, airport, p)
     return {
         "monitor_hash": key,
@@ -395,27 +470,52 @@ async def tracks_for_response(store: Store, offenders: list[dict], window: Windo
     return rows
 
 
-async def recent_tracks_for_response(store: Store, window: WindowRange, limit: int = 40) -> list[dict]:
+def merge_track_rows(primary: list[dict], secondary: list[dict], limit: int = 40) -> list[dict]:
+    rows = []
+    seen = set()
+    for group in (primary, secondary):
+        for row in group:
+            icao24 = row["icao24"].lower()
+            if icao24 in seen:
+                continue
+            rows.append(row)
+            seen.add(icao24)
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+async def recent_tracks_for_response(
+    store: Store,
+    window: WindowRange,
+    bbox: tuple[float, float, float, float] | None = None,
+    limit: int = 40,
+) -> list[dict]:
     rows = []
     for icao24 in await store.list_aircraft():
         full_track = await store.get_track(icao24, window.start_ts, window.end_ts)
-        if len(full_track) < 2:
+        if not full_track:
+            continue
+        if bbox is not None and not track_intersects_bbox(full_track, bbox):
             continue
         callsign = next((sample.get("callsign") for sample in reversed(full_track) if sample.get("callsign")), icao24.upper())
+        samples = [
+            {
+                "timestamp": sample["timestamp"],
+                "lat": sample["lat"],
+                "lon": sample["lon"],
+                "heading_deg": sample.get("heading_deg"),
+                "in_window": True,
+            }
+            for sample in full_track
+            if sample.get("lat") is not None and sample.get("lon") is not None
+        ]
+        if not samples:
+            continue
         rows.append({
             "icao24": icao24,
             "callsign": callsign,
-            "samples": [
-                {
-                    "timestamp": sample["timestamp"],
-                    "lat": sample["lat"],
-                    "lon": sample["lon"],
-                    "heading_deg": sample.get("heading_deg"),
-                    "in_window": True,
-                }
-                for sample in full_track
-                if sample.get("lat") is not None and sample.get("lon") is not None
-            ],
+            "samples": samples,
         })
     return sorted(
         rows,
@@ -436,8 +536,13 @@ async def enrich_offenders(
     enriched = []
     for offender in offenders:
         track = await store.get_track(offender["icao24"], window.start_ts - 1800, window.end_ts + 1800)
+        report_row = conn.execute(
+            "SELECT report_count FROM aircraft_report_counts WHERE icao24 = ?",
+            (offender["icao24"],),
+        ).fetchone()
         enriched.append({
             **offender,
+            "report_count": int(report_row["report_count"]) if report_row else 0,
             **altitude_over_user_summary(track, airport, params, window),
             **await resolve_origin(store, settings, conn, offender["icao24"], track),
         })

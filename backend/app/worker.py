@@ -103,7 +103,16 @@ async def run_forever() -> None:
                 if monitors:
                     with db_session(settings.database_path) as conn:
                         for group in monitor_poll_groups(monitors, settings.bbox_merge_distance_nm):
-                            result = await live_sources.states_bbox(tuple(group["bbox"]))
+                            try:
+                                result = await live_sources.states_bbox(tuple(group["bbox"]))
+                            except LiveSourceUnavailable as exc:
+                                logger.warning(
+                                    "group_monitors=%s airports=%s no_live_source=%s",
+                                    len(group["monitors"]),
+                                    group.get("airport_icaos") or [group["airport_icao"]],
+                                    exc,
+                                )
+                                continue
                             states = result.states
                             for sample in states[: settings.max_aircraft_per_scan]:
                                 await store.add_track_sample(sample["icao24"], sample, settings.track_ttl_seconds)
@@ -117,6 +126,12 @@ async def run_forever() -> None:
                                     written,
                                     len(group["monitors"]),
                                 )
+                    if monitors:
+                        await store.set_cache(
+                            "live_sources:health",
+                            live_sources.health_snapshot(),
+                            max(60, settings.live_poll_interval_seconds * 4),
+                        )
                 await asyncio.sleep(effective_poll_interval_seconds(settings, live_sources))
             except LiveSourceRateLimited as exc:
                 logger.warning("live sources rate limited; backing off for %ss", exc.retry_after_seconds)

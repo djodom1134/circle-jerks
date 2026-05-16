@@ -351,7 +351,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       target: containerRef.current,
       interactions: defaultInteractions({ mouseWheelZoom: false }),
       layers: [
-        new TileLayer({ source: new OSM() }),
+        new TileLayer({ source: new OSM({ crossOrigin: "anonymous" }) }),
         vectorLayer,
         aircraftLayer
       ],

@@ -42,6 +42,7 @@ export interface Offender {
   origin_airport_icao?: string | null;
   origin_label?: string | null;
   origin_source?: string | null;
+  report_count?: number;
 }
 
 export interface TrackSample {

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -16,7 +17,8 @@ from pydantic import BaseModel, Field
 
 from . import db
 from .db import db_session
-from .domain import ScanParams
+from .detectors import pass_geometry_key
+from .domain import ScanParams, monitor_hash
 from .llm import MessagePreferences
 from .services import build_description, build_scan_response, build_summary_description
 from .settings import Settings, get_settings
@@ -91,6 +93,39 @@ class ActivitySubmissionRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=400)
+
+
+DEMO_USER_LAT = 40.1672
+DEMO_USER_LON = -105.1019
+DEMO_AIRCRAFT = [
+    {
+        "icao24": "a4c1d8",
+        "callsign": "N4052F",
+        "registration": "N4052F",
+        "type_icao": "C172",
+        "type_description": "Cessna 172 Skyhawk",
+        "operator": "Demo flight school",
+        "report_count": 17,
+    },
+    {
+        "icao24": "a5a764",
+        "callsign": "N4632F",
+        "registration": "N4632F",
+        "type_icao": "PA28",
+        "type_description": "Piper PA-28 Cherokee",
+        "operator": "Demo flight school",
+        "report_count": 9,
+    },
+    {
+        "icao24": "a9ce3a",
+        "callsign": "N7306E",
+        "registration": "N7306E",
+        "type_icao": "C152",
+        "type_description": "Cessna 152",
+        "operator": "Demo flight school",
+        "report_count": 5,
+    },
+]
 
 
 def settings_dep() -> Settings:
@@ -213,6 +248,269 @@ async def healthz(settings: Annotated[Settings, Depends(settings_dep)]):
     }
 
 
+def _demo_aircraft_for_airport(airport_icao: str) -> list[dict]:
+    prefix = {"KLMO": "a", "KBJC": "b", "KBDU": "c"}.get(airport_icao.upper(), "d")
+    return [
+        {
+            **aircraft,
+            "icao24": f"{prefix}{aircraft['icao24'][1:]}".lower(),
+        }
+        for aircraft in DEMO_AIRCRAFT
+    ]
+
+
+def _demo_track_sample(airport: db.Airport, aircraft: dict, timestamp: int, lat: float, lon: float, agl: int, heading: float) -> dict:
+    return {
+        "icao24": aircraft["icao24"],
+        "callsign": aircraft["callsign"],
+        "timestamp": timestamp,
+        "lat": round(lat, 6),
+        "lon": round(lon, 6),
+        "geo_altitude_ft": airport.elevation_ft + agl,
+        "velocity_kt": 86,
+        "vertical_rate_fpm": 0,
+        "heading_deg": round(heading % 360, 1),
+        "on_ground": False,
+    }
+
+
+def _demo_track_samples(airport: db.Airport, aircraft: dict, index: int, now: int, user_lat: float, user_lon: float) -> list[dict]:
+    samples = []
+    loop_count = 14
+    lat_radius = 0.012 + index * 0.003
+    lon_radius = 0.018 + index * 0.004
+    phase = index * 0.85
+    for step in range(loop_count):
+        angle = (step / loop_count * math.tau) + phase
+        samples.append(_demo_track_sample(
+            airport,
+            aircraft,
+            now - 3300 + step * 70 + index * 11,
+            airport.lat + math.sin(angle) * lat_radius,
+            airport.lon + math.cos(angle) * lon_radius,
+            850 + index * 130,
+            math.degrees(angle) + 90,
+        ))
+
+    if index < 2:
+        pass_points = [
+            (now - 260 + index * 20, user_lat - 0.018, user_lon - 0.010, 970 + index * 120, 25),
+            (now - 205 + index * 20, user_lat - 0.002, user_lon - 0.001, 900 + index * 110, 25),
+            (now - 150 + index * 20, user_lat + 0.016, user_lon + 0.008, 940 + index * 120, 25),
+        ]
+        for timestamp, lat, lon, agl, heading in pass_points:
+            samples.append(_demo_track_sample(airport, aircraft, timestamp, lat, lon, agl, heading))
+
+    recent_points = [
+        (now - 125, airport.lat + 0.006 + index * 0.002, airport.lon - 0.015, 780 + index * 120, 70),
+        (now - 70, airport.lat + 0.011 + index * 0.002, airport.lon - 0.004, 800 + index * 120, 88),
+        (now - 20, airport.lat + 0.009 + index * 0.002, airport.lon + 0.010, 820 + index * 120, 110),
+    ]
+    for timestamp, lat, lon, agl, heading in recent_points:
+        samples.append(_demo_track_sample(airport, aircraft, timestamp, lat, lon, agl, heading))
+    return sorted(samples, key=lambda sample: sample["timestamp"])
+
+
+def _demo_events(airport_icao: str, params: ScanParams, aircraft_rows: list[dict], now: int) -> list[dict]:
+    seed_bucket = now // 300
+    pass_key = pass_geometry_key(params)
+    first, second, third = aircraft_rows
+    return [
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-circle-1",
+            "type": "circle",
+            "icao24": first["icao24"],
+            "callsign": first["callsign"],
+            "timestamp": now - 245,
+            "airport_icao": airport_icao,
+            "avg_loop_radius_nm": 1.4,
+            "path_nm": 4.6,
+            "closure_nm": 0.3,
+            "turn_degrees": 382,
+            "turn_direction": "left",
+            "min_altitude_ft_agl": 860,
+        },
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-pass-1",
+            "type": "pass_over_user",
+            "icao24": first["icao24"],
+            "callsign": first["callsign"],
+            "timestamp": now - 185,
+            "airport_icao": airport_icao,
+            "min_altitude_ft_agl": 900,
+            "avg_altitude_ft_agl": 930,
+            "closest_horizontal_nm": 0.04,
+            "pass_times": [now - 185],
+            "pass_geometry_key": pass_key,
+            "pass_radius_nm": params.pass_radius_nm,
+        },
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-touch-and-go-1",
+            "type": "touch_and_go",
+            "icao24": first["icao24"],
+            "callsign": first["callsign"],
+            "timestamp": now - 105,
+            "airport_icao": airport_icao,
+            "runway_used": "active",
+            "min_altitude_ft_agl": 35,
+        },
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-pass-2",
+            "type": "pass_over_user",
+            "icao24": second["icao24"],
+            "callsign": second["callsign"],
+            "timestamp": now - 255,
+            "airport_icao": airport_icao,
+            "min_altitude_ft_agl": 1010,
+            "avg_altitude_ft_agl": 1060,
+            "closest_horizontal_nm": 0.07,
+            "pass_times": [now - 255],
+            "pass_geometry_key": pass_key,
+            "pass_radius_nm": params.pass_radius_nm,
+        },
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-circle-2",
+            "type": "circle",
+            "icao24": second["icao24"],
+            "callsign": second["callsign"],
+            "timestamp": now - 195,
+            "airport_icao": airport_icao,
+            "avg_loop_radius_nm": 1.8,
+            "path_nm": 5.1,
+            "closure_nm": 0.5,
+            "turn_degrees": 405,
+            "turn_direction": "right",
+            "min_altitude_ft_agl": 990,
+        },
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-touch-and-go-2",
+            "type": "touch_and_go",
+            "icao24": second["icao24"],
+            "callsign": second["callsign"],
+            "timestamp": now - 75,
+            "airport_icao": airport_icao,
+            "runway_used": "active",
+            "min_altitude_ft_agl": 42,
+        },
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-low-approach-1",
+            "type": "low_approach",
+            "icao24": third["icao24"],
+            "callsign": third["callsign"],
+            "timestamp": now - 220,
+            "airport_icao": airport_icao,
+            "runway_used": "active",
+            "min_altitude_ft_agl": 90,
+        },
+        {
+            "id": f"demo-{airport_icao}-{seed_bucket}-circle-3",
+            "type": "circle",
+            "icao24": third["icao24"],
+            "callsign": third["callsign"],
+            "timestamp": now - 140,
+            "airport_icao": airport_icao,
+            "avg_loop_radius_nm": 1.2,
+            "path_nm": 3.8,
+            "closure_nm": 0.4,
+            "turn_degrees": 350,
+            "turn_direction": "left",
+            "min_altitude_ft_agl": 1120,
+        },
+    ]
+
+
+@app.post("/dev/seed_demo")
+async def seed_demo(
+    store: Annotated[Store, Depends(store_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    airport_icao: str | None = None,
+    user_lat: float = DEMO_USER_LAT,
+    user_lon: float = DEMO_USER_LON,
+):
+    if settings.environment == "production":
+        raise HTTPException(status_code=404, detail="not found")
+
+    airport_codes = [airport_icao.upper()] if airport_icao else [settings.default_airport_icao.upper(), "KLMO", "KBDU"]
+    now = int(time.time())
+    seeded = []
+    with db_session(settings.database_path) as conn:
+        for code in dict.fromkeys(airport_codes):
+            airport = db.get_airport(conn, code)
+            if not airport:
+                continue
+            params = ScanParams(
+                airport_icao=airport.icao,
+                user_lat=user_lat,
+                user_lon=user_lon,
+                ring_nm=8,
+                pass_radius_nm=0.5,
+                pass_ceiling_ft=5000,
+                window="1h",
+            ).normalized()
+            key = monitor_hash(params)
+            aircraft_rows = _demo_aircraft_for_airport(airport.icao)
+            for index, aircraft in enumerate(aircraft_rows):
+                conn.execute(
+                    """
+                    INSERT INTO aircraft_cache
+                    (icao24, registration, type_icao, type_description, operator, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(icao24) DO UPDATE SET
+                      registration = excluded.registration,
+                      type_icao = excluded.type_icao,
+                      type_description = excluded.type_description,
+                      operator = excluded.operator,
+                      last_updated = excluded.last_updated
+                    """,
+                    (
+                        aircraft["icao24"],
+                        aircraft["registration"],
+                        aircraft["type_icao"],
+                        aircraft["type_description"],
+                        aircraft["operator"],
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO aircraft_report_counts
+                    (icao24, callsign, registration, report_count, first_reported_at, last_reported_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(icao24) DO UPDATE SET
+                      callsign = excluded.callsign,
+                      registration = excluded.registration,
+                      report_count = excluded.report_count,
+                      last_reported_at = excluded.last_reported_at
+                    """,
+                    (
+                        aircraft["icao24"],
+                        aircraft["callsign"],
+                        aircraft["registration"],
+                        aircraft["report_count"],
+                        now - 7 * 24 * 3600,
+                        now - 600 + index * 90,
+                    ),
+                )
+                for sample in _demo_track_samples(airport, aircraft, index, now, user_lat, user_lon):
+                    await store.add_track_sample(aircraft["icao24"], sample, settings.track_ttl_seconds)
+
+            events = _demo_events(airport.icao, params, aircraft_rows, now)
+            for event in events:
+                await store.add_event(key, event, settings.event_ttl_seconds)
+            seeded.append({
+                "airport_icao": airport.icao,
+                "monitor_hash": key,
+                "aircraft": len(aircraft_rows),
+                "events": len(events),
+            })
+    return {
+        "ok": True,
+        "message": "Seeded local demo aircraft, events, tracks, and repeat-report counts.",
+        "user_location": {"lat": user_lat, "lon": user_lon},
+        "seeded": seeded,
+    }
+
+
 @app.post("/activity/heartbeat")
 async def activity_heartbeat(
     payload: ActivityHeartbeatRequest,
@@ -309,6 +607,27 @@ async def admin_dashboard(
             now=int(time.time()),
             active_window_seconds=settings.active_user_window_seconds,
         )
+
+
+@app.get("/admin/live_sources")
+async def admin_live_sources(
+    _: Annotated[dict, Depends(require_admin)],
+    store: Annotated[Store, Depends(store_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    snapshot = await store.get_cache("live_sources:health")
+    return {
+        "priority": settings.live_source_priority_list(),
+        "configured_priority": settings.live_source_priority,
+        "max_staleness_seconds": settings.live_source_max_staleness_seconds,
+        "poll_interval_seconds": settings.live_poll_interval_seconds,
+        "paid_sources_configured": {
+            "adsbx": bool(settings.adsbx_rapidapi_key),
+            "self_hosted": bool(settings.self_hosted_feeder_base_url),
+            "opensky_auth": all(settings.opensky_credentials()),
+        },
+        "sources": snapshot if isinstance(snapshot, dict) else {},
+    }
 
 
 @app.get("/config")

@@ -12,18 +12,32 @@ from app.detectors import closest_over_user_rows, detect_circles, detect_passes,
 from app.domain import ScanParams, local_time_label, location_hash, monitor_hash
 from app.geo import Point, distance_nm, heading_delta_deg
 from app.llm import ComplaintContext, MessagePreferences, deterministic_description
-from app.live_sources import LiveStateClient, bbox_center_radius_nm, parse_readsb_aircraft
+from app.live_sources import (
+    LiveSourceStale,
+    LiveStateClient,
+    SourceHealth,
+    bbox_center_radius_nm,
+    build_live_source_client,
+    parse_readsb_aircraft,
+    readsb_payload_aircraft,
+    readsb_payload_now,
+)
 from app.scoring import offender_rows, score_events
 from app.services import (
     active_aircraft_count,
     airport_label_for_icao,
     altitude_over_user_summary,
+    backfill_historical_states,
     build_summary_description,
     events_for_current_scan,
     historical_snapshot_times,
+    merge_track_rows,
+    monitor_for_params,
     opensky_track_path_samples,
     origin_from_ground_track,
     origin_from_track,
+    recent_tracks_for_response,
+    tracks_for_response,
 )
 from app.settings import Settings
 from app.store import MemoryStore
@@ -465,6 +479,16 @@ def test_bbox_center_radius_covers_box():
     assert radius_nm > 7
 
 
+def _stub_live_state_client(settings: Settings, clients: dict) -> LiveStateClient:
+    client = LiveStateClient.__new__(LiveStateClient)
+    client.settings = settings
+    client.backoff_until = {}
+    client.last_source = None
+    client.clients = clients
+    client.health = {source: SourceHealth() for source in clients}
+    return client
+
+
 async def test_live_state_client_falls_back_to_next_provider():
     class FailingClient:
         async def states_bbox(self, bbox):
@@ -475,18 +499,105 @@ async def test_live_state_client_falls_back_to_next_provider():
             return [{"icao24": "abc123", "timestamp": 1000, "lat": 40.1, "lon": -105.1}]
 
     settings = Settings(live_source_priority="adsb_lol,airplanes_live")
-    client = LiveStateClient.__new__(LiveStateClient)
-    client.settings = settings
-    client.backoff_until = {}
-    client.last_source = None
-    client.clients = {
-        "adsb_lol": FailingClient(),
-        "airplanes_live": WorkingClient(),
-    }
+    client = _stub_live_state_client(
+        settings,
+        {"adsb_lol": FailingClient(), "airplanes_live": WorkingClient()},
+    )
 
     result = await client.states_bbox((40.0, -105.2, 40.2, -105.0))
     assert result.source == "airplanes_live"
     assert result.states[0]["icao24"] == "abc123"
+    assert client.health["airplanes_live"].success_count == 1
+    assert client.health["adsb_lol"].error_count == 1
+    assert client.health["adsb_lol"].last_error is not None
+
+
+async def test_live_state_client_falls_through_on_stale_payload():
+    class StaleClient:
+        source = "adsb_lol"
+
+        async def states_bbox(self, bbox):
+            raise LiveSourceStale("adsb_lol", 240)
+
+    class FreshClient:
+        async def states_bbox(self, bbox):
+            return [{"icao24": "abc123", "timestamp": 1000, "lat": 40.1, "lon": -105.1}]
+
+    settings = Settings(live_source_priority="adsb_lol,airplanes_live")
+    client = _stub_live_state_client(
+        settings,
+        {"adsb_lol": StaleClient(), "airplanes_live": FreshClient()},
+    )
+
+    result = await client.states_bbox((40.0, -105.2, 40.2, -105.0))
+    assert result.source == "airplanes_live"
+    assert client.health["adsb_lol"].error_count == 1
+    assert "stale" in (client.health["adsb_lol"].last_error or "")
+    assert client.backoff_until["adsb_lol"] > 0
+
+
+def test_priority_list_includes_paid_sources_only_when_configured():
+    base = Settings(live_source_priority="adsbx,self_hosted,adsb_lol,adsb_fi,opensky")
+    assert base.live_source_priority_list() == ["adsb_lol", "adsb_fi", "opensky"]
+
+    with_paid = Settings(
+        live_source_priority="adsbx,self_hosted,adsb_lol,adsb_fi,opensky",
+        adsbx_rapidapi_key="test-key",
+        self_hosted_feeder_base_url="http://feeder.local:8080",
+    )
+    assert with_paid.live_source_priority_list() == [
+        "adsbx",
+        "self_hosted",
+        "adsb_lol",
+        "adsb_fi",
+        "opensky",
+    ]
+
+
+def test_priority_list_drops_unknown_and_dedupes():
+    settings = Settings(live_source_priority="bogus,adsb_lol,adsb_lol,opensky")
+    assert settings.live_source_priority_list() == ["adsb_lol", "opensky"]
+
+
+def test_build_live_source_client_returns_none_when_paid_creds_missing():
+    settings = Settings()
+    assert build_live_source_client("adsbx", settings) is None
+    assert build_live_source_client("self_hosted", settings) is None
+    assert build_live_source_client("adsb_fi", settings) is not None
+
+
+def test_build_live_source_client_constructs_adsbx_with_rapidapi_headers():
+    settings = Settings(adsbx_rapidapi_key="abc")
+    client = build_live_source_client("adsbx", settings)
+    assert client is not None
+    assert client.source == "adsbx"
+    assert client.extra_headers["x-rapidapi-key"] == "abc"
+    assert client.extra_headers["x-rapidapi-host"].endswith("rapidapi.com")
+    assert client.path_style == "lat_lon_dist"
+
+
+def test_readsb_payload_aircraft_handles_alternate_keys():
+    assert readsb_payload_aircraft({"ac": [{"hex": "a"}]}) == [{"hex": "a"}]
+    assert readsb_payload_aircraft({"aircraft": [{"hex": "b"}]}) == [{"hex": "b"}]
+    assert readsb_payload_aircraft({"states": [{"hex": "c"}]}) == [{"hex": "c"}]
+    assert readsb_payload_aircraft({}) == []
+
+
+def test_readsb_payload_now_handles_seconds_and_ms():
+    assert readsb_payload_now({"now": 1700000000}) == 1700000000.0
+    assert readsb_payload_now({"now": 1700000000123}) == 1700000000.123
+
+
+def test_live_state_client_health_snapshot_marks_unavailable_sources():
+    settings = Settings(live_source_priority="adsb_lol,adsb_fi")
+    client = _stub_live_state_client(
+        settings,
+        {"adsb_lol": object(), "adsb_fi": object()},
+    )
+    snapshot = client.health_snapshot()
+    assert set(snapshot) == {"adsb_lol", "adsb_fi"}
+    assert snapshot["adsb_lol"]["available"] is True
+    assert snapshot["adsb_lol"]["backoff_remaining_seconds"] == 0
 
 
 def test_historical_snapshots_are_capped_to_opensky_one_hour_limit():
@@ -499,6 +610,96 @@ def test_historical_snapshots_are_capped_to_opensky_one_hour_limit():
     timestamps = historical_snapshot_times(window, settings)
     assert timestamps[0] >= window.end_ts - 3600
     assert timestamps[-1] <= window.end_ts
+
+
+async def test_historical_backfill_handles_forbidden_opensky(monkeypatch):
+    class ForbiddenOpenSky:
+        def __init__(self, settings):
+            self.auth_failed = False
+
+        async def states_bbox(self, bbox, at_ts=None):
+            request = httpx.Request("GET", "https://opensky.example/states")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError("forbidden", request=request, response=response)
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("app.services.OpenSkyClient", ForbiddenOpenSky)
+    store = MemoryStore()
+    settings = Settings(
+        opensky_historical_enabled=True,
+        opensky_client_id="client",
+        opensky_client_secret="secret",
+        opensky_historical_step_seconds=600,
+    )
+    params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.0)
+    window = resolve_window("1h", "America/Denver", datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC")))
+
+    result = await backfill_historical_states(store, settings, monitor_for_params(params, airport()), window)
+
+    assert result["enabled"] is True
+    assert result["available"] is False
+    assert "rejected" in result["reason"]
+
+
+async def test_historical_backfill_fetches_newest_missing_snapshots_first(monkeypatch):
+    calls = []
+
+    class RecordingOpenSky:
+        def __init__(self, settings):
+            self.auth_failed = False
+
+        async def states_bbox(self, bbox, at_ts=None):
+            calls.append(at_ts)
+            return []
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("app.services.OpenSkyClient", RecordingOpenSky)
+    store = MemoryStore()
+    settings = Settings(
+        opensky_historical_enabled=True,
+        opensky_client_id="client",
+        opensky_client_secret="secret",
+        opensky_historical_step_seconds=600,
+        opensky_historical_snapshots_per_scan=3,
+    )
+    params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.0)
+    window = resolve_window("1h", "America/Denver", datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC")))
+
+    result = await backfill_historical_states(store, settings, monitor_for_params(params, airport()), window)
+
+    assert result["fetched"] == 3
+    assert calls == [window.end_ts, window.end_ts - 600, window.end_ts - 1200]
+
+
+async def test_track_response_merges_non_offender_recent_tracks():
+    store = MemoryStore()
+    window = resolve_window("1h", "America/Denver", datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC")))
+    ap = airport()
+    offender = sample(window.end_ts - 40, ap.lat + 0.01, ap.lon - 0.01, 900, "abc123")
+    non_offender = sample(window.end_ts - 30, ap.lat + 0.02, ap.lon - 0.02, 900, "def456")
+    non_offender["callsign"] = "N456CD"
+    await store.add_track_sample("abc123", offender, 3600)
+    await store.add_track_sample("def456", non_offender, 3600)
+
+    offender_tracks = await tracks_for_response(
+        store,
+        [{"icao24": "abc123", "callsign": "N123AB"}],
+        window,
+    )
+    recent_tracks = await recent_tracks_for_response(
+        store,
+        window,
+        (ap.lat - 0.1, ap.lon - 0.1, ap.lat + 0.1, ap.lon + 0.1),
+    )
+
+    rows = merge_track_rows(offender_tracks, recent_tracks)
+
+    assert [row["icao24"] for row in rows] == ["abc123", "def456"]
+    assert rows[1]["callsign"] == "N456CD"
 
 
 def test_deterministic_description_respects_message_preferences():
