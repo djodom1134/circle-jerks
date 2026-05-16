@@ -442,6 +442,30 @@ def record_submission(
     return submission_id
 
 
+def top_repeat_offenders(conn: sqlite3.Connection, *, min_reports: int, limit: int) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+          r.icao24,
+          r.callsign,
+          COALESCE(r.registration, c.registration) AS registration,
+          c.type_icao,
+          c.type_description,
+          c.operator,
+          r.report_count,
+          r.first_reported_at,
+          r.last_reported_at
+        FROM aircraft_report_counts r
+        LEFT JOIN aircraft_cache c ON c.icao24 = r.icao24
+        WHERE r.report_count >= ?
+        ORDER BY r.report_count DESC, r.last_reported_at DESC
+        LIMIT ?
+        """,
+        (max(1, int(min_reports)), max(1, int(limit))),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _aircraft_for_submissions(conn: sqlite3.Connection, submission_ids: list[int]) -> dict[int, list[dict]]:
     if not submission_ids:
         return {}

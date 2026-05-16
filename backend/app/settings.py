@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     admin_session_seconds: int = 12 * 3600
     active_user_window_seconds: int = 90
     buy_me_coffee_url: str | None = "https://buymeacoffee.com/djodom"
+    bmc_api_token: str | None = Field(default=None, validation_alias="BMC_API_TOKEN")
+    bmc_api_base_url: str = "https://developers.buymeacoffee.com/api/v1"
+    bmc_cache_seconds: int = 300
+    repeat_offender_min_reports: int = 2
+    repeat_offender_limit: int = 12
 
     max_aircraft_per_scan: int = 500
     request_timeout_seconds: float = 10.0

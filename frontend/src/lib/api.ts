@@ -306,6 +306,46 @@ export function getConfig() {
   return getJson<ConfigResponse>("/config");
 }
 
+export interface SponsorsResponse {
+  configured: boolean;
+  support_url?: string | null;
+  source: string;
+  supporters: Array<{
+    name: string;
+    coffees: number;
+    message?: string | null;
+    supported_at?: string | null;
+  }>;
+  total?: number;
+  error?: string;
+}
+
+export function getSponsors() {
+  return getJson<SponsorsResponse>("/sponsors");
+}
+
+export interface RepeatOffender {
+  icao24: string;
+  callsign?: string | null;
+  registration?: string | null;
+  type_icao?: string | null;
+  type_description?: string | null;
+  operator?: string | null;
+  report_count: number;
+  first_reported_at: number;
+  last_reported_at: number;
+}
+
+export interface RepeatOffendersResponse {
+  min_reports: number;
+  count: number;
+  aircraft: RepeatOffender[];
+}
+
+export function getRepeatOffenders(limit = 12) {
+  return getJson<RepeatOffendersResponse>(`/repeat_offenders?limit=${limit}`);
+}
+
 export function nearestAirport(lat: number, lon: number) {
   return getJson<Airport>(`/airports/nearest?lat=${lat}&lon=${lon}`);
 }

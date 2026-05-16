@@ -639,6 +639,74 @@ async def config(settings: Annotated[Settings, Depends(settings_dep)]):
     }
 
 
+@app.get("/sponsors")
+async def sponsors(
+    store: Annotated[Store, Depends(store_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    cache_key = "sponsors:bmc"
+    cached = await store.get_cache(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    payload = {
+        "configured": bool(settings.bmc_api_token),
+        "support_url": settings.buy_me_coffee_url,
+        "supporters": [],
+        "source": "buymeacoffee",
+    }
+    if not settings.bmc_api_token:
+        await store.set_cache(cache_key, payload, settings.bmc_cache_seconds)
+        return payload
+    try:
+        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+            response = await client.get(
+                f"{settings.bmc_api_base_url}/supporters",
+                headers={
+                    "Authorization": f"Bearer {settings.bmc_api_token}",
+                    "Accept": "application/json",
+                },
+                params={"per_page": 24},
+            )
+        if response.status_code == 200:
+            data = response.json()
+            rows = data.get("data") or []
+            payload["supporters"] = [
+                {
+                    "name": (row.get("supporter_name") or row.get("payer_name") or "Anonymous").strip() or "Anonymous",
+                    "coffees": int(row.get("support_coffees") or 0),
+                    "message": (row.get("support_note") or row.get("message") or "").strip() or None,
+                    "supported_at": row.get("support_created_on") or row.get("created_at"),
+                }
+                for row in rows
+            ]
+            payload["total"] = data.get("total") or len(payload["supporters"])
+        else:
+            payload["error"] = f"BMC API returned {response.status_code}"
+    except httpx.HTTPError as exc:
+        payload["error"] = f"BMC API unreachable: {type(exc).__name__}"
+    await store.set_cache(cache_key, payload, settings.bmc_cache_seconds)
+    return payload
+
+
+@app.get("/repeat_offenders")
+async def repeat_offenders(
+    settings: Annotated[Settings, Depends(settings_dep)],
+    min_reports: int = 2,
+    limit: int = 12,
+):
+    with db_session(settings.database_path) as conn:
+        rows = db.top_repeat_offenders(
+            conn,
+            min_reports=max(settings.repeat_offender_min_reports, int(min_reports)),
+            limit=min(settings.repeat_offender_limit, max(1, int(limit))),
+        )
+    return {
+        "min_reports": max(settings.repeat_offender_min_reports, int(min_reports)),
+        "count": len(rows),
+        "aircraft": rows,
+    }
+
+
 @app.get("/geocode")
 async def geocode(
     q: Annotated[str, Query(min_length=2, max_length=200)],

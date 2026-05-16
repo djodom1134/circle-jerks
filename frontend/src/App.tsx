@@ -12,6 +12,8 @@ import {
   complaintForm,
   geocode,
   getConfig,
+  getRepeatOffenders,
+  getSponsors,
   nearestAirport,
   recordHeartbeat,
   recordSubmission,
@@ -22,8 +24,10 @@ import {
   type ConfigResponse,
   type MessagePreferences,
   type Offender,
+  type RepeatOffender,
   type ScanParams,
   type ScanResponse,
+  type SponsorsResponse,
   type ToneSliders,
   type WindowCode
 } from "./lib/api";
@@ -79,6 +83,9 @@ export default function App() {
   const [airportQuery, setAirportQuery] = useState("");
   const [airportResults, setAirportResults] = useState<Airport[]>([]);
   const [addressQuery, setAddressQuery] = useState("");
+  const [autoZoom, setAutoZoom] = useState(true);
+  const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
+  const [repeatOffenders, setRepeatOffenders] = useState<RepeatOffender[]>([]);
 
   useEffect(() => {
     getConfig()
@@ -90,6 +97,26 @@ export default function App() {
       })
       .catch((error) => setStatus(`Configuration failed: ${error.message}`));
   }, [preferences.airport_icao]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const [s, r] = await Promise.all([getSponsors(), getRepeatOffenders(12)]);
+        if (cancelled) return;
+        setSponsors(s);
+        setRepeatOffenders(r.aircraft);
+      } catch {
+        // silent: these are decorative sections
+      }
+    }
+    refresh();
+    const handle = window.setInterval(refresh, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, []);
 
   useEffect(() => {
     if (!navigator.geolocation || preferences.user_lat !== undefined || preferences.user_lon !== undefined) return;
@@ -268,11 +295,20 @@ export default function App() {
 
       <main className="main-grid">
         <section className="map-panel">
+          <label className="map-toggle" title="When on, the map re-centers on activity. Uncheck to pan and zoom freely.">
+            <input
+              type="checkbox"
+              checked={autoZoom}
+              onChange={(event) => setAutoZoom(event.target.checked)}
+            />
+            <span>Auto-zoom</span>
+          </label>
           <MapView
             airport={airport}
             userLocation={userLocation}
             scanData={scanData}
             selectedIcao24={selected?.icao24}
+            autoZoom={autoZoom}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
           />
         </section>
@@ -336,7 +372,130 @@ export default function App() {
         preferences={preferences}
         onPreferencesChange={setPreferences}
       />
+
+      <RepeatOffendersSection
+        offenders={repeatOffenders}
+        airportIcao={airport?.icao}
+        onSelect={(icao24) => {
+          const match = scanData?.offenders.find((row) => row.icao24 === icao24);
+          if (match) {
+            setSelected(match);
+            document.getElementById("complaint-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        }}
+      />
+
+      <SponsorsSection sponsors={sponsors} supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL} />
     </div>
+  );
+}
+
+function RepeatOffendersSection({
+  offenders,
+  airportIcao,
+  onSelect,
+}: {
+  offenders: RepeatOffender[];
+  airportIcao?: string;
+  onSelect: (icao24: string) => void;
+}) {
+  if (offenders.length === 0) {
+    return (
+      <section className="bottom-section repeat-offenders empty">
+        <h2>Repeat offenders</h2>
+        <p>
+          No aircraft has been reported more than once {airportIcao ? `near ${airportIcao}` : "yet"}. As complaints
+          come in, the worst repeat offenders will show up here.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section className="bottom-section repeat-offenders">
+      <header>
+        <h2>Repeat offenders</h2>
+        <p>Aircraft reported by users more than once — the most-complained-about planes in the area.</p>
+      </header>
+      <div className="offender-grid">
+        {offenders.map((row) => {
+          const label =
+            row.registration || row.callsign?.trim() || row.icao24.toUpperCase();
+          const subtitle = [row.type_description || row.type_icao, row.operator]
+            .filter(Boolean)
+            .join(" · ");
+          return (
+            <button
+              key={row.icao24}
+              className="offender-card"
+              onClick={() => onSelect(row.icao24)}
+              title="Open complaint panel for this aircraft (if currently active)"
+            >
+              <div className="offender-card-head">
+                <strong>{label}</strong>
+                <span className="offender-count">{row.report_count}×</span>
+              </div>
+              {subtitle && <div className="offender-subtitle">{subtitle}</div>}
+              <div className="offender-meta">
+                last reported {formatLocalTime(row.last_reported_at)}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function SponsorsSection({
+  sponsors,
+  supportUrl,
+}: {
+  sponsors: SponsorsResponse | null;
+  supportUrl: string;
+}) {
+  const supporters = sponsors?.supporters ?? [];
+  return (
+    <section className="bottom-section sponsors">
+      <header>
+        <h2>Thanks to our supporters</h2>
+        <p>
+          Circle Jerks is free to use. Server bills, ADS-B feeds, and AI calls are paid for by{" "}
+          <a href={supportUrl} target="_blank" rel="noreferrer">
+            generous folks
+          </a>{" "}
+          on Buy Me a Coffee.
+        </p>
+      </header>
+      {supporters.length === 0 ? (
+        <div className="sponsors-empty">
+          <p>
+            {sponsors?.configured
+              ? "No supporters yet — be the first!"
+              : "Be the first to chip in for the next month of feeds."}
+          </p>
+          <a className="sponsor-cta" href={supportUrl} target="_blank" rel="noreferrer">
+            Buy me a coffee
+          </a>
+        </div>
+      ) : (
+        <>
+          <div className="sponsor-grid">
+            {supporters.slice(0, 24).map((supporter, idx) => (
+              <div key={`${supporter.name}-${idx}`} className="sponsor-card">
+                <div className="sponsor-name">{supporter.name}</div>
+                <div className="sponsor-coffees">
+                  {supporter.coffees}× {supporter.coffees === 1 ? "coffee" : "coffees"}
+                </div>
+                {supporter.message && <div className="sponsor-message">"{supporter.message}"</div>}
+              </div>
+            ))}
+          </div>
+          <a className="sponsor-cta" href={supportUrl} target="_blank" rel="noreferrer">
+            Become a supporter
+          </a>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -1237,11 +1396,41 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
         </div>
 
         <div className="complaint-output">
-          <div className="section-title">Ready to submit complaint</div>
+          <div className="complaint-output-header">
+            <div className="section-title">Ready to submit complaint</div>
+            <CopyButton text={complaint?.text} />
+          </div>
           <div className="output-status">{detailStatus}</div>
           <p>{complaint?.text ?? "Complaint text will appear here after an offender is selected."}</p>
         </div>
       </div>
     </section>
+  );
+}
+
+function CopyButton({ text }: { text?: string | null }) {
+  const [copied, setCopied] = useState(false);
+  const disabled = !text || !text.trim();
+  return (
+    <button
+      type="button"
+      className={`copy-button${copied ? " copied" : ""}`}
+      disabled={disabled}
+      onClick={async () => {
+        if (!text) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1800);
+        } catch {
+          // ignore — older browsers without clipboard access
+        }
+      }}
+      title="Copy complaint text"
+      aria-label="Copy complaint text"
+    >
+      <Copy size={14} aria-hidden="true" />
+      <span>{copied ? "Copied!" : "Copy"}</span>
+    </button>
   );
 }

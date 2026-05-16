@@ -20,6 +20,7 @@ interface Props {
   userLocation: { lat: number; lon: number } | null;
   scanData?: ScanResponse | null;
   selectedIcao24?: string | null;
+  autoZoom?: boolean;
   onPickLocation: (lat: number, lon: number) => void;
 }
 
@@ -280,7 +281,7 @@ function styleForFeature(feature: Feature) {
   });
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, onPickLocation }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, onPickLocation }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
@@ -432,13 +433,14 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   }, [mapReady]);
 
   useEffect(() => {
+    if (!autoZoom) return;
     const map = mapRef.current;
     if (!map || !airport || !userLocation) return;
     const extent = activityExtent(airport, userLocation, scanData);
     if (extent && extent.every(Number.isFinite)) {
       map.getView().fit(extent, { padding: [60, 60, 60, 60], maxZoom: 12, duration: 450 });
     }
-  }, [airport, userLocation, scanData]);
+  }, [airport, userLocation, scanData, autoZoom]);
 
   return <div className="map openlayers-map" ref={containerRef} />;
 }

@@ -1509,3 +1509,192 @@ input[type="range"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* --- Auto-zoom toggle on the map --- */
+.map-toggle {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px 7px 9px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  cursor: pointer;
+  user-select: none;
+}
+.map-toggle input {
+  accent-color: var(--accent, #1b3a6b);
+  cursor: pointer;
+}
+.map-toggle:hover {
+  background: #ffffff;
+}
+
+/* --- Copy button on the 'Ready to submit complaint' header --- */
+.complaint-output-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.complaint-output-header .section-title {
+  margin-bottom: 0;
+}
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: var(--text);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+.copy-button:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+.copy-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.copy-button.copied {
+  background: #2ea84c;
+  border-color: #2ea84c;
+  color: #ffffff;
+}
+
+/* --- Bottom-of-page sections --- */
+.bottom-section {
+  padding: 28px clamp(16px, 4vw, 56px);
+  border-top: 8px solid #f3f0e7;
+  background: #ffffff;
+}
+.bottom-section header {
+  margin-bottom: 16px;
+}
+.bottom-section h2 {
+  font-size: 22px;
+  margin: 0 0 4px;
+  color: var(--text);
+}
+.bottom-section header p,
+.bottom-section.empty p {
+  color: var(--muted);
+  margin: 0;
+}
+
+/* --- Repeat offenders --- */
+.repeat-offenders .offender-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.repeat-offenders .offender-card {
+  text-align: left;
+  background: #fbfaf6;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 120ms, transform 120ms, box-shadow 120ms;
+}
+.repeat-offenders .offender-card:hover {
+  border-color: #d64b2c;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+}
+.repeat-offenders .offender-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.repeat-offenders .offender-card-head strong {
+  font-size: 15px;
+  color: var(--text);
+}
+.repeat-offenders .offender-count {
+  font-weight: 800;
+  font-size: 14px;
+  color: #d64b2c;
+}
+.repeat-offenders .offender-subtitle {
+  font-size: 12px;
+  color: var(--muted);
+}
+.repeat-offenders .offender-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* --- Sponsors --- */
+.sponsors header a {
+  color: #d64b2c;
+  font-weight: 700;
+}
+.sponsors .sponsor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.sponsors .sponsor-card {
+  padding: 11px 13px;
+  background: #fbfaf6;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.sponsors .sponsor-name {
+  font-weight: 700;
+  color: var(--text);
+}
+.sponsors .sponsor-coffees {
+  font-size: 12px;
+  color: var(--muted);
+}
+.sponsors .sponsor-message {
+  margin-top: 4px;
+  font-style: italic;
+  font-size: 12px;
+  color: var(--muted);
+}
+.sponsors .sponsors-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.sponsors .sponsor-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: #ffdd00;
+  color: #1b1a17;
+  font-weight: 800;
+  text-decoration: none;
+  border-radius: 8px;
+  border: 1px solid #1b1a17;
+  transition: transform 120ms;
+}
+.sponsors .sponsor-cta:hover {
+  transform: translateY(-1px);
+}
