@@ -26,6 +26,7 @@ services:
       OPENSKY_CLIENT_SECRET: ${OPENSKY_CLIENT_SECRET:-}
       ADSBX_RAPIDAPI_KEY: ${ADSBX_RAPIDAPI_KEY:-}
       SELF_HOSTED_FEEDER_BASE_URL: ${SELF_HOSTED_FEEDER_BASE_URL:-}
+      FLIGHTAWARE: ${FLIGHTAWARE:-}
     volumes:
       - /srv/circlejerk/data:/app/data
     healthcheck:
@@ -64,6 +65,7 @@ services:
       OPENSKY_CLIENT_SECRET: ${OPENSKY_CLIENT_SECRET:-}
       ADSBX_RAPIDAPI_KEY: ${ADSBX_RAPIDAPI_KEY:-}
       SELF_HOSTED_FEEDER_BASE_URL: ${SELF_HOSTED_FEEDER_BASE_URL:-}
+      FLIGHTAWARE: ${FLIGHTAWARE:-}
     volumes:
       - /srv/circlejerk/data:/app/data
     depends_on:

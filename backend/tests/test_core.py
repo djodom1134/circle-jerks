@@ -12,6 +12,7 @@ from app.detectors import closest_over_user_rows, detect_circles, detect_passes,
 from app.domain import ScanParams, local_time_label, location_hash, monitor_hash
 from app.geo import Point, distance_nm, heading_delta_deg
 from app.llm import ComplaintContext, MessagePreferences, deterministic_description
+from app.flightaware import FlightAwareClient
 from app.live_sources import (
     LiveSourceStale,
     LiveStateClient,
@@ -537,7 +538,11 @@ async def test_live_state_client_falls_through_on_stale_payload():
 
 
 def test_priority_list_includes_paid_sources_only_when_configured():
-    base = Settings(live_source_priority="adsbx,self_hosted,adsb_lol,adsb_fi,opensky")
+    base = Settings(
+        live_source_priority="adsbx,self_hosted,adsb_lol,adsb_fi,opensky",
+        adsbx_rapidapi_key=None,
+        self_hosted_feeder_base_url=None,
+    )
     assert base.live_source_priority_list() == ["adsb_lol", "adsb_fi", "opensky"]
 
     with_paid = Settings(
@@ -560,7 +565,7 @@ def test_priority_list_drops_unknown_and_dedupes():
 
 
 def test_build_live_source_client_returns_none_when_paid_creds_missing():
-    settings = Settings()
+    settings = Settings(adsbx_rapidapi_key=None, self_hosted_feeder_base_url=None)
     assert build_live_source_client("adsbx", settings) is None
     assert build_live_source_client("self_hosted", settings) is None
     assert build_live_source_client("adsb_fi", settings) is not None
@@ -751,3 +756,122 @@ def test_score_suppresses_bonuses_for_short_window():
     assert event_counts(events)["passes"] == 1
     assert score_events(events, short, "America/Denver") == 3
     assert score_events(events, long, "America/Denver") > 3
+
+
+def test_flightaware_ident_classifier_filters_n_numbers():
+    assert FlightAwareClient.looks_like_airline_ident("UAL640") is True
+    assert FlightAwareClient.looks_like_airline_ident("SWA3533") is True
+    assert FlightAwareClient.looks_like_airline_ident("DAL1234") is True
+    assert FlightAwareClient.looks_like_airline_ident("KOW106") is True
+    assert FlightAwareClient.looks_like_airline_ident("N123VM") is False
+    assert FlightAwareClient.looks_like_airline_ident("N4052F") is False
+    assert FlightAwareClient.looks_like_airline_ident("") is False
+    assert FlightAwareClient.looks_like_airline_ident(None) is False
+    assert FlightAwareClient.looks_like_airline_ident("garbage!") is False
+
+
+def test_flightaware_pick_flight_prefers_window_overlap():
+    flights = [
+        {  # earlier flight, doesn't overlap
+            "origin": {"code_icao": "KSEA", "city": "Seattle"},
+            "actual_off": "2026-05-16T10:00:00Z",
+            "actual_on": "2026-05-16T12:00:00Z",
+        },
+        {  # current flight, overlaps the observation window
+            "origin": {"code_icao": "KSFO", "city": "San Francisco"},
+            "actual_off": "2026-05-16T16:00:00Z",
+            "actual_on": "2026-05-16T18:00:00Z",
+        },
+    ]
+    # Observation 17:00-17:30 UTC
+    first_seen = int(datetime(2026, 5, 16, 17, 0, tzinfo=ZoneInfo("UTC")).timestamp())
+    last_seen = int(datetime(2026, 5, 16, 17, 30, tzinfo=ZoneInfo("UTC")).timestamp())
+    chosen = FlightAwareClient.pick_flight(flights, first_seen, last_seen)
+    assert chosen is flights[1]
+
+
+async def test_flightaware_origin_for_callsign_happy_path():
+    settings = Settings(flightaware_api_key="fake-key")
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(
+            200,
+            json={
+                "flights": [
+                    {
+                        "ident": "UAL640",
+                        "origin": {"code_icao": "CYVR", "code_iata": "YVR", "city": "Vancouver", "name": "YVR"},
+                        "destination": {"code_icao": "KDEN", "city": "Denver"},
+                        "actual_off": "2026-05-16T16:00:00Z",
+                        "actual_on": None,
+                    }
+                ]
+            },
+        )
+
+    fa = FlightAwareClient(settings)
+    fa.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        first_seen = int(datetime(2026, 5, 16, 17, 0, tzinfo=ZoneInfo("UTC")).timestamp())
+        last_seen = first_seen + 1800
+        result = await fa.origin_for_callsign("UAL640", first_seen, last_seen)
+    finally:
+        await fa.close()
+
+    assert result is not None
+    assert result["origin_airport_icao"] == "CYVR"
+    assert result["origin_city"] == "Vancouver"
+    assert result["origin_label"] == "Vancouver (CYVR)"
+    assert result["origin_source"] == "flightaware_aeroapi"
+    assert result["origin_confidence"] == "high"
+    assert captured["headers"]["x-apikey"] == "fake-key"
+    assert "/flights/UAL640" in captured["url"]
+
+
+async def test_flightaware_skips_n_number_callsign():
+    settings = Settings(flightaware_api_key="fake-key")
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={"flights": []})
+
+    fa = FlightAwareClient(settings)
+    fa.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await fa.origin_for_callsign("N4052F", 1000, 2000)
+    finally:
+        await fa.close()
+
+    assert result is None
+    assert calls["n"] == 0  # never hit the network
+
+
+async def test_flightaware_marks_auth_failed_on_401():
+    settings = Settings(flightaware_api_key="bad-key")
+
+    def handler(request):
+        return httpx.Response(401, json={"detail": "invalid key"})
+
+    fa = FlightAwareClient(settings)
+    fa.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await fa.origin_for_callsign("UAL640", 1000, 2000)
+    finally:
+        await fa.close()
+
+    assert result is None
+    assert fa.auth_failed is True
+
+
+def test_flightaware_disabled_when_key_missing():
+    settings = Settings(flightaware_api_key=None)
+    fa = FlightAwareClient(settings)
+    assert fa.settings.flightaware_api_key is None
+    # The origin path in resolve_origin should short-circuit; nothing to assert
+    # beyond config, but at least confirm the classifier still functions.
+    assert FlightAwareClient.looks_like_airline_ident("UAL640") is True
+

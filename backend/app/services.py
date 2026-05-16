@@ -21,6 +21,7 @@ from .llm import (
     deterministic_description,
     generate_with_groq,
 )
+from .flightaware import FlightAwareClient
 from .opensky import OpenSkyClient, OpenSkyRateLimited
 from .scoring import event_histogram, offender_rows, quiet_hour
 from .settings import Settings
@@ -826,6 +827,25 @@ async def resolve_origin(
     if local_origin:
         await store.set_cache(cache_key, local_origin, origin_cache_ttl(local_origin))
         return local_origin
+
+    if settings.flightaware_api_key and not await store.get_cache("flightaware_auth_failed"):
+        callsign = next(
+            (sample.get("callsign") for sample in reversed(samples) if sample.get("callsign")),
+            None,
+        )
+        if FlightAwareClient.looks_like_airline_ident(callsign):
+            fa = FlightAwareClient(settings)
+            try:
+                fa_origin = await fa.origin_for_callsign(callsign, first_seen, last_seen)
+                if fa.auth_failed:
+                    await store.set_cache("flightaware_auth_failed", True, 600)
+                elif fa.rate_limited:
+                    await store.set_cache("flightaware_rate_limited", True, 600)
+                elif fa_origin:
+                    await store.set_cache(cache_key, fa_origin, origin_cache_ttl(fa_origin))
+                    return fa_origin
+            finally:
+                await fa.close()
 
     if all(settings.opensky_credentials()) and not await store.get_cache("opensky_auth_failed"):
         opensky = OpenSkyClient(settings)

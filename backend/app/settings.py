@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     opensky: str | None = Field(default=None, validation_alias="OPENSKY")
     opensky_client_id: str | None = Field(default=None, validation_alias="OPENSKY_CLIENT_ID")
     opensky_client_secret: str | None = Field(default=None, validation_alias="OPENSKY_CLIENT_SECRET")
+    flightaware_api_key: str | None = Field(default=None, validation_alias="FLIGHTAWARE")
+    flightaware_base_url: str = "https://aeroapi.flightaware.com/aeroapi"
+    flightaware_timeout_seconds: float = 6.0
     opensky_poll_interval_seconds: int = 30
     opensky_anonymous_poll_interval_seconds: int = 30
     opensky_timeout_seconds: float = 12.0
