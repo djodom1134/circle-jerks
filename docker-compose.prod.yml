@@ -8,7 +8,7 @@ services:
       CIRCLEJERK_PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://noise.example.com}
       CIRCLEJERK_APP_SECRET: ${APP_SECRET:-replace-with-a-long-random-string}
       CIRCLEJERK_DATABASE_PATH: /app/data/circlejerk.sqlite3
-      CIRCLEJERK_REDIS_URL: redis://valkey:6379/0
+      CIRCLEJERK_REDIS_URL: ${CIRCLEJERK_REDIS_URL:-redis://valkey:6379/0}
       CIRCLEJERK_TIMEZONE: ${CIRCLEJERK_TIMEZONE:-America/Denver}
       CIRCLEJERK_DEFAULT_AIRPORT_ICAO: ${CIRCLEJERK_DEFAULT_AIRPORT_ICAO:-KBJC}
       CIRCLEJERK_ADMIN_USERNAME: ${CIRCLEJERK_ADMIN_USERNAME:-admin}
@@ -28,8 +28,6 @@ services:
       SELF_HOSTED_FEEDER_BASE_URL: ${SELF_HOSTED_FEEDER_BASE_URL:-}
     volumes:
       - /srv/circlejerk/data:/app/data
-    depends_on:
-      - valkey
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()\""]
       interval: 30s
@@ -48,7 +46,7 @@ services:
       CIRCLEJERK_PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://noise.example.com}
       CIRCLEJERK_APP_SECRET: ${APP_SECRET:-replace-with-a-long-random-string}
       CIRCLEJERK_DATABASE_PATH: /app/data/circlejerk.sqlite3
-      CIRCLEJERK_REDIS_URL: redis://valkey:6379/0
+      CIRCLEJERK_REDIS_URL: ${CIRCLEJERK_REDIS_URL:-redis://valkey:6379/0}
       CIRCLEJERK_TIMEZONE: ${CIRCLEJERK_TIMEZONE:-America/Denver}
       CIRCLEJERK_DEFAULT_AIRPORT_ICAO: ${CIRCLEJERK_DEFAULT_AIRPORT_ICAO:-KBJC}
       CIRCLEJERK_ADMIN_USERNAME: ${CIRCLEJERK_ADMIN_USERNAME:-admin}
@@ -70,7 +68,6 @@ services:
       - /srv/circlejerk/data:/app/data
     depends_on:
       - api
-      - valkey
     networks:
       - internal
 
@@ -83,20 +80,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-    networks:
-      - internal
-
-  valkey:
-    image: valkey/valkey:7-alpine
-    restart: unless-stopped
-    command: ["valkey-server", "--appendonly", "yes"]
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    volumes:
-      - /srv/circlejerk/redis:/data
     networks:
       - internal
 
