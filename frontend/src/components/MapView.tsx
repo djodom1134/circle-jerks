@@ -377,9 +377,6 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const sourceRef = useRef<VectorSource | null>(null);
   const aircraftSourceRef = useRef<VectorSource | null>(null);
   const heatmapSourceRef = useRef<VectorSource | null>(null);
-  const vectorLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
-  const aircraftLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
-  const heatmapLayerRef = useRef<HeatmapLayer | null>(null);
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
   const frameRef = useRef<number | null>(null);
@@ -398,6 +395,9 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       rows.push(polygonFeature(circlePolygon(userLocation.lat, userLocation.lon, 0.5), { kind: "pass" }));
       rows.push(pointFeature(userLocation.lon, userLocation.lat, { kind: "home", label: "Home" }));
     }
+    // In heatmap mode the basemap + heatmap layer carry the story; suppress the
+    // track lines and per-sample markers so the rainbow gradient reads clearly.
+    if (showHeatmap) return rows;
     for (const track of scanData?.tracks ?? []) {
       const isSelected = selectedIcao24 === track.icao24;
       for (const coords of splitSegments(track.samples, false)) {
@@ -413,10 +413,9 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
           age_ratio: ageRatio,
         }));
       }
-      // Drop the dotted sample markers — splines + age-fading carry the look now.
     }
     return rows;
-  }, [airport, userLocation, scanData, selectedIcao24, windowStart, windowEnd]);
+  }, [airport, userLocation, scanData, selectedIcao24, windowStart, windowEnd, showHeatmap]);
 
   const heatmapFeatures = useMemo(() => {
     if (!showHeatmap) return [];
@@ -437,6 +436,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   }, [scanData, showHeatmap, windowStart, windowEnd]);
 
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
+    if (showHeatmap) return [];
     return (scanData?.tracks ?? [])
       .map((track) => ({
         icao24: track.icao24,
@@ -445,7 +445,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         samples: normalizeTrackSamples(track.samples)
       }))
       .filter((track) => track.samples.length > 0);
-  }, [scanData, selectedIcao24]);
+  }, [scanData, selectedIcao24, showHeatmap]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) {
@@ -472,11 +472,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       // Rainbow gradient: cold/blue (low density) → red (high density)
       gradient: ["#1d4ed8", "#06b6d4", "#22c55e", "#facc15", "#f97316", "#ef4444"],
       zIndex: 5,
-      visible: false,
     });
-    vectorLayerRef.current = vectorLayer;
-    aircraftLayerRef.current = aircraftLayer;
-    heatmapLayerRef.current = heatmapLayer;
     mapRef.current = new Map({
       target: containerRef.current,
       interactions: defaultInteractions({ mouseWheelZoom: false }),
@@ -511,12 +507,6 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     source.clear();
     if (heatmapFeatures.length > 0) source.addFeatures(heatmapFeatures);
   }, [heatmapFeatures]);
-
-  useEffect(() => {
-    if (heatmapLayerRef.current) heatmapLayerRef.current.setVisible(showHeatmap);
-    if (vectorLayerRef.current) vectorLayerRef.current.setVisible(!showHeatmap);
-    if (aircraftLayerRef.current) aircraftLayerRef.current.setVisible(!showHeatmap);
-  }, [showHeatmap, mapReady]);
 
   useEffect(() => {
     if (!mapReady || !aircraftSourceRef.current) return;
