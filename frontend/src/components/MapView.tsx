@@ -449,11 +449,11 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const heatmapOffscreenRef = useRef<HTMLCanvasElement | null>(null);
   const heatmapAccumulatorRef = useRef<{
-    sumDb: Float32Array;
-    count: Float32Array;
+    sumPower: Float32Array;
     accW: number;
     accH: number;
     accScale: number;
+    windowSeconds: number;
   } | null>(null);
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
@@ -561,13 +561,15 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   // works, but only if we never call setVisible(true/false) — that flip
   // seems to occlude the basemap on first show. Workaround: leave the layer
   // always visible and rely on an empty source rendering nothing.
-  // Continuous-field heatmap. Builds a low-res 2-channel accumulator
-  // (sum_db + sample_count per cell) over the visible map area using a
-  // Gaussian falloff around each sample. The displayed color at every
-  // pixel = weighted AVERAGE dB of nearby samples, not point splats.
-  // Browser-native bilinear interpolation when we drawImage() the
-  // low-res buffer onto the full-size canvas produces the continuous,
-  // gradient-style appearance.
+  // Continuous-field heatmap using L_eq (equivalent continuous sound level).
+  // For each in-window pair of consecutive samples in a track we interpolate
+  // K points along the segment — turning the discrete sample stream back
+  // into the smooth flight vector it represents. Each interpolated point
+  // contributes acoustic POWER (10^(dB/10) × dt seconds) to the accumulator
+  // via a Gaussian halo. The cell color = L_eq = 10·log10(Σpower / Twindow):
+  // a cell crossed 100 times accumulates 100× the power and reads ~20 dB
+  // hotter than a cell crossed once — exactly the density behaviour the
+  // user asked for.
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
     const map = mapRef.current;
@@ -599,73 +601,116 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         return;
       }
 
-      // Accumulator at 1/3 resolution — coarse enough to be fast, fine
-      // enough that bilinear upscaling looks smooth.
-      const accScale = 3;
+      // 1/4-res accumulator. Coarser cells let the browser's bilinear
+      // upscale do the heavy smoothing for us.
+      const accScale = 4;
       const accW = Math.max(8, Math.floor(widthCss / accScale));
       const accH = Math.max(8, Math.floor(heightCss / accScale));
-      const sumDb = new Float32Array(accW * accH);
-      const count = new Float32Array(accW * accH);
+      const sumPower = new Float32Array(accW * accH);
 
-      const resolution = map.getView().getResolution() ?? 1;
-      // 500 m radius per sample — wide enough that adjacent samples always
-      // overlap, producing a continuous field rather than isolated lobes.
-      const radiusMeters = 500;
-      const radiusPx = Math.max(12, radiusMeters / resolution / accScale);
+      const view = map.getView();
+      const resolution = view.getResolution() ?? 1;
+      // 160 m halo per interpolated point, capped at 18 accumulator px so
+      // single passes don't draw huge discs at street zoom. With per-second
+      // interpolation, samples densely overlap and the visual smooths out.
+      const radiusMeters = 160;
+      const radiusPx = Math.min(18, Math.max(8, radiusMeters / resolution / accScale));
       const radiusPxInt = Math.ceil(radiusPx);
-      const inv2Sigma2 = 2.5 / (radiusPx * radiusPx); // Gaussian-ish falloff
+      const inv2Sigma2 = 1.0 / (radiusPx * radiusPx);
 
+      const windowSeconds = Math.max(60, windowEnd - windowStart);
       const tracks = scanData?.tracks ?? [];
+
+      // Pre-projection cache: project samples once, reuse for segments.
       for (let ti = 0; ti < tracks.length; ti += 1) {
-        const samples = tracks[ti].samples;
+        const allSamples = tracks[ti].samples;
+        // Filter to in-window samples sorted by timestamp.
+        const samples: Array<{ lon: number; lat: number; ts: number; altFt: number }> = [];
+        for (let si = 0; si < allSamples.length; si += 1) {
+          const s = allSamples[si];
+          if (!s.in_window) continue;
+          const a = (s as TrackSample).altitude_ft;
+          if (a == null) continue;
+          samples.push({ lon: s.lon, lat: s.lat, ts: s.timestamp, altFt: a });
+        }
+        if (samples.length < 1) continue;
+        samples.sort((a, b) => a.ts - b.ts);
+
+        // Walk consecutive sample pairs as track VECTORS and interpolate
+        // sub-points at 1 s spacing. Singletons (no neighbor in window) get
+        // a single 10 s contribution at their own location.
         for (let si = 0; si < samples.length; si += 1) {
-          const sample = samples[si];
-          if (!sample.in_window) continue;
-          const altFt = (sample as TrackSample).altitude_ft;
-          if (altFt == null) continue;
-          const altAgl = altFt - groundElevFt;
-          const db = dbFromAltitudeAgl(altAgl);
-          if (db < 32) continue;
-          const pixel = map.getPixelFromCoordinate(fromLonLat([sample.lon, sample.lat]));
-          if (!pixel) continue;
-          const px = pixel[0] / accScale;
-          const py = pixel[1] / accScale;
-          if (px < -radiusPxInt || px >= accW + radiusPxInt) continue;
-          if (py < -radiusPxInt || py >= accH + radiusPxInt) continue;
-          const cx0 = Math.max(0, Math.floor(px - radiusPxInt));
-          const cx1 = Math.min(accW, Math.ceil(px + radiusPxInt));
-          const cy0 = Math.max(0, Math.floor(py - radiusPxInt));
-          const cy1 = Math.min(accH, Math.ceil(py + radiusPxInt));
-          for (let y = cy0; y < cy1; y += 1) {
-            const dy = y - py;
-            const dy2 = dy * dy;
-            for (let x = cx0; x < cx1; x += 1) {
-              const dx = x - px;
-              const d2 = dx * dx + dy2;
-              if (d2 > radiusPxInt * radiusPxInt) continue;
-              const fall = Math.exp(-d2 * inv2Sigma2);
-              const idx = y * accW + x;
-              sumDb[idx] += db * fall;
-              count[idx] += fall;
+          const s1 = samples[si];
+          const s2 = si + 1 < samples.length ? samples[si + 1] : null;
+          let dt = 0;
+          let kPoints = 1;
+          if (s2) {
+            dt = s2.ts - s1.ts;
+            if (dt <= 0 || dt > 90) {
+              // Stale or huge gap; treat as singleton 10 s contribution.
+              dt = 10;
+              kPoints = 1;
+            } else {
+              // 1 interpolated point per second, but cap to keep total work
+              // bounded. Each sub-point represents dt/kPoints seconds.
+              kPoints = Math.min(20, Math.max(2, Math.ceil(dt)));
+            }
+          } else {
+            dt = 10;
+            kPoints = 1;
+          }
+          const dtPerPoint = dt / kPoints;
+
+          for (let k = 0; k < kPoints; k += 1) {
+            const tFrac = kPoints === 1 ? 0 : k / (kPoints - 1);
+            const lon = s2 ? s1.lon + (s2.lon - s1.lon) * tFrac : s1.lon;
+            const lat = s2 ? s1.lat + (s2.lat - s1.lat) * tFrac : s1.lat;
+            const altFt = s2 ? s1.altFt + (s2.altFt - s1.altFt) * tFrac : s1.altFt;
+            const altAgl = altFt - groundElevFt;
+            const dbSrc = dbFromAltitudeAgl(altAgl);
+            if (dbSrc < 28) continue;
+            const powerSrc = Math.pow(10, dbSrc / 10);
+            const pixel = map.getPixelFromCoordinate(fromLonLat([lon, lat]));
+            if (!pixel) continue;
+            const px = pixel[0] / accScale;
+            const py = pixel[1] / accScale;
+            if (px < -radiusPxInt || px >= accW + radiusPxInt) continue;
+            if (py < -radiusPxInt || py >= accH + radiusPxInt) continue;
+            const cx0 = Math.max(0, Math.floor(px - radiusPxInt));
+            const cx1 = Math.min(accW, Math.ceil(px + radiusPxInt));
+            const cy0 = Math.max(0, Math.floor(py - radiusPxInt));
+            const cy1 = Math.min(accH, Math.ceil(py + radiusPxInt));
+            const contribCenter = powerSrc * dtPerPoint;
+            for (let y = cy0; y < cy1; y += 1) {
+              const dy = y - py;
+              const dy2 = dy * dy;
+              for (let x = cx0; x < cx1; x += 1) {
+                const dx = x - px;
+                const d2 = dx * dx + dy2;
+                if (d2 > radiusPxInt * radiusPxInt) continue;
+                const fall = Math.exp(-d2 * inv2Sigma2);
+                sumPower[y * accW + x] += contribCenter * fall;
+              }
             }
           }
         }
       }
 
-      // Color-map: each cell's color = rgbFromDb(weighted-average dB).
-      // Alpha = saturating function of dB (so loud areas read solid, not
-      // ghostly even at high zoom) gated by minimum confidence.
+      // Convert accumulated power to L_eq (dB), then map to color. The
+      // 10·log10(P/T) step is where many overlapping passes start to add
+      // up: 10× the power → +10 dB; 100× → +20 dB. So a corridor crossed
+      // hundreds of times saturates to bright red even if each individual
+      // pass was only 60-65 dB at altitude.
       const acc = ctx.createImageData(accW, accH);
+      const tinyPower = 1; // skip cells with negligible total energy
       for (let i = 0; i < accW * accH; i += 1) {
-        const c = count[i];
-        if (c < 0.06) continue;
-        const avg = sumDb[i] / c;
-        if (avg < 35) continue;
-        const [r, g, b] = rgbFromDb(avg);
-        // dB → alpha curve: 40 dB ≈ 0.32, 60 dB ≈ 0.55, 80 dB ≈ 0.82, 95 dB ≈ 0.96
-        // Higher floor so even the cool/blue end reads clearly rather than ghosting.
-        const t = clamp01((avg - 35) / 55);
-        const alpha = Math.round((0.28 + 0.68 * t) * 255);
+        const p = sumPower[i];
+        if (p < tinyPower) continue;
+        const lEq = 10 * Math.log10(p / windowSeconds);
+        if (lEq < 32) continue;
+        const [r, g, b] = rgbFromDb(lEq);
+        const t = clamp01((lEq - 32) / 58); // 32 dB → 0, 90 dB → 1
+        const alpha = Math.round((0.30 + 0.65 * t) * 255);
         const o = i * 4;
         acc.data[o] = r;
         acc.data[o + 1] = g;
@@ -683,7 +728,13 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       ctx.imageSmoothingQuality = "high";
       ctx.drawImage(off, 0, 0, widthCss, heightCss);
 
-      heatmapAccumulatorRef.current = { sumDb, count, accW, accH, accScale };
+      heatmapAccumulatorRef.current = {
+        sumPower,
+        accW,
+        accH,
+        accScale,
+        windowSeconds,
+      };
     };
 
     draw();
@@ -720,13 +771,17 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       const ix = Math.floor(x);
       const iy = Math.floor(y);
       const idx = iy * acc.accW + ix;
-      const c = acc.count[idx];
-      if (c < 0.08) {
+      const p = acc.sumPower[idx];
+      if (p < 1) {
         setHoverDb(null);
         return;
       }
-      const avg = acc.sumDb[idx] / c;
-      setHoverDb({ x: pixel[0], y: pixel[1], db: avg });
+      const lEq = 10 * Math.log10(p / acc.windowSeconds);
+      if (lEq < 30) {
+        setHoverDb(null);
+        return;
+      }
+      setHoverDb({ x: pixel[0], y: pixel[1], db: lEq });
     };
     const onOut = () => setHoverDb(null);
     map.on("pointermove", onMove);
@@ -815,7 +870,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
           role="status"
         >
           <strong>{hoverDb.db.toFixed(1)} dB</strong>
-          <span>avg over window</span>
+          <span>L_eq over window</span>
         </div>
       )}
       {showHeatmap && <DbLegend />}
@@ -826,7 +881,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
 function DbLegend() {
   return (
     <div className="db-legend" role="figure" aria-label="Decibel intensity legend">
-      <div className="db-legend-title">Avg dB (estimated)</div>
+      <div className="db-legend-title">L_eq dB (estimated)</div>
       <div className="db-legend-bar" />
       <div className="db-legend-scale">
         <span>30</span>
@@ -837,7 +892,8 @@ function DbLegend() {
         <span>90+</span>
       </div>
       <div className="db-legend-note">
-        65 dB at 900 ft AGL, scaled by inverse-square law per sample.
+        L_eq = 10·log10(Σ aircraft acoustic energy ÷ window seconds). More
+        overflights of the same spot raise the local L_eq logarithmically.
       </div>
     </div>
   );
