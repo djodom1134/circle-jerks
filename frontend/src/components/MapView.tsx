@@ -24,8 +24,8 @@ interface Props {
   onPickLocation: (lat: number, lon: number) => void;
 }
 
-const AIRCRAFT_DISPLAY_DELAY_SECONDS = 35;
-const AIRCRAFT_EXTRAPOLATE_SECONDS = 18;
+const AIRCRAFT_DISPLAY_DELAY_SECONDS = 15;
+const AIRCRAFT_EXTRAPOLATE_SECONDS = 8;
 
 interface AircraftTrack {
   icao24: string;

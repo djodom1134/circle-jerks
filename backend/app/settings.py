@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     opensky_historical_cache_seconds: int = 7200
 
     live_source_priority: str = "adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky"
-    live_poll_interval_seconds: int = 30
+    live_poll_interval_seconds: int = 10
     live_source_timeout_seconds: float = 12.0
     live_source_backoff_seconds: int = 60
     live_source_rate_limit_backoff_seconds: int = 300
