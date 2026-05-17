@@ -7,6 +7,7 @@ import LineString from "ol/geom/LineString";
 import Point from "ol/geom/Point";
 import Polygon from "ol/geom/Polygon";
 import { defaults as defaultInteractions } from "ol/interaction/defaults";
+import HeatmapLayer from "ol/layer/Heatmap";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
 import { fromLonLat, toLonLat } from "ol/proj";
@@ -21,6 +22,7 @@ interface Props {
   scanData?: ScanResponse | null;
   selectedIcao24?: string | null;
   autoZoom?: boolean;
+  showHeatmap?: boolean;
   onPickLocation: (lat: number, lon: number) => void;
 }
 
@@ -111,6 +113,53 @@ function splitSegments(samples: TrackSample[], inWindow: boolean) {
     segments.push(smoothSegment(current));
   }
   return segments;
+}
+
+// Bucket the in-window samples into N chunks by time. Each chunk becomes its
+// own smoothed LineString feature carrying an age_ratio property (0.0 newest,
+// 1.0 oldest) so the style function can fade older segments toward transparent.
+function agedSegments(
+  samples: TrackSample[],
+  windowStart: number,
+  windowEnd: number,
+  buckets = 10
+): Array<{ coords: number[][]; ageRatio: number }> {
+  const inWindow = samples
+    .filter((s) => s.in_window)
+    .slice()
+    .sort((a, b) => a.timestamp - b.timestamp);
+  if (inWindow.length < 2) return [];
+  const span = Math.max(1, windowEnd - windowStart);
+  const out: Array<{ coords: number[][]; ageRatio: number }> = [];
+  let bucketStart = 0;
+  for (let i = 1; i < buckets; i += 1) {
+    const bucketEndTs = windowStart + (span * i) / buckets;
+    let split = bucketStart;
+    while (split < inWindow.length && inWindow[split].timestamp <= bucketEndTs) split += 1;
+    if (split - bucketStart >= 2) {
+      const slice = inWindow.slice(bucketStart, split + 1).filter(Boolean);
+      const coords = smoothSegment(slice.map((s) => fromLonLat([s.lon, s.lat])));
+      const midTs = (slice[0].timestamp + slice[slice.length - 1].timestamp) / 2;
+      const ageRatio = clamp01(1 - (midTs - windowStart) / span);
+      out.push({ coords, ageRatio });
+    }
+    bucketStart = Math.max(bucketStart, split - 1);
+  }
+  // Final bucket: from bucketStart to end (newest samples)
+  if (inWindow.length - bucketStart >= 2) {
+    const slice = inWindow.slice(bucketStart);
+    const coords = smoothSegment(slice.map((s) => fromLonLat([s.lon, s.lat])));
+    const midTs = (slice[0].timestamp + slice[slice.length - 1].timestamp) / 2;
+    const ageRatio = clamp01(1 - (midTs - windowStart) / span);
+    out.push({ coords, ageRatio });
+  }
+  return out;
+}
+
+function clamp01(value: number): number {
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
 }
 
 // Centripetal Catmull-Rom spline through the sample points: each pair of
@@ -257,11 +306,17 @@ function styleForFeature(feature: Feature) {
     });
   }
   if (kind === "track_active") {
+    const ageRatio = Number(feature.get("age_ratio") ?? 0);
+    // ageRatio 0 = newest (fully opaque), 1 = oldest in window (faint)
+    const alpha = Math.max(0.08, 1 - ageRatio * 0.92);
+    const color = selected
+      ? `rgba(214, 75, 44, ${alpha.toFixed(3)})`
+      : `rgba(27, 58, 107, ${alpha.toFixed(3)})`;
     return new Style({
       stroke: new Stroke({
-        color: selected ? "#d64b2c" : "#1b3a6b",
-        width: selected ? 5 : 3
-      })
+        color,
+        width: selected ? 5 : 3,
+      }),
     });
   }
   if (kind === "track_sample") {
@@ -316,15 +371,22 @@ function styleForFeature(feature: Feature) {
   });
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, onPickLocation }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
   const aircraftSourceRef = useRef<VectorSource | null>(null);
+  const heatmapSourceRef = useRef<VectorSource | null>(null);
+  const vectorLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
+  const aircraftLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
+  const heatmapLayerRef = useRef<HeatmapLayer | null>(null);
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
+
+  const windowStart = scanData?.window?.start_ts ?? 0;
+  const windowEnd = scanData?.window?.end_ts ?? 0;
 
   const features = useMemo(() => {
     const rows: Feature[] = [];
@@ -341,20 +403,38 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       for (const coords of splitSegments(track.samples, false)) {
         rows.push(lineFeature(coords, { kind: "track_context", selected: isSelected ? 1 : 0 }));
       }
-      for (const coords of splitSegments(track.samples, true)) {
-        rows.push(lineFeature(coords, { kind: "track_active", selected: isSelected ? 1 : 0 }));
-      }
-      track.samples.forEach((sample, index) => {
-        if (!sample.in_window) return;
-        if (!isSelected && index % 2 === 1) return;
-        rows.push(pointFeature(sample.lon, sample.lat, {
-          kind: "track_sample",
-          selected: isSelected ? 1 : 0
+      const aged = windowStart && windowEnd
+        ? agedSegments(track.samples, windowStart, windowEnd)
+        : splitSegments(track.samples, true).map((coords) => ({ coords, ageRatio: 0 }));
+      for (const { coords, ageRatio } of aged) {
+        rows.push(lineFeature(coords, {
+          kind: "track_active",
+          selected: isSelected ? 1 : 0,
+          age_ratio: ageRatio,
         }));
-      });
+      }
+      // Drop the dotted sample markers — splines + age-fading carry the look now.
     }
     return rows;
-  }, [airport, userLocation, scanData, selectedIcao24]);
+  }, [airport, userLocation, scanData, selectedIcao24, windowStart, windowEnd]);
+
+  const heatmapFeatures = useMemo(() => {
+    if (!showHeatmap) return [];
+    const points: Feature[] = [];
+    for (const track of scanData?.tracks ?? []) {
+      for (const sample of track.samples) {
+        if (!sample.in_window) continue;
+        const f = new Feature(new Point(fromLonLat([sample.lon, sample.lat])));
+        // Recency weighting: newer samples burn brighter.
+        const ageRatio = windowEnd > windowStart
+          ? clamp01(1 - (sample.timestamp - windowStart) / (windowEnd - windowStart))
+          : 0;
+        f.set("weight", 1 - ageRatio * 0.7);
+        points.push(f);
+      }
+    }
+    return points;
+  }, [scanData, showHeatmap, windowStart, windowEnd]);
 
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
     return (scanData?.tracks ?? [])
@@ -373,6 +453,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     }
     sourceRef.current = new VectorSource();
     aircraftSourceRef.current = new VectorSource();
+    heatmapSourceRef.current = new VectorSource();
     const vectorLayer = new VectorLayer({
       source: sourceRef.current,
       style: (feature) => styleForFeature(feature as Feature)
@@ -383,12 +464,26 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       declutter: true,
       zIndex: 10
     });
+    const heatmapLayer = new HeatmapLayer({
+      source: heatmapSourceRef.current,
+      blur: 22,
+      radius: 14,
+      weight: (feature) => Number(feature.get("weight") ?? 0.5),
+      // Rainbow gradient: cold/blue (low density) → red (high density)
+      gradient: ["#1d4ed8", "#06b6d4", "#22c55e", "#facc15", "#f97316", "#ef4444"],
+      zIndex: 5,
+      visible: false,
+    });
+    vectorLayerRef.current = vectorLayer;
+    aircraftLayerRef.current = aircraftLayer;
+    heatmapLayerRef.current = heatmapLayer;
     mapRef.current = new Map({
       target: containerRef.current,
       interactions: defaultInteractions({ mouseWheelZoom: false }),
       layers: [
         new TileLayer({ source: new OSM({ crossOrigin: "anonymous" }) }),
         vectorLayer,
+        heatmapLayer,
         aircraftLayer
       ],
       view: new View({
@@ -409,6 +504,19 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     source.clear();
     source.addFeatures(features);
   }, [features]);
+
+  useEffect(() => {
+    const source = heatmapSourceRef.current;
+    if (!source) return;
+    source.clear();
+    if (heatmapFeatures.length > 0) source.addFeatures(heatmapFeatures);
+  }, [heatmapFeatures]);
+
+  useEffect(() => {
+    if (heatmapLayerRef.current) heatmapLayerRef.current.setVisible(showHeatmap);
+    if (vectorLayerRef.current) vectorLayerRef.current.setVisible(!showHeatmap);
+    if (aircraftLayerRef.current) aircraftLayerRef.current.setVisible(!showHeatmap);
+  }, [showHeatmap, mapReady]);
 
   useEffect(() => {
     if (!mapReady || !aircraftSourceRef.current) return;

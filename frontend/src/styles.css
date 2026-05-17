@@ -1889,3 +1889,29 @@ input[type="range"] {
 }
 .complaint-source-banner svg { flex-shrink: 0; margin-top: 2px; }
 .complaint-source-banner strong { font-weight: 700; }
+
+/* --- Generic icon toggle for map-controls (heatmap, ATC, etc.) --- */
+.map-icon-toggle {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.map-icon-toggle:hover {
+  background: #ffffff;
+  border-color: #d64b2c;
+}
+.map-icon-toggle.active {
+  background: #d64b2c;
+  border-color: #d64b2c;
+  color: #ffffff;
+}
