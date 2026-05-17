@@ -469,17 +469,18 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       blur: 22,
       radius: 14,
       weight: (feature) => Number(feature.get("weight") ?? 0.5),
-      // Rainbow gradient: cold/blue (low density) → red (high density)
       gradient: ["#1d4ed8", "#06b6d4", "#22c55e", "#facc15", "#f97316", "#ef4444"],
       zIndex: 5,
     });
+    // Some OL versions stumble when a HeatmapLayer is in the layer array at
+    // map construction time. Add it after the map is built so the basemap
+    // and vector layers render reliably.
     mapRef.current = new Map({
       target: containerRef.current,
       interactions: defaultInteractions({ mouseWheelZoom: false }),
       layers: [
         new TileLayer({ source: new OSM({ crossOrigin: "anonymous" }) }),
         vectorLayer,
-        heatmapLayer,
         aircraftLayer
       ],
       view: new View({
@@ -491,6 +492,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       const [lon, lat] = toLonLat(event.coordinate);
       onPickLocation(lat, lon);
     });
+    mapRef.current.addLayer(heatmapLayer);
     setMapReady(true);
   }, [airport?.lat, airport?.lon, userLocation?.lat, userLocation?.lon, onPickLocation]);
 
