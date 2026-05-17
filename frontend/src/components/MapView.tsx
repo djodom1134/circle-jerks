@@ -15,16 +15,36 @@ import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
 import type { Airport, ScanResponse, TrackSample } from "../lib/api";
 
-// dB at observer for a single aircraft passage given altitude AGL.
-// Anchor: 900 ft AGL → 65 dB (midpoint of the user-supplied 60-70 dB range).
-// Inverse-square law applied: each doubling of distance ≈ -6 dB.
-function dbFromAltitudeAgl(altitudeAgl: number | null | undefined): number {
+// Aircraft climbing under full power are MUCH louder than the same aircraft
+// in cruise at the same altitude — engine + propeller noise dominates. Maps
+// vertical rate to a dB bonus added to the source level. 1000 fpm climb is
+// roughly +20 dB; descending (idle power) gets a small subtraction.
+function climbNoiseBonusDb(verticalRateFpm: number | null | undefined): number {
+  if (verticalRateFpm == null || !Number.isFinite(verticalRateFpm)) return 0;
+  const rate = verticalRateFpm;
+  if (rate < -300) return -3;
+  if (rate < 100) return 0;
+  return Math.min(25, 10 * Math.log10(1 + rate / 100));
+}
+
+// dB at observer for a single aircraft passage given altitude AGL plus the
+// climb-rate noise bonus. Anchor: 900 ft AGL in level flight → 65 dB.
+function dbFromAltAndClimb(
+  altitudeAgl: number | null | undefined,
+  verticalRateFpm: number | null | undefined
+): number {
   if (altitudeAgl == null || !Number.isFinite(altitudeAgl) || altitudeAgl <= 0) return 30;
   const ratio = 900 / altitudeAgl;
-  const db = 65 + 20 * Math.log10(ratio);
+  const sourceDb = 65 + climbNoiseBonusDb(verticalRateFpm);
+  const db = sourceDb + 20 * Math.log10(ratio);
   if (db < 30) return 30;
-  if (db > 100) return 100;
+  if (db > 110) return 110;
   return db;
+}
+
+// Backward-compat for older callers that pass only altitude.
+function dbFromAltitudeAgl(altitudeAgl: number | null | undefined): number {
+  return dbFromAltAndClimb(altitudeAgl, null);
 }
 
 // Color a track segment from red (low alt, loud) to gray (high alt, quiet).
@@ -450,6 +470,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const heatmapOffscreenRef = useRef<HTMLCanvasElement | null>(null);
   const heatmapAccumulatorRef = useRef<{
     sumPower: Float32Array;
+    peakDb: Float32Array;
     accW: number;
     accH: number;
     accScale: number;
@@ -457,7 +478,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   } | null>(null);
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
-  const [hoverDb, setHoverDb] = useState<{ x: number; y: number; db: number } | null>(null);
+  const [hoverDb, setHoverDb] = useState<{ x: number; y: number; lEq: number; peak: number } | null>(null);
 
   const windowStart = scanData?.window?.start_ts ?? 0;
   const windowEnd = scanData?.window?.end_ts ?? 0;
@@ -607,6 +628,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       const accW = Math.max(8, Math.floor(widthCss / accScale));
       const accH = Math.max(8, Math.floor(heightCss / accScale));
       const sumPower = new Float32Array(accW * accH);
+      const peakDb = new Float32Array(accW * accH);
 
       const view = map.getView();
       const resolution = view.getResolution() ?? 1;
@@ -625,13 +647,26 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       for (let ti = 0; ti < tracks.length; ti += 1) {
         const allSamples = tracks[ti].samples;
         // Filter to in-window samples sorted by timestamp.
-        const samples: Array<{ lon: number; lat: number; ts: number; altFt: number }> = [];
+        const samples: Array<{
+          lon: number;
+          lat: number;
+          ts: number;
+          altFt: number;
+          climbFpm: number;
+        }> = [];
         for (let si = 0; si < allSamples.length; si += 1) {
           const s = allSamples[si];
           if (!s.in_window) continue;
           const a = (s as TrackSample).altitude_ft;
           if (a == null) continue;
-          samples.push({ lon: s.lon, lat: s.lat, ts: s.timestamp, altFt: a });
+          const v = (s as TrackSample).vertical_rate_fpm;
+          samples.push({
+            lon: s.lon,
+            lat: s.lat,
+            ts: s.timestamp,
+            altFt: a,
+            climbFpm: v == null || !Number.isFinite(v) ? 0 : v,
+          });
         }
         if (samples.length < 1) continue;
         samples.sort((a, b) => a.ts - b.ts);
@@ -666,8 +701,9 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
             const lon = s2 ? s1.lon + (s2.lon - s1.lon) * tFrac : s1.lon;
             const lat = s2 ? s1.lat + (s2.lat - s1.lat) * tFrac : s1.lat;
             const altFt = s2 ? s1.altFt + (s2.altFt - s1.altFt) * tFrac : s1.altFt;
+            const climbFpm = s2 ? s1.climbFpm + (s2.climbFpm - s1.climbFpm) * tFrac : s1.climbFpm;
             const altAgl = altFt - groundElevFt;
-            const dbSrc = dbFromAltitudeAgl(altAgl);
+            const dbSrc = dbFromAltAndClimb(altAgl, climbFpm);
             if (dbSrc < 28) continue;
             const powerSrc = Math.pow(10, dbSrc / 10);
             const pixel = map.getPixelFromCoordinate(fromLonLat([lon, lat]));
@@ -689,7 +725,13 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
                 const d2 = dx * dx + dy2;
                 if (d2 > radiusPxInt * radiusPxInt) continue;
                 const fall = Math.exp(-d2 * inv2Sigma2);
-                sumPower[y * accW + x] += contribCenter * fall;
+                const idx = y * accW + x;
+                sumPower[idx] += contribCenter * fall;
+                // Instantaneous dB at this cell = source - attenuation, where
+                // the gaussian fall converts to dB attenuation via 10·log10(fall).
+                // Track the maximum across all contributing samples = peak.
+                const dbAtCell = dbSrc + 10 * Math.log10(fall);
+                if (dbAtCell > peakDb[idx]) peakDb[idx] = dbAtCell;
               }
             }
           }
@@ -730,6 +772,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
 
       heatmapAccumulatorRef.current = {
         sumPower,
+        peakDb,
         accW,
         accH,
         accScale,
@@ -772,16 +815,13 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       const iy = Math.floor(y);
       const idx = iy * acc.accW + ix;
       const p = acc.sumPower[idx];
-      if (p < 1) {
+      const peak = acc.peakDb[idx];
+      if (p < 1 || peak < 30) {
         setHoverDb(null);
         return;
       }
       const lEq = 10 * Math.log10(p / acc.windowSeconds);
-      if (lEq < 30) {
-        setHoverDb(null);
-        return;
-      }
-      setHoverDb({ x: pixel[0], y: pixel[1], db: lEq });
+      setHoverDb({ x: pixel[0], y: pixel[1], lEq, peak });
     };
     const onOut = () => setHoverDb(null);
     map.on("pointermove", onMove);
@@ -869,8 +909,14 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
           style={{ left: hoverDb.x + 14, top: hoverDb.y + 14 }}
           role="status"
         >
-          <strong>{hoverDb.db.toFixed(1)} dB</strong>
-          <span>L_eq over window</span>
+          <div className="db-tooltip-row">
+            <span className="db-tooltip-label">Peak</span>
+            <strong>{hoverDb.peak.toFixed(1)} dB</strong>
+          </div>
+          <div className="db-tooltip-row">
+            <span className="db-tooltip-label">Avg (L_eq)</span>
+            <strong>{hoverDb.lEq.toFixed(1)} dB</strong>
+          </div>
         </div>
       )}
       {showHeatmap && <DbLegend />}

@@ -51,6 +51,7 @@ export interface TrackSample {
   lon: number;
   heading_deg?: number | null;
   altitude_ft?: number | null;
+  vertical_rate_fpm?: number | null;
   in_window: boolean;
 }
 

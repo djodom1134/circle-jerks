@@ -466,6 +466,7 @@ async def tracks_for_response(store: Store, offenders: list[dict], window: Windo
                     "lon": sample["lon"],
                     "heading_deg": sample.get("heading_deg"),
                     "altitude_ft": sample.get("geo_altitude_ft") or sample.get("baro_altitude_ft"),
+                    "vertical_rate_fpm": sample.get("vertical_rate_fpm"),
                     "in_window": window.start_ts <= sample["timestamp"] <= window.end_ts,
                 }
                 for sample in full_track
@@ -512,6 +513,7 @@ async def recent_tracks_for_response(
                 "lon": sample["lon"],
                 "heading_deg": sample.get("heading_deg"),
                 "altitude_ft": sample.get("geo_altitude_ft") or sample.get("baro_altitude_ft"),
+                "vertical_rate_fpm": sample.get("vertical_rate_fpm"),
                 "in_window": True,
             }
             for sample in full_track
@@ -585,6 +587,28 @@ DB_REFERENCE_LEVEL = 65.0
 DB_AUDIBLE_THRESHOLD = 35.0
 
 
+def climb_noise_bonus_db(vertical_rate_fpm: float | None) -> float:
+    """Aircraft climbing under full power are MUCH louder than aircraft at
+    the same altitude in cruise — engine + prop noise dominates the spectrum.
+    Returns extra source dB added to the acoustic model:
+        100 fpm  → +3 dB
+        500 fpm  → +14 dB
+        1000 fpm → +20 dB
+        2000+    → capped at +25 dB
+    Descending aircraft (idle power) get a small subtraction.
+    """
+    if vertical_rate_fpm is None:
+        return 0.0
+    import math as _m
+    rate = float(vertical_rate_fpm)
+    if rate < -300:
+        return -3.0  # engines at idle
+    if rate < 100:
+        return 0.0
+    # Logarithmic curve, biased high so climb dominates the model.
+    return min(25.0, 10.0 * _m.log10(1.0 + rate / 100.0))
+
+
 def _db_at_home_for_sample(
     sample: dict,
     user_lat: float,
@@ -600,12 +624,13 @@ def _db_at_home_for_sample(
     horizontal_ft = horizontal_nm * 6076.12
     alt_above_user_ft = float(alt) - float(user_elevation_ft)
     if alt_above_user_ft <= 0:
-        alt_above_user_ft = 100.0  # don't divide by zero if rare sample dips below user elev
+        alt_above_user_ft = 100.0
     distance_ft = (horizontal_ft * horizontal_ft + alt_above_user_ft * alt_above_user_ft) ** 0.5
+    source_db = DB_REFERENCE_LEVEL + climb_noise_bonus_db(sample.get("vertical_rate_fpm"))
     if distance_ft <= 0:
-        return DB_REFERENCE_LEVEL + 20.0
+        return source_db + 20.0
     import math as _m
-    return DB_REFERENCE_LEVEL - 20.0 * _m.log10(distance_ft / DB_REFERENCE_DISTANCE_FT)
+    return source_db - 20.0 * _m.log10(distance_ft / DB_REFERENCE_DISTANCE_FT)
 
 
 def db_at_home_summary(
