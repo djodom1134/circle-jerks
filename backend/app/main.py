@@ -639,6 +639,57 @@ async def config(settings: Annotated[Settings, Depends(settings_dep)]):
     }
 
 
+@app.get("/live_status")
+async def live_status(
+    store: Annotated[Store, Depends(store_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    snapshot = await store.get_cache("live_sources:health")
+    sources_by_state: dict[str, dict] = {}
+    if isinstance(snapshot, dict):
+        sources_by_state = snapshot
+    priority = settings.live_source_priority_list()
+    primary = priority[0] if priority else None
+    primary_health = sources_by_state.get(primary or "")
+    healthy_paid = {
+        "adsbx": bool(settings.adsbx_rapidapi_key)
+        and isinstance(sources_by_state.get("adsbx"), dict)
+        and sources_by_state["adsbx"].get("success_count", 0) > 0
+        and not sources_by_state["adsbx"].get("backoff_remaining_seconds"),
+    }
+    serving_source = None
+    serving_state = "unknown"
+    if primary_health and primary_health.get("success_count", 0) > 0:
+        serving_source = primary
+        serving_state = "primary"
+    else:
+        for source in priority:
+            row = sources_by_state.get(source)
+            if isinstance(row, dict) and row.get("success_count", 0) > 0:
+                serving_source = source
+                serving_state = "fallback"
+                break
+    overall = "ok"
+    if not sources_by_state:
+        overall = "unknown"
+    elif serving_state == "fallback":
+        overall = "degraded"
+    elif serving_state == "unknown":
+        overall = "down"
+    return {
+        "overall": overall,
+        "serving_source": serving_source,
+        "serving_state": serving_state,
+        "primary": primary,
+        "paid_configured": {
+            "adsbx": bool(settings.adsbx_rapidapi_key),
+            "flightaware": bool(settings.flightaware_api_key),
+        },
+        "paid_healthy": healthy_paid,
+        "updated_at": int(time.time()),
+    }
+
+
 @app.get("/sponsors")
 async def sponsors(
     store: Annotated[Store, Depends(store_dep)],

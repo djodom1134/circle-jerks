@@ -359,6 +359,20 @@ export interface AtcFeedsResponse {
   note?: string;
 }
 
+export interface LiveStatusResponse {
+  overall: "ok" | "degraded" | "down" | "unknown";
+  serving_source: string | null;
+  serving_state: "primary" | "fallback" | "unknown";
+  primary: string | null;
+  paid_configured: { adsbx: boolean; flightaware: boolean };
+  paid_healthy: { adsbx: boolean };
+  updated_at: number;
+}
+
+export function getLiveStatus() {
+  return getJson<LiveStatusResponse>("/live_status");
+}
+
 export function getAtcFeeds(airportIcao: string) {
   return getJson<AtcFeedsResponse>(`/atc_feeds?airport_icao=${encodeURIComponent(airportIcao)}`);
 }

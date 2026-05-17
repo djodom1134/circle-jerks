@@ -32,6 +32,19 @@ class Store(ABC):
     async def get_track(self, icao24: str, start_ts: int | None = None, end_ts: int | None = None) -> list[dict]:
         ...
 
+    async def bulk_get_tracks(
+        self,
+        icao24s: list[str],
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list[list[dict]]:
+        """Default implementation calls get_track per icao24. Concrete stores
+        (e.g. RedisStore) should override with a single batched round-trip."""
+        results: list[list[dict]] = []
+        for icao24 in icao24s:
+            results.append(await self.get_track(icao24, start_ts, end_ts))
+        return results
+
     @abstractmethod
     async def list_aircraft(self) -> list[str]:
         ...
@@ -97,6 +110,22 @@ class RedisStore(Store):
         end = "+inf" if end_ts is None else end_ts
         values = await self.redis.zrangebyscore(key, start, end)
         return [loads(value) for value in values]
+
+    async def bulk_get_tracks(
+        self,
+        icao24s: list[str],
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list[list[dict]]:
+        if not icao24s:
+            return []
+        start = "-inf" if start_ts is None else start_ts
+        end = "+inf" if end_ts is None else end_ts
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for icao24 in icao24s:
+                pipe.zrangebyscore(f"track:{icao24.lower()}", start, end)
+            raw_results = await pipe.execute()
+        return [[loads(value) for value in (group or [])] for group in raw_results]
 
     async def list_aircraft(self) -> list[str]:
         return sorted(await self.redis.smembers("aircraft"))

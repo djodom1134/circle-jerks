@@ -1859,3 +1859,33 @@ input[type="range"] {
   color: #1b3a6b;
 }
 .atc-external:hover { text-decoration: underline; }
+
+/* --- Complaint source banner (Groq vs fallback) --- */
+.complaint-source-banner {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin: 6px 0 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  border: 1px solid transparent;
+}
+.complaint-source-banner.ok {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #064e3b;
+}
+.complaint-source-banner.warn {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #78350f;
+}
+.complaint-source-banner.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #7f1d1d;
+}
+.complaint-source-banner svg { flex-shrink: 0; margin-top: 2px; }
+.complaint-source-banner strong { font-weight: 700; }
