@@ -1932,6 +1932,30 @@ input[type="range"] {
   pointer-events: none;
   z-index: 4;
 }
+.db-tooltip {
+  position: absolute;
+  z-index: 12;
+  pointer-events: none;
+  padding: 5px 9px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #ffffff;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.25);
+  white-space: nowrap;
+}
+.db-tooltip span {
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 
 /* --- dB legend (visible only when heatmap mode is on) --- */
 .db-legend {

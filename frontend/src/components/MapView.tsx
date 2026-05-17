@@ -447,8 +447,17 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const heatmapOffscreenRef = useRef<HTMLCanvasElement | null>(null);
+  const heatmapAccumulatorRef = useRef<{
+    sumDb: Float32Array;
+    count: Float32Array;
+    accW: number;
+    accH: number;
+    accScale: number;
+  } | null>(null);
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const [hoverDb, setHoverDb] = useState<{ x: number; y: number; db: number } | null>(null);
 
   const windowStart = scanData?.window?.start_ts ?? 0;
   const windowEnd = scanData?.window?.end_ts ?? 0;
@@ -552,13 +561,13 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   // works, but only if we never call setVisible(true/false) — that flip
   // seems to occlude the basemap on first show. Workaround: leave the layer
   // always visible and rely on an empty source rendering nothing.
-  // Heatmap rendered as a separate canvas overlay rather than via OL's
-  // HeatmapLayer (which wipes the basemap in 10.9) or discrete disc features
-  // (which the user correctly called out as not a real heatmap). Drawing
-  // radial gradients with `globalCompositeOperation: "lighter"` produces
-  // true additive blending so dense areas saturate to bright red.
-  // Blob size is in METERS, not pixels, so the gradient gets more granular as
-  // you zoom in (the same 80 m audible footprint covers more pixels).
+  // Continuous-field heatmap. Builds a low-res 2-channel accumulator
+  // (sum_db + sample_count per cell) over the visible map area using a
+  // Gaussian falloff around each sample. The displayed color at every
+  // pixel = weighted AVERAGE dB of nearby samples, not point splats.
+  // Browser-native bilinear interpolation when we drawImage() the
+  // low-res buffer onto the full-size canvas produces the continuous,
+  // gradient-style appearance.
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
     const map = mapRef.current;
@@ -566,6 +575,10 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    if (!heatmapOffscreenRef.current) {
+      heatmapOffscreenRef.current = document.createElement("canvas");
+    }
+    const off = heatmapOffscreenRef.current;
 
     const draw = () => {
       const size = map.getSize();
@@ -581,17 +594,28 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, widthCss, heightCss);
-      if (!showHeatmap) return;
+      if (!showHeatmap) {
+        heatmapAccumulatorRef.current = null;
+        return;
+      }
+
+      // Accumulator at 1/3 resolution — coarse enough to be fast, fine
+      // enough that bilinear upscaling looks smooth.
+      const accScale = 3;
+      const accW = Math.max(8, Math.floor(widthCss / accScale));
+      const accH = Math.max(8, Math.floor(heightCss / accScale));
+      const sumDb = new Float32Array(accW * accH);
+      const count = new Float32Array(accW * accH);
 
       const resolution = map.getView().getResolution() ?? 1;
-      // 250 m noise footprint per sample. Min 28 px keeps the blob visible
-      // at airport-scale zoom (zoom 10 ≈ 153 m/px); as you zoom in, the
-      // meters-based radius grows so individual passes become distinguishable.
-      const blobMeters = 250;
-      const blobPx = Math.max(28, blobMeters / resolution);
+      // 350 m radius per sample — the area within which one GA aircraft is
+      // the dominant audible noise. With Gaussian falloff this gives a
+      // smooth field even when samples are 100-300 m apart.
+      const radiusMeters = 350;
+      const radiusPx = Math.max(8, radiusMeters / resolution / accScale);
+      const radiusPxInt = Math.ceil(radiusPx);
+      const inv2Sigma2 = 2.5 / (radiusPx * radiusPx); // Gaussian-ish falloff
 
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
       const tracks = scanData?.tracks ?? [];
       for (let ti = 0; ti < tracks.length; ti += 1) {
         const samples = tracks[ti].samples;
@@ -599,32 +623,67 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
           const sample = samples[si];
           if (!sample.in_window) continue;
           const altFt = (sample as TrackSample).altitude_ft;
-          const altAgl = altFt != null ? altFt - groundElevFt : null;
+          if (altFt == null) continue;
+          const altAgl = altFt - groundElevFt;
           const db = dbFromAltitudeAgl(altAgl);
-          if (db < 35) continue;
+          if (db < 32) continue;
           const pixel = map.getPixelFromCoordinate(fromLonLat([sample.lon, sample.lat]));
           if (!pixel) continue;
-          const [r, g, b] = rgbFromDb(db);
-          const intensity = clamp01((db - 30) / 60);
-          // Peak alpha picks up enough that one isolated sample shows as a
-          // soft tint; multiple overlapping samples in the same area saturate
-          // to bright red via additive blending.
-          const peakAlpha = 0.18 + 0.55 * intensity;
-          const gradient = ctx.createRadialGradient(
-            pixel[0], pixel[1], 0,
-            pixel[0], pixel[1], blobPx
-          );
-          gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${peakAlpha.toFixed(3)})`);
-          gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${(peakAlpha * 0.55).toFixed(3)})`);
-          gradient.addColorStop(0.75, `rgba(${r}, ${g}, ${b}, ${(peakAlpha * 0.18).toFixed(3)})`);
-          gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
-          ctx.fillStyle = gradient;
-          ctx.beginPath();
-          ctx.arc(pixel[0], pixel[1], blobPx, 0, Math.PI * 2);
-          ctx.fill();
+          const px = pixel[0] / accScale;
+          const py = pixel[1] / accScale;
+          if (px < -radiusPxInt || px >= accW + radiusPxInt) continue;
+          if (py < -radiusPxInt || py >= accH + radiusPxInt) continue;
+          const cx0 = Math.max(0, Math.floor(px - radiusPxInt));
+          const cx1 = Math.min(accW, Math.ceil(px + radiusPxInt));
+          const cy0 = Math.max(0, Math.floor(py - radiusPxInt));
+          const cy1 = Math.min(accH, Math.ceil(py + radiusPxInt));
+          for (let y = cy0; y < cy1; y += 1) {
+            const dy = y - py;
+            const dy2 = dy * dy;
+            for (let x = cx0; x < cx1; x += 1) {
+              const dx = x - px;
+              const d2 = dx * dx + dy2;
+              if (d2 > radiusPxInt * radiusPxInt) continue;
+              const fall = Math.exp(-d2 * inv2Sigma2);
+              const idx = y * accW + x;
+              sumDb[idx] += db * fall;
+              count[idx] += fall;
+            }
+          }
         }
       }
-      ctx.restore();
+
+      // Color-map: each cell's color = rgbFromDb(weighted-average dB).
+      // Alpha = saturating function of dB (so loud areas read solid, not
+      // ghostly even at high zoom) gated by minimum confidence.
+      const acc = ctx.createImageData(accW, accH);
+      for (let i = 0; i < accW * accH; i += 1) {
+        const c = count[i];
+        if (c < 0.06) continue;
+        const avg = sumDb[i] / c;
+        if (avg < 35) continue;
+        const [r, g, b] = rgbFromDb(avg);
+        // dB → alpha curve: 40 dB ≈ 0.15, 60 dB ≈ 0.45, 80 dB ≈ 0.78, 95 dB ≈ 0.92
+        const t = clamp01((avg - 35) / 55);
+        const alpha = Math.round((0.10 + 0.85 * t) * 255);
+        const o = i * 4;
+        acc.data[o] = r;
+        acc.data[o + 1] = g;
+        acc.data[o + 2] = b;
+        acc.data[o + 3] = alpha;
+      }
+
+      off.width = accW;
+      off.height = accH;
+      const offCtx = off.getContext("2d");
+      if (!offCtx) return;
+      offCtx.putImageData(acc, 0, 0);
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(off, 0, 0, widthCss, heightCss);
+
+      heatmapAccumulatorRef.current = { sumDb, count, accW, accH, accScale };
     };
 
     draw();
@@ -636,6 +695,47 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       window.removeEventListener("resize", onResize);
     };
   }, [showHeatmap, scanData, groundElevFt, mapReady]);
+
+  // Mouse-over dB readout. Sample the accumulator at the cursor position
+  // and surface the weighted-average dB in a floating tooltip.
+  useEffect(() => {
+    if (!showHeatmap || !mapReady || !mapRef.current) {
+      setHoverDb(null);
+      return;
+    }
+    const map = mapRef.current;
+    const onMove = (event: { pixel?: number[] | null }) => {
+      const acc = heatmapAccumulatorRef.current;
+      const pixel = event.pixel;
+      if (!acc || !pixel) {
+        setHoverDb(null);
+        return;
+      }
+      const x = pixel[0] / acc.accScale;
+      const y = pixel[1] / acc.accScale;
+      if (x < 0 || x >= acc.accW || y < 0 || y >= acc.accH) {
+        setHoverDb(null);
+        return;
+      }
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const idx = iy * acc.accW + ix;
+      const c = acc.count[idx];
+      if (c < 0.08) {
+        setHoverDb(null);
+        return;
+      }
+      const avg = acc.sumDb[idx] / c;
+      setHoverDb({ x: pixel[0], y: pixel[1], db: avg });
+    };
+    const onOut = () => setHoverDb(null);
+    map.on("pointermove", onMove);
+    map.getViewport().addEventListener("mouseleave", onOut);
+    return () => {
+      map.un("pointermove", onMove);
+      map.getViewport().removeEventListener("mouseleave", onOut);
+    };
+  }, [showHeatmap, mapReady]);
 
   useEffect(() => {
     if (!mapReady || !aircraftSourceRef.current) return;
@@ -708,6 +808,16 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     <div className="map-stage">
       <div className="map openlayers-map" ref={containerRef} />
       <canvas className="heatmap-canvas" ref={heatmapCanvasRef} aria-hidden="true" />
+      {showHeatmap && hoverDb && (
+        <div
+          className="db-tooltip"
+          style={{ left: hoverDb.x + 14, top: hoverDb.y + 14 }}
+          role="status"
+        >
+          <strong>{hoverDb.db.toFixed(1)} dB</strong>
+          <span>avg over window</span>
+        </div>
+      )}
       {showHeatmap && <DbLegend />}
     </div>
   );
