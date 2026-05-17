@@ -262,7 +262,7 @@ async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit) {
     return await fetch(input, { ...init, signal: controller.signal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ApiError(408, "Request timed out — server didn't respond in time. Try again.");
+      throw new ApiError(408, "Request timed out; generated a local draft instead.");
     }
     throw error;
   } finally {

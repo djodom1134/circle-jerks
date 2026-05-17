@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -144,11 +143,8 @@ async def run_detectors_for_monitor(
         start_ts if start_ts is not None else detector_end - LIVE_DETECTOR_LOOKBACK_SECONDS,
         detector_end - max_lookback,
     )
-    icao24s = await store.list_aircraft()
-    tracks = await asyncio.gather(
-        *(store.get_track(icao, detector_start - 20 * 60, detector_end) for icao in icao24s)
-    )
-    for icao24, track in zip(icao24s, tracks):
+    for icao24 in await store.list_aircraft():
+        track = await store.get_track(icao24, detector_start - 20 * 60, detector_end)
         if not track_intersects_bbox(track, tuple(monitor["bbox"])):
             continue
         events = (
@@ -452,12 +448,9 @@ def events_for_current_scan(events: list[dict], params: ScanParams) -> list[dict
 
 
 async def tracks_for_response(store: Store, offenders: list[dict], window: WindowRange) -> list[dict]:
-    top_offenders = offenders[:30]
-    tracks = await asyncio.gather(
-        *(store.get_track(o["icao24"], window.start_ts - 1800, window.end_ts + 1800) for o in top_offenders)
-    )
     rows = []
-    for offender, full_track in zip(top_offenders, tracks):
+    for offender in offenders[:30]:
+        full_track = await store.get_track(offender["icao24"], window.start_ts - 1800, window.end_ts + 1800)
         if not full_track:
             continue
         rows.append({
@@ -499,12 +492,9 @@ async def recent_tracks_for_response(
     bbox: tuple[float, float, float, float] | None = None,
     limit: int = 40,
 ) -> list[dict]:
-    icao24s = await store.list_aircraft()
-    tracks = await asyncio.gather(
-        *(store.get_track(icao, window.start_ts, window.end_ts) for icao in icao24s)
-    )
     rows = []
-    for icao24, full_track in zip(icao24s, tracks):
+    for icao24 in await store.list_aircraft():
+        full_track = await store.get_track(icao24, window.start_ts, window.end_ts)
         if not full_track:
             continue
         if bbox is not None and not track_intersects_bbox(full_track, bbox):
@@ -925,14 +915,10 @@ def origin_summary(conn, track: list[dict]) -> dict:
 async def active_aircraft_count(store: Store, airport: Airport, params: ScanParams) -> int:
     now = int(datetime.now(timezone.utc).timestamp())
     airport_point = Point(airport.lat, airport.lon)
-    icao24s = await store.list_aircraft()
-    raw_tracks = await asyncio.gather(
-        *(store.get_track(icao, now - 150, now) for icao in icao24s)
-    )
     count = 0
-    for raw_track in raw_tracks:
+    for icao24 in await store.list_aircraft():
         track = [
-            sample for sample in raw_track
+            sample for sample in await store.get_track(icao24, now - 150, now)
             if sample.get("lat") is not None and sample.get("lon") is not None
         ]
         if not track:
