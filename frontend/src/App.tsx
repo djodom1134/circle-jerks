@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, External
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import MapView from "./components/MapView";
+import OnboardingTour, { shouldShowOnboarding } from "./components/OnboardingTour";
 import buyMeCoffeeQrUrl from "./assets/buy-me-a-coffee-qr.png";
 import logoUrl from "./assets/circle-jerks-logo.png";
 import {
@@ -89,6 +90,7 @@ export default function App() {
   const [addressQuery, setAddressQuery] = useState("");
   const [autoZoom, setAutoZoom] = useState(true);
   const [showHeatmap, setShowHeatmap] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
   const [repeatOffenders, setRepeatOffenders] = useState<RepeatOffender[]>([]);
   const [liveStatus, setLiveStatus] = useState<LiveStatusResponse | null>(null);
@@ -436,6 +438,8 @@ export default function App() {
       />
 
       <SponsorsSection sponsors={sponsors} supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL} />
+
+      {showOnboarding && <OnboardingTour onClose={() => setShowOnboarding(false)} />}
     </div>
   );
 }

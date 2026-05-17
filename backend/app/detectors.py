@@ -20,7 +20,11 @@ MAX_CIRCLE_ALTITUDE_FT_AGL = 2000
 
 
 def pass_geometry_key(params: ScanParams) -> str:
-    return f"{params.user_lat:.5f}:{params.user_lon:.5f}:{params.pass_radius_nm:.2f}"
+    # 3-decimal precision (~111 m) so small lat/lon drifts from GPS jitter or
+    # accidental map clicks don't fragment the pass-event store into a new
+    # geometry bucket. Still much finer than the 0.5 nm (~926 m) pass radius
+    # so a deliberate home-location move correctly produces distinct passes.
+    return f"{params.user_lat:.3f}:{params.user_lon:.3f}:{params.pass_radius_nm:.2f}"
 
 
 def _event_id(*parts: object) -> str:
