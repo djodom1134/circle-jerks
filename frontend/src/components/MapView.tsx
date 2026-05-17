@@ -7,6 +7,7 @@ import LineString from "ol/geom/LineString";
 import Point from "ol/geom/Point";
 import Polygon from "ol/geom/Polygon";
 import { defaults as defaultInteractions } from "ol/interaction/defaults";
+import HeatmapLayer from "ol/layer/Heatmap";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
 import { fromLonLat, toLonLat } from "ol/proj";
@@ -14,6 +15,47 @@ import OSM from "ol/source/OSM";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
 import type { Airport, ScanResponse, TrackSample } from "../lib/api";
+
+// dB at observer for a single aircraft passage given altitude AGL.
+// Anchor: 900 ft AGL → 65 dB (midpoint of the user-supplied 60-70 dB range).
+// Inverse-square law applied: each doubling of distance ≈ -6 dB.
+function dbFromAltitudeAgl(altitudeAgl: number | null | undefined): number {
+  if (altitudeAgl == null || !Number.isFinite(altitudeAgl) || altitudeAgl <= 0) return 30;
+  const ratio = 900 / altitudeAgl;
+  const db = 65 + 20 * Math.log10(ratio);
+  if (db < 30) return 30;
+  if (db > 100) return 100;
+  return db;
+}
+
+// Color a track segment from red (low alt, loud) to gray (high alt, quiet).
+// 0 ft AGL → solid red; 3000 ft+ AGL → cool gray. Linear RGB interpolation
+// looks fine in browsers for this short ramp.
+function colorFromAltitudeAgl(altitudeAgl: number | null | undefined): [number, number, number] {
+  const STOPS: Array<[number, [number, number, number]]> = [
+    [0, [220, 38, 38]],       // red-600
+    [800, [234, 88, 12]],     // orange-600
+    [1500, [217, 119, 6]],    // amber-600
+    [2400, [120, 113, 108]],  // stone-500
+    [3500, [156, 163, 175]],  // gray-400
+  ];
+  const value = altitudeAgl == null || !Number.isFinite(altitudeAgl) ? 1500 : altitudeAgl;
+  if (value <= STOPS[0][0]) return STOPS[0][1];
+  if (value >= STOPS[STOPS.length - 1][0]) return STOPS[STOPS.length - 1][1];
+  for (let i = 1; i < STOPS.length; i += 1) {
+    const [hi, hiRgb] = STOPS[i];
+    if (value <= hi) {
+      const [lo, loRgb] = STOPS[i - 1];
+      const t = (value - lo) / (hi - lo);
+      return [
+        Math.round(loRgb[0] + (hiRgb[0] - loRgb[0]) * t),
+        Math.round(loRgb[1] + (hiRgb[1] - loRgb[1]) * t),
+        Math.round(loRgb[2] + (hiRgb[2] - loRgb[2]) * t),
+      ];
+    }
+  }
+  return STOPS[STOPS.length - 1][1];
+}
 
 interface Props {
   airport?: Airport | null;
@@ -25,33 +67,22 @@ interface Props {
   onPickLocation: (lat: number, lon: number) => void;
 }
 
-// Map altitude AGL (feet) to a noise-intensity value 0..1 — louder when low.
-// Below 500 ft AGL the engine feels right overhead. Above 3000 ft AGL noise is
-// mostly negligible for the resident on the ground.
-function noiseFromAltitudeAgl(altitudeAgl: number | null | undefined): number {
-  if (altitudeAgl == null || !Number.isFinite(altitudeAgl)) return 0.25;
-  if (altitudeAgl <= 500) return 1;
-  if (altitudeAgl >= 3000) return 0;
-  return 1 - (altitudeAgl - 500) / 2500;
-}
-
-// Rainbow stops for the noise-intensity gradient: cold blue → red.
-const NOISE_GRADIENT: Array<[number, string]> = [
-  [0.0, "rgba(29, 78, 216, 0.25)"],   // quiet
-  [0.2, "rgba(6, 182, 212, 0.30)"],
-  [0.4, "rgba(34, 197, 94, 0.40)"],
-  [0.6, "rgba(250, 204, 21, 0.55)"],
-  [0.8, "rgba(249, 115, 22, 0.70)"],
-  [1.0, "rgba(239, 68, 68, 0.85)"],   // loud overhead
+// Heatmap gradient stops, aligned with the dB scale: weights are normalized
+// from dbFromAltitudeAgl/100, so 0 ≈ 30 dB (silence) and 1 ≈ 100 dB.
+// The OL Heatmap layer adds these together as samples accumulate.
+const DB_GRADIENT_STOPS = [
+  "#1d4ed8", // 30 dB - barely audible
+  "#06b6d4", // 45 dB - quiet murmur
+  "#22c55e", // 60 dB - conversation
+  "#facc15", // 72 dB - vacuum cleaner
+  "#f97316", // 81 dB - heavy traffic
+  "#ef4444", // 90+ dB - loud
 ];
 
-function noiseColor(intensity: number): string {
-  for (let i = 1; i < NOISE_GRADIENT.length; i += 1) {
-    if (intensity <= NOISE_GRADIENT[i][0]) {
-      return NOISE_GRADIENT[i][1];
-    }
-  }
-  return NOISE_GRADIENT[NOISE_GRADIENT.length - 1][1];
+function clamp01(value: number): number {
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
 }
 
 const AIRCRAFT_DISPLAY_DELAY_SECONDS = 15;
@@ -141,6 +172,45 @@ function splitSegments(samples: TrackSample[], inWindow: boolean) {
     segments.push(smoothSegment(current));
   }
   return segments;
+}
+
+// Slice in-window samples into 10 time buckets. Each bucket carries:
+//   - smoothed coords via Catmull-Rom
+//   - ageRatio (0 newest → 1 oldest)
+//   - avgAltAglFt (mean AGL for samples in the bucket, or null if unknown)
+function agedTrackSegments(
+  samples: TrackSample[],
+  groundElevFt: number,
+  windowStart: number,
+  windowEnd: number,
+  buckets = 10
+): Array<{ coords: number[][]; ageRatio: number; avgAltAglFt: number | null }> {
+  const sorted = samples
+    .filter((s) => s.in_window)
+    .slice()
+    .sort((a, b) => a.timestamp - b.timestamp);
+  if (sorted.length < 2) return [];
+  const span = Math.max(1, windowEnd - windowStart);
+  const out: Array<{ coords: number[][]; ageRatio: number; avgAltAglFt: number | null }> = [];
+  let bucketStart = 0;
+  for (let i = 1; i <= buckets; i += 1) {
+    const bucketEndTs = i === buckets ? windowEnd + 1 : windowStart + (span * i) / buckets;
+    let split = bucketStart;
+    while (split < sorted.length && sorted[split].timestamp <= bucketEndTs) split += 1;
+    const slice = sorted.slice(bucketStart, Math.min(split + 1, sorted.length));
+    if (slice.length >= 2) {
+      const coords = smoothSegment(slice.map((s) => fromLonLat([s.lon, s.lat])));
+      const midTs = (slice[0].timestamp + slice[slice.length - 1].timestamp) / 2;
+      const ageRatio = clamp01(1 - (midTs - windowStart) / span);
+      const altVals = slice
+        .map((s) => (s.altitude_ft != null ? s.altitude_ft - groundElevFt : null))
+        .filter((v): v is number => v != null && Number.isFinite(v));
+      const avgAltAglFt = altVals.length > 0 ? altVals.reduce((a, b) => a + b, 0) / altVals.length : null;
+      out.push({ coords, ageRatio, avgAltAglFt });
+    }
+    bucketStart = Math.max(bucketStart, split - 1);
+  }
+  return out;
 }
 
 // Centripetal Catmull-Rom spline through the sample points: each pair of
@@ -287,11 +357,18 @@ function styleForFeature(feature: Feature) {
     });
   }
   if (kind === "track_active") {
+    const ageRatio = Number(feature.get("age_ratio") ?? 0);
+    // ageRatio 0 = newest (opaque), 1 = oldest in window (faint)
+    const alpha = Math.max(0.08, 1 - ageRatio * 0.92);
+    const altAgl = feature.get("alt_agl_ft");
+    const [r, g, b] = selected
+      ? [214, 75, 44]
+      : colorFromAltitudeAgl(typeof altAgl === "number" ? altAgl : null);
     return new Style({
       stroke: new Stroke({
-        color: selected ? "#d64b2c" : "#1b3a6b",
-        width: selected ? 5 : 3
-      })
+        color: `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`,
+        width: selected ? 5 : 3,
+      }),
     });
   }
   if (kind === "track_sample") {
@@ -301,18 +378,6 @@ function styleForFeature(feature: Feature) {
         fill: new Fill({ color: selected ? "rgba(214, 75, 44, 0.9)" : "rgba(27, 58, 107, 0.72)" }),
         stroke: new Stroke({ color: "#ffffff", width: selected ? 1.5 : 1 })
       })
-    });
-  }
-
-  if (kind === "noise_blob") {
-    const radius = Number(feature.get("radius") ?? 14);
-    const color = String(feature.get("color") ?? "rgba(239,68,68,0.6)");
-    return new Style({
-      image: new CircleStyle({
-        radius,
-        fill: new Fill({ color }),
-        stroke: new Stroke({ color: "rgba(255,255,255,0.0)", width: 0 }),
-      }),
     });
   }
 
@@ -365,8 +430,14 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const aircraftSourceRef = useRef<VectorSource | null>(null);
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
+  const heatmapLayerRef = useRef<HeatmapLayer | null>(null);
+  const heatmapSourceRef = useRef<VectorSource | null>(null);
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
+
+  const windowStart = scanData?.window?.start_ts ?? 0;
+  const windowEnd = scanData?.window?.end_ts ?? 0;
+  const groundElevFt = airport?.elevation_ft ?? 0;
 
   const features = useMemo(() => {
     const rows: Feature[] = [];
@@ -378,46 +449,54 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       rows.push(polygonFeature(circlePolygon(userLocation.lat, userLocation.lon, 0.5), { kind: "pass" }));
       rows.push(pointFeature(userLocation.lon, userLocation.lat, { kind: "home", label: "Home" }));
     }
-    if (showHeatmap) {
-      // Render every in-window sample as a soft rainbow disc whose color and
-      // size encode how loud the aircraft was overhead — louder at lower AGL.
-      const groundElevFt = airport?.elevation_ft ?? 0;
-      for (const track of scanData?.tracks ?? []) {
-        for (const sample of track.samples) {
-          if (!sample.in_window) continue;
-          const altFt = (sample as TrackSample).altitude_ft;
-          const altAgl = altFt != null ? altFt - groundElevFt : null;
-          const intensity = noiseFromAltitudeAgl(altAgl);
-          if (intensity <= 0.02) continue;
-          const radius = 8 + intensity * 22; // 8 px (quiet) → 30 px (loud)
-          rows.push(pointFeature(sample.lon, sample.lat, {
-            kind: "noise_blob",
-            radius,
-            color: noiseColor(intensity),
-          }));
-        }
-      }
-      return rows;
-    }
+    // In heatmap mode the HeatmapLayer carries the story; suppress the line
+    // tracks so the rainbow gradient reads clearly. Airport ring + home pin stay.
+    if (showHeatmap) return rows;
     for (const track of scanData?.tracks ?? []) {
       const isSelected = selectedIcao24 === track.icao24;
       for (const coords of splitSegments(track.samples, false)) {
         rows.push(lineFeature(coords, { kind: "track_context", selected: isSelected ? 1 : 0 }));
       }
-      for (const coords of splitSegments(track.samples, true)) {
-        rows.push(lineFeature(coords, { kind: "track_active", selected: isSelected ? 1 : 0 }));
-      }
-      track.samples.forEach((sample, index) => {
-        if (!sample.in_window) return;
-        if (!isSelected && index % 2 === 1) return;
-        rows.push(pointFeature(sample.lon, sample.lat, {
-          kind: "track_sample",
-          selected: isSelected ? 1 : 0
+      const aged = windowStart && windowEnd
+        ? agedTrackSegments(track.samples, groundElevFt, windowStart, windowEnd)
+        : splitSegments(track.samples, true).map((coords) => ({
+            coords,
+            ageRatio: 0,
+            avgAltAglFt: null as number | null,
+          }));
+      for (const { coords, ageRatio, avgAltAglFt } of aged) {
+        rows.push(lineFeature(coords, {
+          kind: "track_active",
+          selected: isSelected ? 1 : 0,
+          age_ratio: ageRatio,
+          alt_agl_ft: avgAltAglFt,
         }));
-      });
+      }
     }
     return rows;
-  }, [airport, userLocation, scanData, selectedIcao24, showHeatmap]);
+  }, [airport, userLocation, scanData, selectedIcao24, showHeatmap, windowStart, windowEnd, groundElevFt]);
+
+  // Each sample → one Heatmap point feature with `weight` set to dB / 100 so
+  // the OL HeatmapLayer's accumulating Gaussian renders louder spots brighter.
+  const heatmapFeatures = useMemo(() => {
+    if (!showHeatmap) return [] as Feature[];
+    const out: Feature[] = [];
+    for (const track of scanData?.tracks ?? []) {
+      for (const sample of track.samples) {
+        if (!sample.in_window) continue;
+        const altFt = (sample as TrackSample).altitude_ft;
+        const altAgl = altFt != null ? altFt - groundElevFt : null;
+        const db = dbFromAltitudeAgl(altAgl);
+        // Map 30 dB → 0, 90 dB → 1 so quiet aircraft barely contribute.
+        const weight = clamp01((db - 30) / 60);
+        if (weight <= 0.01) continue;
+        const feature = new Feature(new Point(fromLonLat([sample.lon, sample.lat])));
+        feature.set("weight", weight);
+        out.push(feature);
+      }
+    }
+    return out;
+  }, [scanData, showHeatmap, groundElevFt]);
 
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
     if (showHeatmap) return [];
@@ -473,6 +552,39 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     source.clear();
     source.addFeatures(features);
   }, [features]);
+
+  // Deferred Heatmap layer init — putting HeatmapLayer in the initial
+  // new Map({ layers: [...] }) array silently breaks OL 10.9's renderer and
+  // produces zero canvases. Constructing it AFTER the map is alive avoids
+  // the bug entirely. Use the string-property weight form (also more
+  // forgiving than a function across OL versions).
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || heatmapLayerRef.current) return;
+    const source = new VectorSource();
+    const layer = new HeatmapLayer({
+      source,
+      blur: 25,
+      radius: 16,
+      weight: "weight",
+      gradient: DB_GRADIENT_STOPS,
+      zIndex: 5,
+    });
+    layer.setVisible(false);
+    mapRef.current.addLayer(layer);
+    heatmapLayerRef.current = layer;
+    heatmapSourceRef.current = source;
+  }, [mapReady]);
+
+  useEffect(() => {
+    const source = heatmapSourceRef.current;
+    const layer = heatmapLayerRef.current;
+    if (!source || !layer) return;
+    source.clear();
+    if (showHeatmap && heatmapFeatures.length > 0) {
+      source.addFeatures(heatmapFeatures);
+    }
+    layer.setVisible(showHeatmap);
+  }, [showHeatmap, heatmapFeatures]);
 
   useEffect(() => {
     if (!mapReady || !aircraftSourceRef.current) return;
@@ -541,5 +653,30 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     }
   }, [airport, userLocation, scanData, autoZoom]);
 
-  return <div className="map openlayers-map" ref={containerRef} />;
+  return (
+    <div className="map-stage">
+      <div className="map openlayers-map" ref={containerRef} />
+      {showHeatmap && <DbLegend />}
+    </div>
+  );
+}
+
+function DbLegend() {
+  return (
+    <div className="db-legend" role="figure" aria-label="Decibel intensity legend">
+      <div className="db-legend-title">Avg dB (estimated)</div>
+      <div className="db-legend-bar" />
+      <div className="db-legend-scale">
+        <span>30</span>
+        <span>45</span>
+        <span>60</span>
+        <span>72</span>
+        <span>81</span>
+        <span>90+</span>
+      </div>
+      <div className="db-legend-note">
+        65 dB at 900 ft AGL, scaled by inverse-square law per sample.
+      </div>
+    </div>
+  );
 }
