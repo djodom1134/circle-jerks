@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Github, Headphones, History, LocateFixed, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import MapView from "./components/MapView";
@@ -88,6 +88,7 @@ export default function App() {
   const [airportResults, setAirportResults] = useState<Airport[]>([]);
   const [addressQuery, setAddressQuery] = useState("");
   const [autoZoom, setAutoZoom] = useState(true);
+  const [showHeatmap, setShowHeatmap] = useState(false);
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
   const [repeatOffenders, setRepeatOffenders] = useState<RepeatOffender[]>([]);
   const [liveStatus, setLiveStatus] = useState<LiveStatusResponse | null>(null);
@@ -339,6 +340,16 @@ export default function App() {
               />
               <span>Auto-zoom</span>
             </label>
+            <button
+              type="button"
+              className={`map-icon-toggle${showHeatmap ? " active" : ""}`}
+              onClick={() => setShowHeatmap((value) => !value)}
+              title={showHeatmap ? "Showing noise-intensity heatmap. Click to return to individual tracks." : "Show a noise-intensity heatmap (lower aircraft = brighter)."}
+              aria-label="Toggle noise heatmap"
+              aria-pressed={showHeatmap}
+            >
+              <Flame size={16} aria-hidden="true" />
+            </button>
             <AtcListenButton airportIcao={airport?.icao} />
           </div>
           <MapView
@@ -347,6 +358,7 @@ export default function App() {
             scanData={scanData}
             selectedIcao24={selected?.icao24}
             autoZoom={autoZoom}
+            showHeatmap={showHeatmap}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
           />
         </section>

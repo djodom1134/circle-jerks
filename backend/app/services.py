@@ -465,6 +465,7 @@ async def tracks_for_response(store: Store, offenders: list[dict], window: Windo
                     "lat": sample["lat"],
                     "lon": sample["lon"],
                     "heading_deg": sample.get("heading_deg"),
+                    "altitude_ft": sample.get("geo_altitude_ft") or sample.get("baro_altitude_ft"),
                     "in_window": window.start_ts <= sample["timestamp"] <= window.end_ts,
                 }
                 for sample in full_track
@@ -510,6 +511,7 @@ async def recent_tracks_for_response(
                 "lat": sample["lat"],
                 "lon": sample["lon"],
                 "heading_deg": sample.get("heading_deg"),
+                "altitude_ft": sample.get("geo_altitude_ft") or sample.get("baro_altitude_ft"),
                 "in_window": True,
             }
             for sample in full_track

@@ -50,6 +50,7 @@ export interface TrackSample {
   lat: number;
   lon: number;
   heading_deg?: number | null;
+  altitude_ft?: number | null;
   in_window: boolean;
 }
 

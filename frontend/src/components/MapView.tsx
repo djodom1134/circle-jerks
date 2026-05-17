@@ -21,7 +21,37 @@ interface Props {
   scanData?: ScanResponse | null;
   selectedIcao24?: string | null;
   autoZoom?: boolean;
+  showHeatmap?: boolean;
   onPickLocation: (lat: number, lon: number) => void;
+}
+
+// Map altitude AGL (feet) to a noise-intensity value 0..1 — louder when low.
+// Below 500 ft AGL the engine feels right overhead. Above 3000 ft AGL noise is
+// mostly negligible for the resident on the ground.
+function noiseFromAltitudeAgl(altitudeAgl: number | null | undefined): number {
+  if (altitudeAgl == null || !Number.isFinite(altitudeAgl)) return 0.25;
+  if (altitudeAgl <= 500) return 1;
+  if (altitudeAgl >= 3000) return 0;
+  return 1 - (altitudeAgl - 500) / 2500;
+}
+
+// Rainbow stops for the noise-intensity gradient: cold blue → red.
+const NOISE_GRADIENT: Array<[number, string]> = [
+  [0.0, "rgba(29, 78, 216, 0.25)"],   // quiet
+  [0.2, "rgba(6, 182, 212, 0.30)"],
+  [0.4, "rgba(34, 197, 94, 0.40)"],
+  [0.6, "rgba(250, 204, 21, 0.55)"],
+  [0.8, "rgba(249, 115, 22, 0.70)"],
+  [1.0, "rgba(239, 68, 68, 0.85)"],   // loud overhead
+];
+
+function noiseColor(intensity: number): string {
+  for (let i = 1; i < NOISE_GRADIENT.length; i += 1) {
+    if (intensity <= NOISE_GRADIENT[i][0]) {
+      return NOISE_GRADIENT[i][1];
+    }
+  }
+  return NOISE_GRADIENT[NOISE_GRADIENT.length - 1][1];
 }
 
 const AIRCRAFT_DISPLAY_DELAY_SECONDS = 15;
@@ -274,6 +304,18 @@ function styleForFeature(feature: Feature) {
     });
   }
 
+  if (kind === "noise_blob") {
+    const radius = Number(feature.get("radius") ?? 14);
+    const color = String(feature.get("color") ?? "rgba(239,68,68,0.6)");
+    return new Style({
+      image: new CircleStyle({
+        radius,
+        fill: new Fill({ color }),
+        stroke: new Stroke({ color: "rgba(255,255,255,0.0)", width: 0 }),
+      }),
+    });
+  }
+
   if (kind === "aircraft") {
     const heading = Number(feature.get("heading") ?? 0);
     return new Style({
@@ -316,7 +358,7 @@ function styleForFeature(feature: Feature) {
   });
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, onPickLocation }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
@@ -336,6 +378,27 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       rows.push(polygonFeature(circlePolygon(userLocation.lat, userLocation.lon, 0.5), { kind: "pass" }));
       rows.push(pointFeature(userLocation.lon, userLocation.lat, { kind: "home", label: "Home" }));
     }
+    if (showHeatmap) {
+      // Render every in-window sample as a soft rainbow disc whose color and
+      // size encode how loud the aircraft was overhead — louder at lower AGL.
+      const groundElevFt = airport?.elevation_ft ?? 0;
+      for (const track of scanData?.tracks ?? []) {
+        for (const sample of track.samples) {
+          if (!sample.in_window) continue;
+          const altFt = (sample as TrackSample).altitude_ft;
+          const altAgl = altFt != null ? altFt - groundElevFt : null;
+          const intensity = noiseFromAltitudeAgl(altAgl);
+          if (intensity <= 0.02) continue;
+          const radius = 8 + intensity * 22; // 8 px (quiet) → 30 px (loud)
+          rows.push(pointFeature(sample.lon, sample.lat, {
+            kind: "noise_blob",
+            radius,
+            color: noiseColor(intensity),
+          }));
+        }
+      }
+      return rows;
+    }
     for (const track of scanData?.tracks ?? []) {
       const isSelected = selectedIcao24 === track.icao24;
       for (const coords of splitSegments(track.samples, false)) {
@@ -354,9 +417,10 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       });
     }
     return rows;
-  }, [airport, userLocation, scanData, selectedIcao24]);
+  }, [airport, userLocation, scanData, selectedIcao24, showHeatmap]);
 
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
+    if (showHeatmap) return [];
     return (scanData?.tracks ?? [])
       .map((track) => ({
         icao24: track.icao24,
@@ -365,7 +429,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         samples: normalizeTrackSamples(track.samples)
       }))
       .filter((track) => track.samples.length > 0);
-  }, [scanData, selectedIcao24]);
+  }, [scanData, selectedIcao24, showHeatmap]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) {
