@@ -577,6 +577,72 @@ def altitude_over_user_summary(
     }
 
 
+# Acoustic reference: an aircraft at 900 ft AGL directly overhead is
+# modelled at 65 dB at the listener (the midpoint of the 60-70 dB range
+# given by the user). Sound pressure level decays 20·log10(distance ratio).
+DB_REFERENCE_DISTANCE_FT = 900.0
+DB_REFERENCE_LEVEL = 65.0
+DB_AUDIBLE_THRESHOLD = 35.0
+
+
+def _db_at_home_for_sample(
+    sample: dict,
+    user_lat: float,
+    user_lon: float,
+    user_elevation_ft: float,
+) -> float | None:
+    lat = sample.get("lat")
+    lon = sample.get("lon")
+    alt = sample.get("geo_altitude_ft") or sample.get("baro_altitude_ft")
+    if lat is None or lon is None or alt is None:
+        return None
+    horizontal_nm = distance_nm(Point(float(lat), float(lon)), Point(user_lat, user_lon))
+    horizontal_ft = horizontal_nm * 6076.12
+    alt_above_user_ft = float(alt) - float(user_elevation_ft)
+    if alt_above_user_ft <= 0:
+        alt_above_user_ft = 100.0  # don't divide by zero if rare sample dips below user elev
+    distance_ft = (horizontal_ft * horizontal_ft + alt_above_user_ft * alt_above_user_ft) ** 0.5
+    if distance_ft <= 0:
+        return DB_REFERENCE_LEVEL + 20.0
+    import math as _m
+    return DB_REFERENCE_LEVEL - 20.0 * _m.log10(distance_ft / DB_REFERENCE_DISTANCE_FT)
+
+
+def db_at_home_summary(
+    track: list[dict],
+    user_lat: float,
+    user_lon: float,
+    user_elevation_ft: float | None,
+    window: WindowRange,
+    seconds_per_sample: float = 10.0,
+) -> dict:
+    """Compute peak and audible-window-average dB at the listener (home) from
+    aircraft positions during the window. `seconds_per_sample` reflects the
+    worker's poll cadence so audible_seconds counts time, not raw samples."""
+    if user_elevation_ft is None:
+        return {"peak_db": None, "avg_db": None, "audible_seconds": 0}
+    audible: list[float] = []
+    peak: float | None = None
+    for sample in track:
+        ts = sample.get("timestamp")
+        if ts is None or not (window.start_ts <= int(ts) <= window.end_ts):
+            continue
+        db = _db_at_home_for_sample(sample, user_lat, user_lon, float(user_elevation_ft))
+        if db is None:
+            continue
+        if peak is None or db > peak:
+            peak = db
+        if db >= DB_AUDIBLE_THRESHOLD:
+            audible.append(db)
+    if peak is None:
+        return {"peak_db": None, "avg_db": None, "audible_seconds": 0}
+    return {
+        "peak_db": round(peak, 1),
+        "avg_db": round(sum(audible) / len(audible), 1) if audible else None,
+        "audible_seconds": int(round(len(audible) * seconds_per_sample)),
+    }
+
+
 def unknown_origin(source: str = "unknown") -> dict:
     return {
         "origin_city": None,
@@ -984,6 +1050,10 @@ def complaint_context(
     user_summary = altitude_over_user_summary(track, airport, params, window) if params else {}
     avg_user = user_summary.get("avg_altitude_over_user_ft_agl")
     min_user = user_summary.get("min_altitude_over_user_ft_agl")
+    db_summary: dict = {"peak_db": None, "avg_db": None, "audible_seconds": 0}
+    if params is not None:
+        user_elev = params.user_elevation_ft if params.user_elevation_ft is not None else airport.elevation_ft
+        db_summary = db_at_home_summary(track, params.user_lat, params.user_lon, user_elev, window)
     if min_user is None:
         min_user = min(
         [event["min_altitude_ft_agl"] for event in events if event["type"] == "pass_over_user" and event.get("min_altitude_ft_agl") is not None],
@@ -1022,6 +1092,9 @@ def complaint_context(
         runway_used=runway,
         airport_elevation_ft=airport.elevation_ft,
         previous_report_count=max(0, previous_report_count),
+        avg_db_at_home=db_summary.get("avg_db"),
+        peak_db_at_home=db_summary.get("peak_db"),
+        audible_seconds_at_home=db_summary.get("audible_seconds"),
         message_preferences=message_preferences or MessagePreferences(),
     )
 
@@ -1075,6 +1148,7 @@ async def build_description(
         "elev" if prefs.include_elevation else "noelev",
         "circles" if prefs.include_circles else "nocircles",
         "housealt" if prefs.include_altitude_over_house else "nohousealt",
+        "dbhome" if prefs.include_db_at_home else "nodbhome",
         origin_info.get("origin_label") or "unknown",
         origin_info.get("origin_source") or "unknown",
         str(max(0, previous_report_count)),
@@ -1167,6 +1241,18 @@ async def build_summary_description(
 
     altitude_values = [context.avg_altitude_user for context in contexts if context.avg_altitude_user is not None]
     min_altitude_values = [context.min_altitude_user for context in contexts if context.min_altitude_user is not None]
+    peak_db_values = [context.peak_db_at_home for context in contexts if context.peak_db_at_home is not None]
+    audible_pairs = [
+        (context.avg_db_at_home, context.audible_seconds_at_home or 0)
+        for context in contexts
+        if context.avg_db_at_home is not None
+    ]
+    total_audible = sum(seconds for _, seconds in audible_pairs)
+    avg_db_aggregate = (
+        sum(db * max(1, seconds) for db, seconds in audible_pairs) / max(1, total_audible)
+        if audible_pairs
+        else None
+    )
     aggregate = AggregateComplaintContext(
         airport_name=airport.name,
         airport_icao=airport.icao,
@@ -1185,6 +1271,9 @@ async def build_summary_description(
         airport_elevation_ft=airport.elevation_ft,
         previous_report_total=sum(context.previous_report_count for context in contexts),
         items=contexts,
+        avg_db_at_home=round(avg_db_aggregate, 1) if avg_db_aggregate is not None else None,
+        peak_db_at_home=round(max(peak_db_values), 1) if peak_db_values else None,
+        audible_seconds_at_home=total_audible if audible_pairs else 0,
         message_preferences=prefs,
     )
     cache_key = ":".join([
@@ -1199,6 +1288,7 @@ async def build_summary_description(
         "elev" if prefs.include_elevation else "noelev",
         "circles" if prefs.include_circles else "nocircles",
         "housealt" if prefs.include_altitude_over_house else "nohousealt",
+        "dbhome" if prefs.include_db_at_home else "nodbhome",
         str(aggregate.previous_report_total),
     ])
     cached = await store.get_description(cache_key)

@@ -1483,6 +1483,14 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
               />
               <span>Altitude over house</span>
             </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={messagePrefs.include_db_at_home}
+                onChange={(event) => updateMessagePreference("include_db_at_home", event.target.checked)}
+              />
+              <span>dB at home (avg + peak)</span>
+            </label>
           </div>
         </div>
 

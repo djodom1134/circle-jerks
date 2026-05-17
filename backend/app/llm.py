@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -28,6 +28,7 @@ class MessagePreferences:
     include_elevation: bool = True
     include_circles: bool = True
     include_altitude_over_house: bool = True
+    include_db_at_home: bool = True
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,10 @@ class ComplaintContext:
     runway_used: str | None
     airport_elevation_ft: int | None
     previous_report_count: int
-    message_preferences: MessagePreferences
+    avg_db_at_home: float | None = None
+    peak_db_at_home: float | None = None
+    audible_seconds_at_home: int | None = None
+    message_preferences: MessagePreferences = field(default_factory=MessagePreferences)
 
 
 @dataclass(frozen=True)
@@ -78,7 +82,10 @@ class AggregateComplaintContext:
     airport_elevation_ft: int | None
     previous_report_total: int
     items: list[ComplaintContext]
-    message_preferences: MessagePreferences
+    avg_db_at_home: float | None = None
+    peak_db_at_home: float | None = None
+    audible_seconds_at_home: int | None = None
+    message_preferences: MessagePreferences = field(default_factory=MessagePreferences)
 
 
 def build_prompt(context: ComplaintContext, sliders: ToneSliders) -> str:
@@ -102,6 +109,7 @@ include_all_detail: {prefs.include_all_detail}
 include_airport_elevation: {prefs.include_elevation}
 include_number_of_circles: {prefs.include_circles}
 include_altitude_over_house: {prefs.include_altitude_over_house}
+include_db_at_home: {prefs.include_db_at_home}
 
 DATA:
 airport: {context.airport_name} ({context.airport_icao})
@@ -122,6 +130,9 @@ low_approach_count: {context.low_approaches}
 passes_over_user_count: {context.passes}
 avg_altitude_over_user_ft_agl: {context.avg_altitude_user if context.avg_altitude_user is not None else "unknown"}
 min_altitude_over_user_ft_agl: {context.min_altitude_user if context.min_altitude_user is not None else "unknown"}
+peak_db_at_home: {f"{context.peak_db_at_home:.1f}" if context.peak_db_at_home is not None else "unknown"}
+avg_db_at_home_during_audible: {f"{context.avg_db_at_home:.1f}" if context.avg_db_at_home is not None else "unknown"}
+audible_seconds_at_home: {context.audible_seconds_at_home if context.audible_seconds_at_home is not None else "unknown"}
 quiet_hours_events: {context.quiet_hours_events}
 peak_hours: {context.peak_hours}
 origin_airport: {context.origin_airport}
@@ -162,6 +173,7 @@ include_all_detail: {prefs.include_all_detail}
 include_airport_elevation: {prefs.include_elevation}
 include_number_of_circles: {prefs.include_circles}
 include_altitude_over_house: {prefs.include_altitude_over_house}
+include_db_at_home: {prefs.include_db_at_home}
 
 AGGREGATE DATA:
 airport: {context.airport_name} ({context.airport_icao})
@@ -178,6 +190,9 @@ total_low_approach_count: {context.total_low_approaches}
 total_passes_over_user_count: {context.total_passes}
 avg_altitude_over_user_ft_agl: {context.avg_altitude_user if context.avg_altitude_user is not None else "unknown"}
 min_altitude_over_user_ft_agl: {context.min_altitude_user if context.min_altitude_user is not None else "unknown"}
+peak_db_at_home: {f"{context.peak_db_at_home:.1f}" if context.peak_db_at_home is not None else "unknown"}
+avg_db_at_home_during_audible: {f"{context.avg_db_at_home:.1f}" if context.avg_db_at_home is not None else "unknown"}
+audible_seconds_at_home: {context.audible_seconds_at_home if context.audible_seconds_at_home is not None else "unknown"}
 previous_reports_by_this_user_total: {context.previous_report_total}
 
 AIRCRAFT DETAILS:
@@ -215,6 +230,16 @@ def deterministic_description(context: ComplaintContext) -> str:
         parts.append(f"The average observed altitude over my location was {context.avg_altitude_user} ft AGL.")
     elif prefs.include_altitude_over_house and context.min_altitude_user is not None:
         parts.append(f"The lowest observed overflight altitude was {context.min_altitude_user} ft AGL.")
+    if prefs.include_db_at_home and context.peak_db_at_home is not None and context.avg_db_at_home is not None:
+        parts.append(
+            f"Based on the recorded altitudes and aircraft positions, the peak estimated noise at my home "
+            f"during this incident reached {context.peak_db_at_home:.1f} dB, with an average of "
+            f"{context.avg_db_at_home:.1f} dB during audible passes."
+        )
+    elif prefs.include_db_at_home and context.peak_db_at_home is not None:
+        parts.append(
+            f"Estimated peak noise at my home from this aircraft was {context.peak_db_at_home:.1f} dB."
+        )
     if prefs.include_all_detail and context.observed_from != "unknown" and context.observed_to != "unknown":
         parts.append(f"The relevant activity was observed from {context.observed_from} to {context.observed_to} local time.")
     if prefs.include_all_detail and context.peak_hours != "none":
@@ -248,6 +273,11 @@ def deterministic_aggregate_description(context: AggregateComplaintContext) -> s
         parts.append(f"The reference airport field elevation is {context.airport_elevation_ft} ft MSL.")
     if prefs.include_altitude_over_house and context.avg_altitude_user is not None:
         parts.append(f"The average observed altitude over my location was {context.avg_altitude_user} ft AGL, with a lowest observed pass of {context.min_altitude_user} ft AGL.")
+    if prefs.include_db_at_home and context.peak_db_at_home is not None and context.avg_db_at_home is not None:
+        parts.append(
+            f"Across these aircraft the peak estimated noise at my home reached {context.peak_db_at_home:.1f} dB, "
+            f"with an average of {context.avg_db_at_home:.1f} dB during audible passes."
+        )
     if prefs.include_all_detail and context.observed_from != "unknown" and context.observed_to != "unknown":
         parts.append(f"The relevant activity was observed from {context.observed_from} to {context.observed_to} local time.")
     parts.append("Please review this combined aircraft activity and consider appropriate noise-abatement follow-up.")

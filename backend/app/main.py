@@ -53,6 +53,7 @@ class MessagePreferencesRequest(BaseModel):
     include_elevation: bool = True
     include_circles: bool = True
     include_altitude_over_house: bool = True
+    include_db_at_home: bool = True
 
 
 class SummaryComplaintRequest(BaseModel):
@@ -916,6 +917,7 @@ async def aircraft_detail(
     include_elevation: bool = True,
     include_circles: bool = True,
     include_altitude_over_house: bool = True,
+    include_db_at_home: bool = True,
     previous_report_count: int = 0,
 ):
     try:
@@ -932,6 +934,7 @@ async def aircraft_detail(
             include_elevation=include_elevation,
             include_circles=include_circles,
             include_altitude_over_house=include_altitude_over_house,
+            include_db_at_home=include_db_at_home,
         )
         with db_session(settings.database_path) as conn:
             return await build_description(
@@ -977,6 +980,7 @@ async def complaint_summary(
             include_elevation=payload.message_preferences.include_elevation,
             include_circles=payload.message_preferences.include_circles,
             include_altitude_over_house=payload.message_preferences.include_altitude_over_house,
+            include_db_at_home=payload.message_preferences.include_db_at_home,
         )
         with db_session(settings.database_path) as conn:
             return await build_summary_description(

@@ -7,6 +7,7 @@ export interface MessagePreferences {
   include_elevation: boolean;
   include_circles: boolean;
   include_altitude_over_house: boolean;
+  include_db_at_home: boolean;
 }
 
 export interface StoredPreferences {
@@ -27,7 +28,8 @@ export const DEFAULT_MESSAGE_PREFS: MessagePreferences = {
   include_all_detail: true,
   include_elevation: true,
   include_circles: true,
-  include_altitude_over_house: true
+  include_altitude_over_house: true,
+  include_db_at_home: true
 };
 
 export const DEFAULT_STORED_PREFS: StoredPreferences = {

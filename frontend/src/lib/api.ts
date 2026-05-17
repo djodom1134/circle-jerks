@@ -117,6 +117,7 @@ export interface MessagePreferences {
   include_elevation: boolean;
   include_circles: boolean;
   include_altitude_over_house: boolean;
+  include_db_at_home: boolean;
 }
 
 export interface ComplaintResponse {
@@ -436,6 +437,7 @@ export function aircraftDetail(
     include_elevation: String(message.include_elevation),
     include_circles: String(message.include_circles),
     include_altitude_over_house: String(message.include_altitude_over_house),
+    include_db_at_home: String(message.include_db_at_home),
     previous_report_count: String(reportCount)
   });
   return getJson<ComplaintResponse>(`/aircraft/${icao24}/detail?${query.toString()}`);
