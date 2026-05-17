@@ -584,10 +584,11 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       if (!showHeatmap) return;
 
       const resolution = map.getView().getResolution() ?? 1;
-      // 90 m noise footprint per sample — roughly the area within which a low
-      // GA aircraft is the dominant ambient noise source.
-      const blobMeters = 90;
-      const blobPx = Math.max(6, blobMeters / resolution);
+      // 250 m noise footprint per sample. Min 28 px keeps the blob visible
+      // at airport-scale zoom (zoom 10 ≈ 153 m/px); as you zoom in, the
+      // meters-based radius grows so individual passes become distinguishable.
+      const blobMeters = 250;
+      const blobPx = Math.max(28, blobMeters / resolution);
 
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
@@ -605,13 +606,17 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
           if (!pixel) continue;
           const [r, g, b] = rgbFromDb(db);
           const intensity = clamp01((db - 30) / 60);
-          const peakAlpha = 0.10 + 0.35 * intensity;
+          // Peak alpha picks up enough that one isolated sample shows as a
+          // soft tint; multiple overlapping samples in the same area saturate
+          // to bright red via additive blending.
+          const peakAlpha = 0.18 + 0.55 * intensity;
           const gradient = ctx.createRadialGradient(
             pixel[0], pixel[1], 0,
             pixel[0], pixel[1], blobPx
           );
           gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${peakAlpha.toFixed(3)})`);
-          gradient.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${(peakAlpha * 0.4).toFixed(3)})`);
+          gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${(peakAlpha * 0.55).toFixed(3)})`);
+          gradient.addColorStop(0.75, `rgba(${r}, ${g}, ${b}, ${(peakAlpha * 0.18).toFixed(3)})`);
           gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
           ctx.fillStyle = gradient;
           ctx.beginPath();
