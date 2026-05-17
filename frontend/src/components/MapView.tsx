@@ -7,7 +7,6 @@ import LineString from "ol/geom/LineString";
 import Point from "ol/geom/Point";
 import Polygon from "ol/geom/Polygon";
 import { defaults as defaultInteractions } from "ol/interaction/defaults";
-import HeatmapLayer from "ol/layer/Heatmap";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
 import { fromLonLat, toLonLat } from "ol/proj";
@@ -67,17 +66,17 @@ interface Props {
   onPickLocation: (lat: number, lon: number) => void;
 }
 
-// Heatmap gradient stops, aligned with the dB scale: weights are normalized
-// from dbFromAltitudeAgl/100, so 0 ≈ 30 dB (silence) and 1 ≈ 100 dB.
-// The OL Heatmap layer adds these together as samples accumulate.
-const DB_GRADIENT_STOPS = [
-  "rgba(29, 78, 216, 0)",     // 30 dB - transparent (sub-audible)
-  "rgba(6, 182, 212, 0.55)",  // 45 dB - quiet
-  "rgba(34, 197, 94, 0.70)",  // 60 dB - conversation
-  "rgba(250, 204, 21, 0.80)", // 72 dB - vacuum cleaner
-  "rgba(249, 115, 22, 0.88)", // 81 dB - heavy traffic
-  "rgba(239, 68, 68, 0.95)",  // 90+ dB - loud
-];
+// Decibel → rgba color (semi-transparent for additive blending).
+// The blob layer overlaps many of these per spot so the local dB visually
+// integrates into a heatmap-style gradient over time.
+function dbColor(db: number): string {
+  if (db < 35) return "rgba(29, 78, 216, 0.10)";   // 30 dB sub-audible
+  if (db < 50) return "rgba(6, 182, 212, 0.22)";   // 45 dB quiet
+  if (db < 62) return "rgba(34, 197, 94, 0.32)";   // 60 dB conversation
+  if (db < 72) return "rgba(250, 204, 21, 0.40)";  // 72 dB vacuum
+  if (db < 82) return "rgba(249, 115, 22, 0.48)";  // 81 dB heavy traffic
+  return "rgba(239, 68, 68, 0.55)";                // 90+ dB loud
+}
 
 function clamp01(value: number): number {
   if (value < 0) return 0;
@@ -381,6 +380,18 @@ function styleForFeature(feature: Feature) {
     });
   }
 
+  if (kind === "noise_blob") {
+    const radius = Number(feature.get("radius") ?? 14);
+    const color = String(feature.get("color") ?? "rgba(239,68,68,0.5)");
+    return new Style({
+      image: new CircleStyle({
+        radius,
+        fill: new Fill({ color }),
+        stroke: new Stroke({ color: "rgba(255,255,255,0.0)", width: 0 }),
+      }),
+    });
+  }
+
   if (kind === "aircraft") {
     const heading = Number(feature.get("heading") ?? 0);
     return new Style({
@@ -430,8 +441,6 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const aircraftSourceRef = useRef<VectorSource | null>(null);
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
-  const heatmapLayerRef = useRef<HeatmapLayer | null>(null);
-  const heatmapSourceRef = useRef<VectorSource | null>(null);
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
 
@@ -449,9 +458,28 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       rows.push(polygonFeature(circlePolygon(userLocation.lat, userLocation.lon, 0.5), { kind: "pass" }));
       rows.push(pointFeature(userLocation.lon, userLocation.lat, { kind: "home", label: "Home" }));
     }
-    // In heatmap mode the HeatmapLayer carries the story; suppress the line
-    // tracks so the rainbow gradient reads clearly. Airport ring + home pin stay.
-    if (showHeatmap) return rows;
+    // In heatmap mode, each in-window sample becomes a semi-transparent
+    // rainbow disc sized + colored by the estimated dB at the observer below.
+    // Overlapping discs additively blend, producing a heatmap-style density.
+    if (showHeatmap) {
+      for (const track of scanData?.tracks ?? []) {
+        for (const sample of track.samples) {
+          if (!sample.in_window) continue;
+          const altFt = (sample as TrackSample).altitude_ft;
+          const altAgl = altFt != null ? altFt - groundElevFt : null;
+          const db = dbFromAltitudeAgl(altAgl);
+          if (db < 35) continue; // skip near-silence to keep the map clean
+          // 30 dB → tiny, 90+ dB → big-and-bright
+          const radius = 6 + clamp01((db - 30) / 60) * 26;
+          rows.push(pointFeature(sample.lon, sample.lat, {
+            kind: "noise_blob",
+            radius,
+            color: dbColor(db),
+          }));
+        }
+      }
+      return rows;
+    }
     for (const track of scanData?.tracks ?? []) {
       const isSelected = selectedIcao24 === track.icao24;
       for (const coords of splitSegments(track.samples, false)) {
@@ -475,28 +503,6 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     }
     return rows;
   }, [airport, userLocation, scanData, selectedIcao24, showHeatmap, windowStart, windowEnd, groundElevFt]);
-
-  // Each sample → one Heatmap point feature with `weight` set to dB / 100 so
-  // the OL HeatmapLayer's accumulating Gaussian renders louder spots brighter.
-  const heatmapFeatures = useMemo(() => {
-    if (!showHeatmap) return [] as Feature[];
-    const out: Feature[] = [];
-    for (const track of scanData?.tracks ?? []) {
-      for (const sample of track.samples) {
-        if (!sample.in_window) continue;
-        const altFt = (sample as TrackSample).altitude_ft;
-        const altAgl = altFt != null ? altFt - groundElevFt : null;
-        const db = dbFromAltitudeAgl(altAgl);
-        // Map 30 dB → 0, 90 dB → 1 so quiet aircraft barely contribute.
-        const weight = clamp01((db - 30) / 60);
-        if (weight <= 0.01) continue;
-        const feature = new Feature(new Point(fromLonLat([sample.lon, sample.lat])));
-        feature.set("weight", weight);
-        out.push(feature);
-      }
-    }
-    return out;
-  }, [scanData, showHeatmap, groundElevFt]);
 
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
     if (showHeatmap) return [];
@@ -559,30 +565,9 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   // works, but only if we never call setVisible(true/false) — that flip
   // seems to occlude the basemap on first show. Workaround: leave the layer
   // always visible and rely on an empty source rendering nothing.
-  useEffect(() => {
-    if (!mapReady || !mapRef.current || heatmapLayerRef.current) return;
-    const source = new VectorSource();
-    const layer = new HeatmapLayer({
-      source,
-      blur: 25,
-      radius: 16,
-      weight: "weight",
-      gradient: DB_GRADIENT_STOPS,
-      zIndex: 5,
-    });
-    mapRef.current.addLayer(layer);
-    heatmapLayerRef.current = layer;
-    heatmapSourceRef.current = source;
-  }, [mapReady]);
-
-  useEffect(() => {
-    const source = heatmapSourceRef.current;
-    if (!source) return;
-    source.clear();
-    if (showHeatmap && heatmapFeatures.length > 0) {
-      source.addFeatures(heatmapFeatures);
-    }
-  }, [showHeatmap, heatmapFeatures]);
+  // Heatmap is rendered inline via the existing VectorLayer (see features
+  // useMemo below). The OL HeatmapLayer's renderer in 10.9 wipes the basemap
+  // canvas when added — keeping the same VectorLayer pipeline works around it.
 
   useEffect(() => {
     if (!mapReady || !aircraftSourceRef.current) return;
