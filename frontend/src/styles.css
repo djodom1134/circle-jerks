@@ -1964,6 +1964,15 @@ input[type="range"] {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+.db-tooltip-footnote {
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.55);
+  text-transform: none;
+  letter-spacing: 0;
+}
 
 /* --- dB legend (visible only when heatmap mode is on) --- */
 .db-legend {

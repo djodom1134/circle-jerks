@@ -115,6 +115,23 @@ function rgbFromDb(db: number): [number, number, number] {
   return STOPS[STOPS.length - 1][1];
 }
 
+// Ambient L_den baseline used as the noise FLOOR before aircraft contribution
+// is added. 40 dB is the EU-WHO "quiet residential" reference. Future work:
+// replace this constant with a per-cell value from a long-term noise map
+// (e.g. OSM road-traffic noise raster — see lukasmartinelli/osm-noise-pollution
+// or a paid noise-map.com dataset). Until then the constant gives an honest
+// floor instead of pretending quiet cells are at 0 dB.
+const AMBIENT_BASELINE_DB = 40;
+const AMBIENT_BASELINE_POWER = Math.pow(10, AMBIENT_BASELINE_DB / 10);
+
+// Two sound levels in dB combine ENERGETICALLY, not arithmetically:
+// L_total = 10·log10(10^(L_a/10) + 10^(L_b/10))
+function combineDb(...levels: number[]): number {
+  let energy = 0;
+  for (const lvl of levels) energy += Math.pow(10, lvl / 10);
+  return 10 * Math.log10(energy);
+}
+
 function clamp01(value: number): number {
   if (value < 0) return 0;
   if (value > 1) return 1;
@@ -471,14 +488,23 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const heatmapAccumulatorRef = useRef<{
     sumPower: Float32Array;
     peakDb: Float32Array;
+    aircraftLeq: Float32Array;
     accW: number;
     accH: number;
     accScale: number;
     windowSeconds: number;
+    baselineDb: number;
   } | null>(null);
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
-  const [hoverDb, setHoverDb] = useState<{ x: number; y: number; lEq: number; peak: number } | null>(null);
+  const [hoverDb, setHoverDb] = useState<{
+    x: number;
+    y: number;
+    peak: number;
+    aircraftLeq: number;
+    combinedLeq: number;
+    baseline: number;
+  } | null>(null);
 
   const windowStart = scanData?.window?.start_ts ?? 0;
   const windowEnd = scanData?.window?.end_ts ?? 0;
@@ -629,6 +655,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       const accH = Math.max(8, Math.floor(heightCss / accScale));
       const sumPower = new Float32Array(accW * accH);
       const peakDb = new Float32Array(accW * accH);
+      const aircraftLeq = new Float32Array(accW * accH);
 
       const view = map.getView();
       const resolution = view.getResolution() ?? 1;
@@ -738,21 +765,29 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         }
       }
 
-      // Convert accumulated power to L_eq (dB), then map to color. The
-      // 10·log10(P/T) step is where many overlapping passes start to add
-      // up: 10× the power → +10 dB; 100× → +20 dB. So a corridor crossed
-      // hundreds of times saturates to bright red even if each individual
-      // pass was only 60-65 dB at altitude.
+      // Convert accumulated power to aircraft L_eq, then energetically
+      // sum with the ambient baseline. 10×aircraft passes → aircraft
+      // L_eq +10 dB. Energy-summing with the ambient floor means cells
+      // with only quiet cruise aircraft stay near baseline (not 0 dB) and
+      // loud climbout corridors push well above baseline.
       const acc = ctx.createImageData(accW, accH);
-      const tinyPower = 1; // skip cells with negligible total energy
+      const tinyPower = 1; // need at least some aircraft contribution
       for (let i = 0; i < accW * accH; i += 1) {
         const p = sumPower[i];
         if (p < tinyPower) continue;
-        const lEq = 10 * Math.log10(p / windowSeconds);
-        if (lEq < 32) continue;
-        const [r, g, b] = rgbFromDb(lEq);
-        const t = clamp01((lEq - 32) / 58); // 32 dB → 0, 90 dB → 1
-        const alpha = Math.round((0.30 + 0.65 * t) * 255);
+        const acftLeq = 10 * Math.log10(p / windowSeconds);
+        aircraftLeq[i] = acftLeq;
+        // Energetic sum of per-second ambient power + aircraft average
+        // per-second power → combined L_eq over the window.
+        const combinedPowerPerSec = AMBIENT_BASELINE_POWER + p / windowSeconds;
+        const combinedLeq = 10 * Math.log10(combinedPowerPerSec);
+        if (combinedLeq < 32) continue;
+        const [r, g, b] = rgbFromDb(combinedLeq);
+        // Alpha tied to how much aircraft pushes above baseline. At baseline
+        // (no aircraft), alpha is faint; loud cells solid red.
+        const above = Math.max(0, combinedLeq - AMBIENT_BASELINE_DB);
+        const alphaT = clamp01(above / 25);
+        const alpha = Math.round((0.18 + 0.72 * alphaT) * 255);
         const o = i * 4;
         acc.data[o] = r;
         acc.data[o + 1] = g;
@@ -773,10 +808,12 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       heatmapAccumulatorRef.current = {
         sumPower,
         peakDb,
+        aircraftLeq,
         accW,
         accH,
         accScale,
         windowSeconds,
+        baselineDb: AMBIENT_BASELINE_DB,
       };
     };
 
@@ -820,8 +857,16 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         setHoverDb(null);
         return;
       }
-      const lEq = 10 * Math.log10(p / acc.windowSeconds);
-      setHoverDb({ x: pixel[0], y: pixel[1], lEq, peak });
+      const aircraftL = acc.aircraftLeq[idx];
+      const combinedLeq = combineDb(aircraftL, acc.baselineDb);
+      setHoverDb({
+        x: pixel[0],
+        y: pixel[1],
+        peak,
+        aircraftLeq: aircraftL,
+        combinedLeq,
+        baseline: acc.baselineDb,
+      });
     };
     const onOut = () => setHoverDb(null);
     map.on("pointermove", onMove);
@@ -914,8 +959,15 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
             <strong>{hoverDb.peak.toFixed(1)} dB</strong>
           </div>
           <div className="db-tooltip-row">
-            <span className="db-tooltip-label">Avg (L_eq)</span>
-            <strong>{hoverDb.lEq.toFixed(1)} dB</strong>
+            <span className="db-tooltip-label">Aircraft L_eq</span>
+            <strong>{hoverDb.aircraftLeq.toFixed(1)} dB</strong>
+          </div>
+          <div className="db-tooltip-row">
+            <span className="db-tooltip-label">Combined</span>
+            <strong>{hoverDb.combinedLeq.toFixed(1)} dB</strong>
+          </div>
+          <div className="db-tooltip-footnote">
+            includes {hoverDb.baseline} dB ambient floor
           </div>
         </div>
       )}
@@ -927,7 +979,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
 function DbLegend() {
   return (
     <div className="db-legend" role="figure" aria-label="Decibel intensity legend">
-      <div className="db-legend-title">L_eq dB (estimated)</div>
+      <div className="db-legend-title">Combined dB (aircraft + ambient)</div>
       <div className="db-legend-bar" />
       <div className="db-legend-scale">
         <span>30</span>
@@ -938,8 +990,8 @@ function DbLegend() {
         <span>90+</span>
       </div>
       <div className="db-legend-note">
-        L_eq = 10·log10(Σ aircraft acoustic energy ÷ window seconds). More
-        overflights of the same spot raise the local L_eq logarithmically.
+        Aircraft L_eq energetically summed with a 40 dB residential ambient
+        floor. Future: per-cell baseline from an OSM road-noise raster.
       </div>
     </div>
   );

@@ -585,6 +585,22 @@ def altitude_over_user_summary(
 DB_REFERENCE_DISTANCE_FT = 900.0
 DB_REFERENCE_LEVEL = 65.0
 DB_AUDIBLE_THRESHOLD = 35.0
+# Long-term residential ambient L_den floor. Constant for now; planned
+# upgrade is to pull per-location values from an OSM road-noise raster
+# (lukasmartinelli/osm-noise-pollution) or a paid noise-map.com dataset.
+DB_AMBIENT_BASELINE = 40.0
+
+
+def combine_db(*levels: float) -> float:
+    """Energetic sum of independent sound levels.
+    L_total = 10·log10(Σ 10^(L_i / 10))"""
+    import math as _m
+    energy = 0.0
+    for lvl in levels:
+        energy += _m.pow(10.0, lvl / 10.0)
+    if energy <= 0:
+        return 0.0
+    return 10.0 * _m.log10(energy)
 
 
 def climb_noise_bonus_db(vertical_rate_fpm: float | None) -> float:
@@ -660,10 +676,20 @@ def db_at_home_summary(
         if db >= DB_AUDIBLE_THRESHOLD:
             audible.append(db)
     if peak is None:
-        return {"peak_db": None, "avg_db": None, "audible_seconds": 0}
+        return {
+            "peak_db": None,
+            "avg_db": None,
+            "combined_db": None,
+            "ambient_db": DB_AMBIENT_BASELINE,
+            "audible_seconds": 0,
+        }
+    avg_audible = sum(audible) / len(audible) if audible else None
+    combined = combine_db(avg_audible, DB_AMBIENT_BASELINE) if avg_audible is not None else None
     return {
         "peak_db": round(peak, 1),
-        "avg_db": round(sum(audible) / len(audible), 1) if audible else None,
+        "avg_db": round(avg_audible, 1) if avg_audible is not None else None,
+        "combined_db": round(combined, 1) if combined is not None else None,
+        "ambient_db": DB_AMBIENT_BASELINE,
         "audible_seconds": int(round(len(audible) * seconds_per_sample)),
     }
 
