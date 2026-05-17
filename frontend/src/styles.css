@@ -1926,6 +1926,12 @@ input[type="range"] {
   position: absolute;
   inset: 0;
 }
+.heatmap-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
 
 /* --- dB legend (visible only when heatmap mode is on) --- */
 .db-legend {

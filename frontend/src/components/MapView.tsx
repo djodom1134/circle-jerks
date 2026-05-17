@@ -66,16 +66,33 @@ interface Props {
   onPickLocation: (lat: number, lon: number) => void;
 }
 
-// Decibel → rgba color (semi-transparent for additive blending).
-// The blob layer overlaps many of these per spot so the local dB visually
-// integrates into a heatmap-style gradient over time.
-function dbColor(db: number): string {
-  if (db < 35) return "rgba(29, 78, 216, 0.10)";   // 30 dB sub-audible
-  if (db < 50) return "rgba(6, 182, 212, 0.22)";   // 45 dB quiet
-  if (db < 62) return "rgba(34, 197, 94, 0.32)";   // 60 dB conversation
-  if (db < 72) return "rgba(250, 204, 21, 0.40)";  // 72 dB vacuum
-  if (db < 82) return "rgba(249, 115, 22, 0.48)";  // 81 dB heavy traffic
-  return "rgba(239, 68, 68, 0.55)";                // 90+ dB loud
+// dB → [r, g, b] for additive canvas compositing.
+// Stops match the legend (blue 30 → cyan 45 → green 60 → yellow 72 →
+// orange 81 → red 90+) with smooth linear interpolation between them.
+function rgbFromDb(db: number): [number, number, number] {
+  const STOPS: Array<[number, [number, number, number]]> = [
+    [30, [29, 78, 216]],
+    [45, [6, 182, 212]],
+    [60, [34, 197, 94]],
+    [72, [250, 204, 21]],
+    [81, [249, 115, 22]],
+    [95, [239, 68, 68]],
+  ];
+  if (db <= STOPS[0][0]) return STOPS[0][1];
+  if (db >= STOPS[STOPS.length - 1][0]) return STOPS[STOPS.length - 1][1];
+  for (let i = 1; i < STOPS.length; i += 1) {
+    if (db <= STOPS[i][0]) {
+      const [loDb, lo] = STOPS[i - 1];
+      const [hiDb, hi] = STOPS[i];
+      const t = (db - loDb) / (hiDb - loDb);
+      return [
+        Math.round(lo[0] + (hi[0] - lo[0]) * t),
+        Math.round(lo[1] + (hi[1] - lo[1]) * t),
+        Math.round(lo[2] + (hi[2] - lo[2]) * t),
+      ];
+    }
+  }
+  return STOPS[STOPS.length - 1][1];
 }
 
 function clamp01(value: number): number {
@@ -380,18 +397,6 @@ function styleForFeature(feature: Feature) {
     });
   }
 
-  if (kind === "noise_blob") {
-    const radius = Number(feature.get("radius") ?? 14);
-    const color = String(feature.get("color") ?? "rgba(239,68,68,0.5)");
-    return new Style({
-      image: new CircleStyle({
-        radius,
-        fill: new Fill({ color }),
-        stroke: new Stroke({ color: "rgba(255,255,255,0.0)", width: 0 }),
-      }),
-    });
-  }
-
   if (kind === "aircraft") {
     const heading = Number(feature.get("heading") ?? 0);
     return new Style({
@@ -441,6 +446,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const aircraftSourceRef = useRef<VectorSource | null>(null);
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
+  const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
 
@@ -458,28 +464,9 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       rows.push(polygonFeature(circlePolygon(userLocation.lat, userLocation.lon, 0.5), { kind: "pass" }));
       rows.push(pointFeature(userLocation.lon, userLocation.lat, { kind: "home", label: "Home" }));
     }
-    // In heatmap mode, each in-window sample becomes a semi-transparent
-    // rainbow disc sized + colored by the estimated dB at the observer below.
-    // Overlapping discs additively blend, producing a heatmap-style density.
-    if (showHeatmap) {
-      for (const track of scanData?.tracks ?? []) {
-        for (const sample of track.samples) {
-          if (!sample.in_window) continue;
-          const altFt = (sample as TrackSample).altitude_ft;
-          const altAgl = altFt != null ? altFt - groundElevFt : null;
-          const db = dbFromAltitudeAgl(altAgl);
-          if (db < 35) continue; // skip near-silence to keep the map clean
-          // 30 dB → tiny, 90+ dB → big-and-bright
-          const radius = 6 + clamp01((db - 30) / 60) * 26;
-          rows.push(pointFeature(sample.lon, sample.lat, {
-            kind: "noise_blob",
-            radius,
-            color: dbColor(db),
-          }));
-        }
-      }
-      return rows;
-    }
+    // In heatmap mode the canvas overlay draws the gradient; here we only
+    // emit the airport ring + home pin so the user still has reference points.
+    if (showHeatmap) return rows;
     for (const track of scanData?.tracks ?? []) {
       const isSelected = selectedIcao24 === track.icao24;
       for (const coords of splitSegments(track.samples, false)) {
@@ -565,9 +552,85 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   // works, but only if we never call setVisible(true/false) — that flip
   // seems to occlude the basemap on first show. Workaround: leave the layer
   // always visible and rely on an empty source rendering nothing.
-  // Heatmap is rendered inline via the existing VectorLayer (see features
-  // useMemo below). The OL HeatmapLayer's renderer in 10.9 wipes the basemap
-  // canvas when added — keeping the same VectorLayer pipeline works around it.
+  // Heatmap rendered as a separate canvas overlay rather than via OL's
+  // HeatmapLayer (which wipes the basemap in 10.9) or discrete disc features
+  // (which the user correctly called out as not a real heatmap). Drawing
+  // radial gradients with `globalCompositeOperation: "lighter"` produces
+  // true additive blending so dense areas saturate to bright red.
+  // Blob size is in METERS, not pixels, so the gradient gets more granular as
+  // you zoom in (the same 80 m audible footprint covers more pixels).
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    const canvas = heatmapCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const draw = () => {
+      const size = map.getSize();
+      if (!size) return;
+      const dpr = window.devicePixelRatio || 1;
+      const widthCss = size[0];
+      const heightCss = size[1];
+      if (canvas.width !== widthCss * dpr || canvas.height !== heightCss * dpr) {
+        canvas.width = widthCss * dpr;
+        canvas.height = heightCss * dpr;
+        canvas.style.width = `${widthCss}px`;
+        canvas.style.height = `${heightCss}px`;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, widthCss, heightCss);
+      if (!showHeatmap) return;
+
+      const resolution = map.getView().getResolution() ?? 1;
+      // 90 m noise footprint per sample — roughly the area within which a low
+      // GA aircraft is the dominant ambient noise source.
+      const blobMeters = 90;
+      const blobPx = Math.max(6, blobMeters / resolution);
+
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const tracks = scanData?.tracks ?? [];
+      for (let ti = 0; ti < tracks.length; ti += 1) {
+        const samples = tracks[ti].samples;
+        for (let si = 0; si < samples.length; si += 1) {
+          const sample = samples[si];
+          if (!sample.in_window) continue;
+          const altFt = (sample as TrackSample).altitude_ft;
+          const altAgl = altFt != null ? altFt - groundElevFt : null;
+          const db = dbFromAltitudeAgl(altAgl);
+          if (db < 35) continue;
+          const pixel = map.getPixelFromCoordinate(fromLonLat([sample.lon, sample.lat]));
+          if (!pixel) continue;
+          const [r, g, b] = rgbFromDb(db);
+          const intensity = clamp01((db - 30) / 60);
+          const peakAlpha = 0.10 + 0.35 * intensity;
+          const gradient = ctx.createRadialGradient(
+            pixel[0], pixel[1], 0,
+            pixel[0], pixel[1], blobPx
+          );
+          gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${peakAlpha.toFixed(3)})`);
+          gradient.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${(peakAlpha * 0.4).toFixed(3)})`);
+          gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+          ctx.fillStyle = gradient;
+          ctx.beginPath();
+          ctx.arc(pixel[0], pixel[1], blobPx, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    };
+
+    draw();
+    map.on("postrender", draw);
+    const onResize = () => draw();
+    window.addEventListener("resize", onResize);
+    return () => {
+      map.un("postrender", draw);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [showHeatmap, scanData, groundElevFt, mapReady]);
 
   useEffect(() => {
     if (!mapReady || !aircraftSourceRef.current) return;
@@ -639,6 +702,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   return (
     <div className="map-stage">
       <div className="map openlayers-map" ref={containerRef} />
+      <canvas className="heatmap-canvas" ref={heatmapCanvasRef} aria-hidden="true" />
       {showHeatmap && <DbLegend />}
     </div>
   );
