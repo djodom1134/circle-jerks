@@ -71,12 +71,12 @@ interface Props {
 // from dbFromAltitudeAgl/100, so 0 ≈ 30 dB (silence) and 1 ≈ 100 dB.
 // The OL Heatmap layer adds these together as samples accumulate.
 const DB_GRADIENT_STOPS = [
-  "#1d4ed8", // 30 dB - barely audible
-  "#06b6d4", // 45 dB - quiet murmur
-  "#22c55e", // 60 dB - conversation
-  "#facc15", // 72 dB - vacuum cleaner
-  "#f97316", // 81 dB - heavy traffic
-  "#ef4444", // 90+ dB - loud
+  "rgba(29, 78, 216, 0)",     // 30 dB - transparent (sub-audible)
+  "rgba(6, 182, 212, 0.55)",  // 45 dB - quiet
+  "rgba(34, 197, 94, 0.70)",  // 60 dB - conversation
+  "rgba(250, 204, 21, 0.80)", // 72 dB - vacuum cleaner
+  "rgba(249, 115, 22, 0.88)", // 81 dB - heavy traffic
+  "rgba(239, 68, 68, 0.95)",  // 90+ dB - loud
 ];
 
 function clamp01(value: number): number {
@@ -553,11 +553,12 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     source.addFeatures(features);
   }, [features]);
 
-  // Deferred Heatmap layer init — putting HeatmapLayer in the initial
+  // Deferred Heatmap layer init: putting HeatmapLayer in the initial
   // new Map({ layers: [...] }) array silently breaks OL 10.9's renderer and
-  // produces zero canvases. Constructing it AFTER the map is alive avoids
-  // the bug entirely. Use the string-property weight form (also more
-  // forgiving than a function across OL versions).
+  // produces zero canvases. Adding it via addLayer() AFTER the map is alive
+  // works, but only if we never call setVisible(true/false) — that flip
+  // seems to occlude the basemap on first show. Workaround: leave the layer
+  // always visible and rely on an empty source rendering nothing.
   useEffect(() => {
     if (!mapReady || !mapRef.current || heatmapLayerRef.current) return;
     const source = new VectorSource();
@@ -569,7 +570,6 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       gradient: DB_GRADIENT_STOPS,
       zIndex: 5,
     });
-    layer.setVisible(false);
     mapRef.current.addLayer(layer);
     heatmapLayerRef.current = layer;
     heatmapSourceRef.current = source;
@@ -577,13 +577,11 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
 
   useEffect(() => {
     const source = heatmapSourceRef.current;
-    const layer = heatmapLayerRef.current;
-    if (!source || !layer) return;
+    if (!source) return;
     source.clear();
     if (showHeatmap && heatmapFeatures.length > 0) {
       source.addFeatures(heatmapFeatures);
     }
-    layer.setVisible(showHeatmap);
   }, [showHeatmap, heatmapFeatures]);
 
   useEffect(() => {
