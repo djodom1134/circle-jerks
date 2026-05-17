@@ -688,6 +688,63 @@ async def sponsors(
     return payload
 
 
+LIVEATC_FEED_TYPES: list[tuple[str, str]] = [
+    ("twr", "Tower"),
+    ("app", "Approach / Departure"),
+    ("atis", "ATIS"),
+    ("gnd", "Ground"),
+    ("ctaf", "CTAF / Unicom"),
+]
+
+# Hand-curated overrides: airports whose LiveATC feed IDs deviate from the
+# standard <icao_lower>_<type> pattern. Each entry maps an ICAO to one or more
+# {id, label} feeds.
+LIVEATC_FEED_OVERRIDES: dict[str, list[dict]] = {
+    "KDEN": [
+        {"id": "kden_twr_n", "label": "Tower (North)"},
+        {"id": "kden_twr_s", "label": "Tower (South)"},
+        {"id": "kden_atis", "label": "ATIS"},
+        {"id": "kden_app_finals", "label": "Approach (Finals)"},
+    ],
+    "KAPA": [
+        {"id": "kapa_twr_gnd", "label": "Tower / Ground"},
+        {"id": "kapa_atis", "label": "ATIS"},
+    ],
+}
+
+
+@app.get("/atc_feeds")
+async def atc_feeds(airport_icao: str):
+    icao = airport_icao.strip().upper()
+    if not icao or len(icao) > 8:
+        raise HTTPException(status_code=422, detail="airport_icao required")
+    override = LIVEATC_FEED_OVERRIDES.get(icao)
+    if override:
+        feeds = [
+            {
+                "id": feed["id"],
+                "label": feed["label"],
+                "stream_url": f"https://d.liveatc.net/{feed['id']}",
+            }
+            for feed in override
+        ]
+    else:
+        feeds = [
+            {
+                "id": f"{icao.lower()}_{suffix}",
+                "label": label,
+                "stream_url": f"https://d.liveatc.net/{icao.lower()}_{suffix}",
+            }
+            for suffix, label in LIVEATC_FEED_TYPES
+        ]
+    return {
+        "airport_icao": icao,
+        "feeds": feeds,
+        "external_search_url": f"https://www.liveatc.net/search/?icao={icao}",
+        "note": "Feeds are best-effort guesses based on LiveATC's standard naming. If none play, use 'Search on LiveATC' to find the right stream.",
+    }
+
+
 @app.get("/repeat_offenders")
 async def repeat_offenders(
     settings: Annotated[Settings, Depends(settings_dep)],

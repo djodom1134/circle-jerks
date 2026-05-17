@@ -346,6 +346,23 @@ export function getRepeatOffenders(limit = 12) {
   return getJson<RepeatOffendersResponse>(`/repeat_offenders?limit=${limit}`);
 }
 
+export interface AtcFeed {
+  id: string;
+  label: string;
+  stream_url: string;
+}
+
+export interface AtcFeedsResponse {
+  airport_icao: string;
+  feeds: AtcFeed[];
+  external_search_url: string;
+  note?: string;
+}
+
+export function getAtcFeeds(airportIcao: string) {
+  return getJson<AtcFeedsResponse>(`/atc_feeds?airport_icao=${encodeURIComponent(airportIcao)}`);
+}
+
 export function nearestAirport(lat: number, lon: number) {
   return getJson<Airport>(`/airports/nearest?lat=${lat}&lon=${lon}`);
 }

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Github, History, LocateFixed, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Github, Headphones, History, LocateFixed, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import MapView from "./components/MapView";
@@ -11,6 +11,7 @@ import {
   complaintSummary,
   complaintForm,
   geocode,
+  getAtcFeeds,
   getConfig,
   getRepeatOffenders,
   getSponsors,
@@ -20,6 +21,7 @@ import {
   scan,
   searchAirports,
   type Airport,
+  type AtcFeedsResponse,
   type ComplaintResponse,
   type ConfigResponse,
   type MessagePreferences,
@@ -295,14 +297,17 @@ export default function App() {
 
       <main className="main-grid">
         <section className="map-panel">
-          <label className="map-toggle" title="When on, the map re-centers on activity. Uncheck to pan and zoom freely.">
-            <input
-              type="checkbox"
-              checked={autoZoom}
-              onChange={(event) => setAutoZoom(event.target.checked)}
-            />
-            <span>Auto-zoom</span>
-          </label>
+          <div className="map-controls">
+            <label className="map-toggle" title="When on, the map re-centers on activity. Uncheck to pan and zoom freely.">
+              <input
+                type="checkbox"
+                checked={autoZoom}
+                onChange={(event) => setAutoZoom(event.target.checked)}
+              />
+              <span>Auto-zoom</span>
+            </label>
+            <AtcListenButton airportIcao={airport?.icao} />
+          </div>
           <MapView
             airport={airport}
             userLocation={userLocation}
@@ -1405,6 +1410,153 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
         </div>
       </div>
     </section>
+  );
+}
+
+function AtcListenButton({ airportIcao }: { airportIcao?: string }) {
+  const [open, setOpen] = useState(false);
+  const [feeds, setFeeds] = useState<AtcFeedsResponse | null>(null);
+  const [activeFeedId, setActiveFeedId] = useState<string | null>(null);
+  const [feedStatus, setFeedStatus] = useState<Record<string, "idle" | "loading" | "playing" | "error">>({});
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (!open || !airportIcao) return;
+    setFeeds(null);
+    setActiveFeedId(null);
+    setFeedStatus({});
+    getAtcFeeds(airportIcao)
+      .then(setFeeds)
+      .catch(() => setFeeds({ airport_icao: airportIcao, feeds: [], external_search_url: `https://www.liveatc.net/search/?icao=${airportIcao}` }));
+  }, [open, airportIcao]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const playFeed = (feedId: string, streamUrl: string) => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    const audio = new Audio(streamUrl);
+    audio.preload = "none";
+    audioRef.current = audio;
+    setActiveFeedId(feedId);
+    setFeedStatus((prev) => ({ ...prev, [feedId]: "loading" }));
+    audio.addEventListener("playing", () => {
+      setFeedStatus((prev) => ({ ...prev, [feedId]: "playing" }));
+    });
+    audio.addEventListener("error", () => {
+      setFeedStatus((prev) => ({ ...prev, [feedId]: "error" }));
+      setActiveFeedId((current) => (current === feedId ? null : current));
+    });
+    audio.play().catch(() => {
+      setFeedStatus((prev) => ({ ...prev, [feedId]: "error" }));
+    });
+  };
+
+  const stopFeed = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    setActiveFeedId(null);
+  };
+
+  useEffect(() => () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+  }, []);
+
+  const buttonTitle = airportIcao
+    ? `Listen to ATC for ${airportIcao} on LiveATC`
+    : "Pick an airport to listen to its ATC";
+
+  return (
+    <div className="atc-listen">
+      <button
+        type="button"
+        className={`atc-listen-button${activeFeedId ? " active" : ""}`}
+        disabled={!airportIcao}
+        onClick={() => setOpen((value) => !value)}
+        title={buttonTitle}
+        aria-label={buttonTitle}
+      >
+        <Headphones size={16} aria-hidden="true" />
+      </button>
+      {open && airportIcao && (
+        <div className="atc-popover" role="dialog" aria-label={`Listen to ATC for ${airportIcao}`}>
+          <header>
+            <div>
+              <strong>Live ATC — {airportIcao}</strong>
+              <p>Streamed from LiveATC. Click a feed to start; not every airport has every feed.</p>
+            </div>
+            <button type="button" className="atc-close" onClick={() => { stopFeed(); setOpen(false); }} aria-label="Close">
+              <X size={16} aria-hidden="true" />
+            </button>
+          </header>
+          {!feeds ? (
+            <p className="atc-loading">Loading feeds…</p>
+          ) : feeds.feeds.length === 0 ? (
+            <p className="atc-empty">No candidate feeds for this airport.</p>
+          ) : (
+            <ul className="atc-feed-list">
+              {feeds.feeds.map((feed) => {
+                const status = feedStatus[feed.id] ?? "idle";
+                const isActive = activeFeedId === feed.id;
+                return (
+                  <li key={feed.id} className={`atc-feed${isActive ? " active" : ""}`}>
+                    <div className="atc-feed-meta">
+                      <div className="atc-feed-label">{feed.label}</div>
+                      <div className="atc-feed-id">{feed.id}</div>
+                    </div>
+                    {isActive ? (
+                      <button type="button" className="atc-feed-stop" onClick={stopFeed}>
+                        Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="atc-feed-play"
+                        onClick={() => playFeed(feed.id, feed.stream_url)}
+                      >
+                        {status === "loading"
+                          ? "Loading…"
+                          : status === "error"
+                            ? "No feed"
+                            : status === "playing"
+                              ? "Playing"
+                              : "Play"}
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {feeds && (
+            <a
+              className="atc-external"
+              href={feeds.external_search_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <ExternalLink size={12} aria-hidden="true" />
+              Search all feeds on LiveATC
+            </a>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
