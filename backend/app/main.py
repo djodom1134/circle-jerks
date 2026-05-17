@@ -700,6 +700,9 @@ LIVEATC_FEED_TYPES: list[tuple[str, str]] = [
 # standard <icao_lower>_<type> pattern. Each entry maps an ICAO to one or more
 # {id, label} feeds.
 LIVEATC_FEED_OVERRIDES: dict[str, list[dict]] = {
+    "KLMO": [
+        {"id": "klmo", "label": "Longmont CTAF (122.975)"},
+    ],
     "KDEN": [
         {"id": "kden_twr_n", "label": "Tower (North)"},
         {"id": "kden_twr_s", "label": "Tower (South)"},

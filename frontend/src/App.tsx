@@ -91,14 +91,33 @@ export default function App() {
 
   useEffect(() => {
     getConfig()
-      .then(async (result) => {
-        setConfig(result);
-        const found = await searchAirports(preferences.airport_icao ?? result.default_airport_icao);
-        setAirport(found.airports[0] ?? null);
+      .then(setConfig)
+      .catch((error) => setStatus(`Configuration failed: ${error.message}`));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    nearestAirport(userLocation.lat, userLocation.lon)
+      .then((nearest) => {
+        if (cancelled) return;
+        setAirport(nearest);
         setStatus("Ready");
       })
-      .catch((error) => setStatus(`Configuration failed: ${error.message}`));
-  }, [preferences.airport_icao]);
+      .catch(() => {
+        if (cancelled || airport) return;
+        const fallback = config?.default_airport_icao;
+        if (!fallback) return;
+        searchAirports(fallback)
+          .then((res) => {
+            if (cancelled) return;
+            setAirport(res.airports[0] ?? null);
+          })
+          .catch(() => undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userLocation.lat, userLocation.lon, config?.default_airport_icao]);
 
   useEffect(() => {
     let cancelled = false;
