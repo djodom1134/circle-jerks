@@ -608,11 +608,10 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       const count = new Float32Array(accW * accH);
 
       const resolution = map.getView().getResolution() ?? 1;
-      // 350 m radius per sample — the area within which one GA aircraft is
-      // the dominant audible noise. With Gaussian falloff this gives a
-      // smooth field even when samples are 100-300 m apart.
-      const radiusMeters = 350;
-      const radiusPx = Math.max(8, radiusMeters / resolution / accScale);
+      // 500 m radius per sample — wide enough that adjacent samples always
+      // overlap, producing a continuous field rather than isolated lobes.
+      const radiusMeters = 500;
+      const radiusPx = Math.max(12, radiusMeters / resolution / accScale);
       const radiusPxInt = Math.ceil(radiusPx);
       const inv2Sigma2 = 2.5 / (radiusPx * radiusPx); // Gaussian-ish falloff
 
@@ -663,9 +662,10 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         const avg = sumDb[i] / c;
         if (avg < 35) continue;
         const [r, g, b] = rgbFromDb(avg);
-        // dB → alpha curve: 40 dB ≈ 0.15, 60 dB ≈ 0.45, 80 dB ≈ 0.78, 95 dB ≈ 0.92
+        // dB → alpha curve: 40 dB ≈ 0.32, 60 dB ≈ 0.55, 80 dB ≈ 0.82, 95 dB ≈ 0.96
+        // Higher floor so even the cool/blue end reads clearly rather than ghosting.
         const t = clamp01((avg - 35) / 55);
-        const alpha = Math.round((0.10 + 0.85 * t) * 255);
+        const alpha = Math.round((0.28 + 0.68 * t) * 255);
         const o = i * 4;
         acc.data[o] = r;
         acc.data[o + 1] = g;
