@@ -48,6 +48,24 @@ def bearing_deg(a: Point, b: Point) -> float:
     return (math.degrees(math.atan2(y, x)) + 360) % 360
 
 
+def destination_point(origin: Point, bearing_deg: float, distance_nm: float) -> Point:
+    """Return the point reached by travelling `distance_nm` from `origin` along
+    a constant `bearing_deg` (great-circle). Inverse of bearing_deg/distance_nm."""
+    angular = distance_nm / EARTH_RADIUS_NM
+    bearing = math.radians(bearing_deg)
+    lat1 = math.radians(origin.lat)
+    lon1 = math.radians(origin.lon)
+    lat2 = math.asin(
+        math.sin(lat1) * math.cos(angular)
+        + math.cos(lat1) * math.sin(angular) * math.cos(bearing)
+    )
+    lon2 = lon1 + math.atan2(
+        math.sin(bearing) * math.sin(angular) * math.cos(lat1),
+        math.cos(angular) - math.sin(lat1) * math.sin(lat2),
+    )
+    return Point(math.degrees(lat2), math.degrees(lon2))
+
+
 def heading_delta_deg(previous: float, current: float) -> float:
     return (current - previous + 540) % 360 - 180
 
