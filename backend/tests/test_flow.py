@@ -76,6 +76,7 @@ def test_headwind_component():
     assert flow.headwind_component(120, 300, 10.0) == -10.0
     assert flow.headwind_component(None, 300, 10.0) is None
     assert flow.headwind_component(300, None, 10.0) is None
+    assert flow.headwind_component(300, 300, None) is None
 
 
 def _wind(from_deg, speed):
@@ -128,6 +129,23 @@ def test_process_tags_op_headwind(tmp_path):
     row = db.read_operations(conn, "KBJC", 0, 10000)[0]
     assert row["wind_from_deg"] == 300
     assert row["headwind_kt"] == 10.0  # 30R heading 300 into wind from 300
+
+
+def test_process_handles_missing_wind(tmp_path):
+    # Degraded path: weather.get_wind_summary failed → wind is None/{}. Flow must
+    # still establish, storing NULL wind, without crashing.
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    runways = db.runways_for_airport(conn, "KBJC")
+    for i, ts in enumerate((100, 160, 220)):
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": f"nw{i}", "type": "touch_and_go", "icao24": "a", "callsign": "N1",
+            "timestamp": ts, "airport_icao": "KBJC", "runway_id": "30R",
+        }))
+    flow.process(conn, "KBJC", runways, [], None, now=240)
+    conn.commit()
+    active = db.current_flow(conn, "KBJC")
+    assert active["active_runway_id"] == "30R"
+    assert active["wind_from_deg"] is None
 
 
 def test_services_calls_flow_process():

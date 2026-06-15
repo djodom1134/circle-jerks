@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 
+from . import db as _db
+
 FLOW_WINDOW_S = 3600
 MIN_OPS = 3
 MIN_WINDOW_S = 600
@@ -52,9 +54,6 @@ def headwind_component(heading_deg, wind_from_deg, wind_speed_kt) -> float | Non
     if heading_deg is None or wind_from_deg is None or wind_speed_kt is None:
         return None
     return round(float(wind_speed_kt) * math.cos(math.radians(float(heading_deg) - float(wind_from_deg))), 2)
-
-
-from . import db as _db
 
 
 def process(conn, airport_icao: str, runways: list[dict], events: list[dict],

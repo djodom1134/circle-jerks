@@ -291,7 +291,8 @@ CREATE TABLE IF NOT EXISTS runway_flow (
   ended_at INTEGER,
   wind_from_deg INTEGER,
   wind_speed_kt REAL,
-  op_count INTEGER NOT NULL DEFAULT 0,
+  op_count INTEGER NOT NULL DEFAULT 0,  -- reserved; op counts are derived from the operations table, not maintained here
+
   FOREIGN KEY (icao) REFERENCES airports(icao)
 );
 CREATE INDEX IF NOT EXISTS idx_runway_flow_icao ON runway_flow(icao, established_at DESC);
