@@ -39,3 +39,39 @@ def perpendicular_distance_nm(point: Point, polyline: list[Point]) -> float:
         if d < best:
             best = d
     return best
+
+
+def compute_deviation(samples: list[dict], polyline: list[Point], corridor_nm: float = CORRIDOR_NM) -> dict | None:
+    """Roll the two deviation KPIs over a circle's track window.
+
+    KPI A: time_off_pattern_s / pct_off_pattern = time spent farther than
+    `corridor_nm` from the pattern. KPI B: deviation_mean_nm = time-weighted
+    mean perpendicular distance; deviation_peak_nm = max."""
+    usable = sorted(
+        (s for s in samples if s.get("lat") is not None and s.get("lon") is not None),
+        key=lambda s: s["timestamp"],
+    )
+    if len(usable) < 2 or len(polyline) < 2:
+        return None
+    time_total = 0
+    time_off = 0
+    weighted = 0.0
+    peak = 0.0
+    for cur, nxt in zip(usable, usable[1:]):
+        dt = max(0, int(nxt["timestamp"]) - int(cur["timestamp"]))
+        dist = perpendicular_distance_nm(Point(cur["lat"], cur["lon"]), polyline)
+        peak = max(peak, dist)
+        time_total += dt
+        weighted += dist * dt
+        if dist > corridor_nm:
+            time_off += dt
+    peak = max(peak, perpendicular_distance_nm(Point(usable[-1]["lat"], usable[-1]["lon"]), polyline))
+    if time_total == 0:
+        return None
+    return {
+        "deviation_mean_nm": round(weighted / time_total, 3),
+        "deviation_peak_nm": round(peak, 3),
+        "time_off_pattern_s": time_off,
+        "time_total_s": time_total,
+        "pct_off_pattern": round(time_off / time_total, 3),
+    }

@@ -19,3 +19,31 @@ def test_perpendicular_distance_zero_on_segment():
     off = Point(0.02, 0.05)  # ~1.2 nm north of the line
     assert deviation.perpendicular_distance_nm(on, line) < 0.05
     assert deviation.perpendicular_distance_nm(off, line) > 0.5
+
+
+def _samples(coords, dt=30):
+    # coords: list of (lat, lon); evenly spaced dt seconds apart
+    return [{"timestamp": 1000 + i * dt, "lat": lat, "lon": lon} for i, (lat, lon) in enumerate(coords)]
+
+
+def test_compute_deviation_on_pattern_is_low():
+    line = [Point(0.0, 0.0), Point(0.0, 0.2)]
+    samples = _samples([(0.0, 0.02 * i) for i in range(6)])  # walking along the line
+    metrics = deviation.compute_deviation(samples, line)
+    assert metrics["deviation_mean_nm"] < 0.05
+    assert metrics["pct_off_pattern"] == 0.0
+    assert metrics["time_total_s"] == 5 * 30
+
+
+def test_compute_deviation_off_pattern_is_high():
+    line = [Point(0.0, 0.0), Point(0.0, 0.2)]
+    samples = _samples([(0.05, 0.02 * i) for i in range(6)])  # ~3 nm north of the line
+    metrics = deviation.compute_deviation(samples, line)
+    assert metrics["deviation_mean_nm"] > 1.0
+    assert metrics["pct_off_pattern"] == 1.0
+    assert metrics["deviation_peak_nm"] >= metrics["deviation_mean_nm"]
+
+
+def test_compute_deviation_needs_two_samples():
+    line = [Point(0.0, 0.0), Point(0.0, 0.2)]
+    assert deviation.compute_deviation(_samples([(0.0, 0.0)]), line) is None
