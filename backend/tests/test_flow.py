@@ -76,3 +76,55 @@ def test_headwind_component():
     assert flow.headwind_component(120, 300, 10.0) == -10.0
     assert flow.headwind_component(None, 300, 10.0) is None
     assert flow.headwind_component(300, None, 10.0) is None
+
+
+def _wind(from_deg, speed):
+    return {"current": {"wind_from_dir_degrees": from_deg, "wind_speed_kt": speed}, "average": None, "error": None}
+
+
+def test_process_establishes_and_flips_with_cowboy(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    runways = db.runways_for_airport(conn, "KBJC")  # 12L=120°, 30R=300°, ...
+
+    def persist(ts, rid, icao24, oid):
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": oid, "type": "touch_and_go", "icao24": icao24, "callsign": icao24.upper(),
+            "timestamp": ts, "airport_icao": "KBJC", "runway_id": rid, "runway_heading_deg": 300,
+        }))
+
+    # Establish 30R with 3 ops.
+    for i, ts in enumerate((100, 160, 220)):
+        persist(ts, "30R", "a1", f"e{i}")
+    flow.process(conn, "KBJC", runways, [], _wind(300, 10.0), now=240)
+    conn.commit()
+    assert db.current_flow(conn, "KBJC")["active_runway_id"] == "30R"
+    assert db.recent_runway_changes(conn, "KBJC") == []  # first establishment is not a "change"
+
+    # Now 3 ops on 12L flip the flow — the first one is the cowboy.
+    persist(400, "12L", "cowboy1", "c0")
+    persist(460, "12L", "a2", "c1")
+    persist(520, "12L", "a3", "c2")
+    flow.process(conn, "KBJC", runways, [], _wind(300, 10.0), now=540)
+    conn.commit()
+    assert db.current_flow(conn, "KBJC")["active_runway_id"] == "12L"
+    changes = db.recent_runway_changes(conn, "KBJC")
+    assert len(changes) == 1
+    assert changes[0]["from_runway_id"] == "30R" and changes[0]["to_runway_id"] == "12L"
+    assert changes[0]["cowboy_icao24"] == "cowboy1"
+    # wind still from 300 → 12L (120°) is a tailwind → not wind-favored
+    assert changes[0]["wind_favored_new"] == 0
+
+
+def test_process_tags_op_headwind(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    runways = db.runways_for_airport(conn, "KBJC")
+    db.upsert_operation(conn, db.operation_from_event({
+        "id": "w1", "type": "touch_and_go", "icao24": "a", "callsign": "N1",
+        "timestamp": 100, "airport_icao": "KBJC", "runway_id": "30R",
+    }))
+    event = {"id": "w1", "type": "touch_and_go", "icao24": "a", "airport_icao": "KBJC", "runway_id": "30R"}
+    flow.process(conn, "KBJC", runways, [event], _wind(300, 10.0), now=120)
+    conn.commit()
+    row = db.read_operations(conn, "KBJC", 0, 10000)[0]
+    assert row["wind_from_deg"] == 300
+    assert row["headwind_kt"] == 10.0  # 30R heading 300 into wind from 300
