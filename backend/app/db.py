@@ -442,6 +442,26 @@ def upsert_operation(conn: sqlite3.Connection, op: dict) -> None:
     )
 
 
+def read_operations(
+    conn: sqlite3.Connection,
+    icao: str,
+    start_ts: int,
+    end_ts: int,
+    types: list[str] | None = None,
+) -> list[sqlite3.Row]:
+    query = (
+        "SELECT * FROM operations "
+        "WHERE icao = ? AND timestamp >= ? AND timestamp <= ?"
+    )
+    args: list = [icao, start_ts, end_ts]
+    if types:
+        placeholders = ",".join("?" for _ in types)
+        query += f" AND type IN ({placeholders})"
+        args.extend(types)
+    query += " ORDER BY timestamp ASC"
+    return conn.execute(query, args).fetchall()
+
+
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
     row = conn.execute("SELECT * FROM airports WHERE icao = ?", (icao.upper(),)).fetchone()
     return row_to_airport(row) if row else None

@@ -135,3 +135,31 @@ def test_upsert_operation_is_idempotent(tmp_path):
     assert rows[0]["created_at"] is not None
     # enrichment columns default to NULL until later phases populate them
     assert rows[0]["deviation_mean_nm"] is None
+
+
+def _mk_op(id_, ts, type_="circle", icao="KBJC"):
+    return db.operation_from_event({
+        "id": id_, "type": type_, "icao24": "a4c1d8", "callsign": "N1",
+        "timestamp": ts, "airport_icao": icao,
+    })
+
+
+def test_read_operations_filters_by_window_and_type(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    db.upsert_operation(conn, _mk_op("op1", 1000, "circle"))
+    db.upsert_operation(conn, _mk_op("op2", 2000, "touch_and_go"))
+    db.upsert_operation(conn, _mk_op("op3", 3000, "circle"))
+    db.upsert_operation(conn, _mk_op("op4", 9999, "circle", icao="KLMO"))  # other airport
+    conn.commit()
+
+    # window only
+    rows = db.read_operations(conn, "KBJC", 1500, 3500)
+    assert [r["id"] for r in rows] == ["op2", "op3"]
+
+    # window + type filter
+    rows = db.read_operations(conn, "KBJC", 0, 10000, types=["circle"])
+    assert [r["id"] for r in rows] == ["op1", "op3"]
+
+    # other airport isolated
+    rows = db.read_operations(conn, "KLMO", 0, 10000)
+    assert [r["id"] for r in rows] == ["op4"]
