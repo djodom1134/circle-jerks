@@ -822,3 +822,28 @@ export interface AirportFlowResponse {
 export function getAirportFlow(icao: string) {
   return getJson<AirportFlowResponse>(`/airports/${enc(icao)}/flow`);
 }
+
+export type StatsWindow = "1d" | "7d" | "30d" | "all";
+
+export interface AirportStatsResponse {
+  airport_icao: string;
+  window: { code: StatsWindow; start_ts: number; end_ts: number; bucket_seconds: number };
+  counters: {
+    circles: number; touch_and_gos: number; low_approaches: number;
+    passes: number; unique_aircraft: number; runway_changes: number;
+  };
+  ops_over_time: { bucket: number; count: number }[];
+  wind: { into_headwind_ops: number; downwind_ops: number; no_wind_data_ops: number };
+  deviation: {
+    scored_ops: number; avg_mean_nm: number | null; max_nm: number | null;
+    total_time_off_s: number; worst: { icao24: string; callsign: string | null; deviation_mean_nm: number }[];
+  };
+  cowboys: { icao24: string; callsign: string | null; changes: number }[];
+  recent_changes: RunwayChange[];
+  repeat_offenders: { icao24: string; callsign: string | null; registration: string | null; report_count: number }[];
+  flight_schools: { label: string; count: number }[];
+}
+
+export function getAirportStats(icao: string, window: StatsWindow = "7d") {
+  return getJson<AirportStatsResponse>(`/airports/${encodeURIComponent(icao)}/stats?window=${window}`);
+}
