@@ -61,3 +61,30 @@ def test_airport_stats(tmp_path):
     assert stats["cowboys"][0]["icao24"] == "a1" and stats["cowboys"][0]["changes"] == 1
     assert stats["repeat_offenders"][0]["icao24"] == "a1"
     assert isinstance(stats["flight_schools"], list)
+
+
+def test_stats_endpoint(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        resp = client.get("/airports/KBJC/stats", params={"window": "7d"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["airport_icao"] == "KBJC"
+        assert data["window"]["code"] == "7d"
+        assert data["window"]["end_ts"] > data["window"]["start_ts"]
+        assert "counters" in data and "ops_over_time" in data and "deviation" in data
+
+        # bad window code → 422
+        assert client.get("/airports/KBJC/stats", params={"window": "nope"}).status_code == 422
+
+        # all-time window starts at 0
+        all_resp = client.get("/airports/KBJC/stats", params={"window": "all"}).json()
+        assert all_resp["window"]["start_ts"] == 0

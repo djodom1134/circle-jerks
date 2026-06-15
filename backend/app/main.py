@@ -1335,6 +1335,27 @@ async def complaint_form(
     }
 
 
+_STATS_WINDOWS = {"1d": (86400, 3600), "7d": (7 * 86400, 86400), "30d": (30 * 86400, 86400), "all": (None, 86400)}
+
+
+@app.get("/airports/{icao}/stats")
+async def get_airport_stats(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    window: Annotated[str, Query(pattern="^(1d|7d|30d|all)$")] = "7d",
+):
+    now = int(time.time())
+    lookback, bucket = _STATS_WINDOWS[window]
+    start_ts = 0 if lookback is None else now - lookback
+    with db_session(settings.database_path) as conn:
+        stats = db.airport_stats(conn, icao, start_ts, now, bucket_seconds=bucket)
+    return {
+        "airport_icao": icao.upper(),
+        "window": {"code": window, "start_ts": start_ts, "end_ts": now, "bucket_seconds": bucket},
+        **stats,
+    }
+
+
 @app.get("/airports/{icao}/flow")
 async def get_airport_flow(
     icao: str,
