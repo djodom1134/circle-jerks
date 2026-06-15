@@ -128,3 +128,11 @@ def test_process_tags_op_headwind(tmp_path):
     row = db.read_operations(conn, "KBJC", 0, 10000)[0]
     assert row["wind_from_deg"] == 300
     assert row["headwind_kt"] == 10.0  # 30R heading 300 into wind from 300
+
+
+def test_services_calls_flow_process():
+    import inspect
+    from app import services
+    src = inspect.getsource(services.run_detectors_for_monitor)
+    assert "flow.process" in src
+    assert "get_wind_summary" in src

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import adsbdb, archive, db, deviation
+from . import adsbdb, archive, db, deviation, flow, weather
 from .db import Airport
 from .detectors import closest_over_user_rows, detect_events, detect_events_over_period, event_counts, pass_geometry_key
 from .domain import ScanParams, hour_label, local_time_label, location_hash, monitor_hash
@@ -376,6 +376,12 @@ async def run_detectors_for_monitor(
         # Quantify how far each circling aircraft strays from the drawn VNAP
         # pattern (no-op when this airport has no pattern yet).
         deviation.store_deviations(conn, airport.icao, new_events, tracks_by_icao24)
+        # Tag ops with headwind and update active-runway flow + cowboy log.
+        try:
+            wind = await weather.get_wind_summary(store, airport.icao, 1)
+        except Exception:  # noqa: BLE001 — never let weather break detection
+            wind = {}
+        flow.process(conn, airport.icao, runways, new_events, wind, now)
     return written
 
 
