@@ -197,7 +197,7 @@ def _pattern_response(row: dict) -> dict:
         "name": row["name"],
         "locked": bool(row["locked"]),
         "geometry": json.loads(row["geometry_json"]),
-        "change_note": row.get("change_note"),
+        "change_note": row["change_note"],
         "created_at": row["created_at"],
     }
 
@@ -1370,6 +1370,17 @@ async def get_runway_pattern_template(
     return {"geometry": patterns.generate_template_pattern(runway, side=side)}
 
 
+def _enforce_pattern_edit_limit(conn, visitor_id: str | None, ip: str | None, now: int) -> None:
+    """Guard all pattern writes (save and revert): reject unidentifiable editors
+    (no visitor_id and no IP — otherwise the limit silently can't apply) and
+    enforce the per-editor rate limit."""
+    if not visitor_id and not ip:
+        raise HTTPException(status_code=400, detail="cannot identify editor")
+    recent = db.count_recent_pattern_edits(conn, visitor_id, ip, now - PATTERN_EDIT_WINDOW_S)
+    if recent >= PATTERN_EDIT_MAX_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="too many pattern edits; slow down")
+
+
 @app.put("/runways/{icao}/{runway_id}/pattern")
 async def save_runway_pattern_endpoint(
     icao: str,
@@ -1393,9 +1404,7 @@ async def save_runway_pattern_endpoint(
         error = patterns.validate_pattern_geometry(points, airport)
         if error:
             raise HTTPException(status_code=400, detail=error)
-        recent = db.count_recent_pattern_edits(conn, payload.visitor_id, ip, now - PATTERN_EDIT_WINDOW_S)
-        if recent >= PATTERN_EDIT_MAX_PER_WINDOW:
-            raise HTTPException(status_code=429, detail="too many pattern edits; slow down")
+        _enforce_pattern_edit_limit(conn, payload.visitor_id, ip, now)
         geometry = {"points": points, "closed": payload.closed, "spline": patterns.PATTERN_SPLINE}
         saved = db.save_runway_pattern(
             conn, icao, runway_id, json.dumps(geometry),
@@ -1427,13 +1436,16 @@ async def revert_runway_pattern_endpoint(
     request: Request,
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
+    now = int(time.time())
+    ip = client_ip(request)
     with db_session(settings.database_path) as conn:
         current = db.get_current_pattern(conn, icao, runway_id)
         if current and current["locked"]:
             raise HTTPException(status_code=409, detail="pattern is locked")
+        _enforce_pattern_edit_limit(conn, payload.visitor_id, ip, now)
         saved = db.revert_pattern(
             conn, icao, runway_id, payload.version,
-            editor_visitor_id=payload.visitor_id, editor_ip=client_ip(request),
+            editor_visitor_id=payload.visitor_id, editor_ip=ip,
         )
         if saved is None:
             raise HTTPException(status_code=404, detail="version not found")

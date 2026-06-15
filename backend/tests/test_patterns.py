@@ -210,3 +210,23 @@ def test_pattern_save_rate_limited(tmp_path, monkeypatch):
         assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 200
         assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 200
         assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 429
+
+
+def test_pattern_save_requires_editor_identity(tmp_path, monkeypatch):
+    # With no client IP and no visitor_id, the editor is unidentifiable and the
+    # rate limit can't apply — the save must be rejected, not silently allowed.
+    monkeypatch.setattr("app.main.client_ip", lambda request: None)
+    with api_client(tmp_path, monkeypatch) as client:
+        body = {"points": [{"lat": 39.92, "lon": -105.13}]}  # no visitor_id
+        assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 400
+
+
+def test_pattern_revert_is_rate_limited(tmp_path, monkeypatch):
+    # Reverts are writes too and must count against the same per-editor limit.
+    monkeypatch.setattr("app.main.PATTERN_EDIT_MAX_PER_WINDOW", 2)
+    with api_client(tmp_path, monkeypatch) as client:
+        body = {"points": [{"lat": 39.92, "lon": -105.13}], "visitor_id": "visitor-123456"}
+        assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 200
+        assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 200
+        revert = client.post("/runways/KBJC/12L/pattern/revert", json={"version": 1, "visitor_id": "visitor-123456"})
+        assert revert.status_code == 429

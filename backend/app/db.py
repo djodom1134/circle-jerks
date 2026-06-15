@@ -278,6 +278,7 @@ CREATE TABLE IF NOT EXISTS runway_patterns (
   editor_ip TEXT,
   change_note TEXT,
   created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+  UNIQUE (icao, runway_id, version),
   FOREIGN KEY (icao, runway_id) REFERENCES runways(icao, runway_id)
 );
 CREATE INDEX IF NOT EXISTS idx_runway_patterns_current ON runway_patterns(icao, runway_id, is_current);
