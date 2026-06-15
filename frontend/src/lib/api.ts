@@ -787,3 +787,38 @@ export function revertPattern(icao: string, runwayId: string, version: number, v
     visitor_id: visitorId,
   });
 }
+
+export interface RunwayFlow {
+  id: number;
+  icao: string;
+  active_runway_id: string;
+  established_at: number;
+  ended_at: number | null;
+  wind_from_deg: number | null;
+  wind_speed_kt: number | null;
+  op_count: number;
+}
+
+export interface RunwayChange {
+  id: number;
+  from_runway_id: string | null;
+  to_runway_id: string;
+  changed_at: number;
+  cowboy_icao24: string | null;
+  cowboy_callsign: string | null;
+  cowboy_registration: string | null;
+  wind_from_deg: number | null;
+  wind_speed_kt: number | null;
+  wind_favored_new: number | null;
+  trigger_op_id: string | null;
+}
+
+export interface AirportFlowResponse {
+  airport_icao: string;
+  active: RunwayFlow | null;
+  recent_changes: RunwayChange[];
+}
+
+export function getAirportFlow(icao: string) {
+  return getJson<AirportFlowResponse>(`/airports/${enc(icao)}/flow`);
+}
