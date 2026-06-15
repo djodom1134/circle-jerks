@@ -6,6 +6,8 @@ import { boundingExtent, buffer as bufferExtent } from "ol/extent";
 import LineString from "ol/geom/LineString";
 import Point from "ol/geom/Point";
 import Polygon from "ol/geom/Polygon";
+import Draw from "ol/interaction/Draw";
+import Modify from "ol/interaction/Modify";
 import { defaults as defaultInteractions } from "ol/interaction/defaults";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
@@ -87,6 +89,11 @@ interface Props {
   showHeatmap?: boolean;
   onPickLocation: (lat: number, lon: number) => void;
   patterns?: RunwayPattern[] | null;
+  editingRunwayId?: string | null;
+  editingPoints?: { lat: number; lon: number }[];
+  editingClosed?: boolean;
+  editSeedKey?: number;
+  onEditingPointsChange?: (points: { lat: number; lon: number }[]) => void;
 }
 
 // dB → [r, g, b] for additive canvas compositing.
@@ -297,6 +304,13 @@ function agedTrackSegments(
   return out;
 }
 
+function lineToLonLat(feature: Feature<LineString>): { lat: number; lon: number }[] {
+  return feature.getGeometry()!.getCoordinates().map((c) => {
+    const [lon, lat] = toLonLat(c);
+    return { lat, lon };
+  });
+}
+
 function pointFeature(lon: number, lat: number, properties: Record<string, unknown>) {
   const feature = new Feature(new Point(fromLonLat([lon, lat])));
   feature.setProperties(properties);
@@ -452,6 +466,16 @@ function styleForFeature(feature: Feature) {
     });
   }
 
+  if (kind === "pattern_edit") {
+    return new Style({
+      stroke: new Stroke({ color: "#d64b2c", width: 2.5, lineDash: [6, 4] }),
+      image: new CircleStyle({
+        radius: 5,
+        fill: new Fill({ color: "#ffffff" }),
+        stroke: new Stroke({ color: "#1b3a6b", width: 2 }),
+      }),
+    });
+  }
   if (kind === "pattern") {
     return new Style({
       stroke: new Stroke({ color: "#1b3a6b", width: 2.5 }),
@@ -489,12 +513,16 @@ function styleForFeature(feature: Feature) {
   });
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
   const aircraftSourceRef = useRef<VectorSource | null>(null);
   const patternSourceRef = useRef<VectorSource | null>(null);
+  const editSourceRef = useRef<VectorSource | null>(null);
+  const editLineRef = useRef<Feature<LineString> | null>(null);
+  const onEditChangeRef = useRef(onEditingPointsChange);
+  onEditChangeRef.current = onEditingPointsChange;
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -619,6 +647,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     sourceRef.current = new VectorSource();
     aircraftSourceRef.current = new VectorSource();
     patternSourceRef.current = new VectorSource();
+    editSourceRef.current = new VectorSource();
     const vectorLayer = new VectorLayer({
       source: sourceRef.current,
       style: (feature) => styleForFeature(feature as Feature)
@@ -627,6 +656,11 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       source: patternSourceRef.current,
       style: (feature) => styleForFeature(feature as Feature),
       zIndex: 5,
+    });
+    const editLayer = new VectorLayer({
+      source: editSourceRef.current,
+      style: (feature) => styleForFeature(feature as Feature),
+      zIndex: 6,
     });
     const aircraftLayer = new VectorLayer({
       source: aircraftSourceRef.current,
@@ -641,6 +675,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         new TileLayer({ source: new OSM({ crossOrigin: "anonymous" }) }),
         vectorLayer,
         patternLayer,
+        editLayer,
         aircraftLayer
       ],
       view: new View({
@@ -716,6 +751,54 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       }
     }
   }, [patterns, mapReady]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const source = editSourceRef.current;
+    if (!mapReady || !map || !source) return;
+
+    source.clear();
+    editLineRef.current = null;
+
+    if (!editingRunwayId) return; // edit mode off
+
+    const seedCoords = (editingPoints ?? []).map((p) => fromLonLat([p.lon, p.lat]));
+    if (seedCoords.length >= 2) {
+      const line = new Feature(new LineString(seedCoords));
+      line.set("kind", "pattern_edit");
+      editLineRef.current = line;
+      source.addFeature(line);
+    }
+
+    const emit = () => {
+      if (editLineRef.current) onEditChangeRef.current?.(lineToLonLat(editLineRef.current));
+    };
+
+    const modify = new Modify({ source });
+    modify.on("modifyend", emit);
+    map.addInteraction(modify);
+
+    let draw: Draw | null = null;
+    if (!editLineRef.current) {
+      draw = new Draw({ source, type: "LineString" });
+      draw.on("drawend", (event) => {
+        const f = event.feature as Feature<LineString>;
+        f.set("kind", "pattern_edit");
+        editLineRef.current = f;
+        if (draw) map.removeInteraction(draw);
+        onEditChangeRef.current?.(lineToLonLat(f));
+      });
+      map.addInteraction(draw);
+    }
+
+    return () => {
+      map.removeInteraction(modify);
+      if (draw) map.removeInteraction(draw);
+    };
+    // Re-seed only when the runway or an explicit seed token changes — NOT on every
+    // editingPoints update (those originate from this effect's own emits).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady, editingRunwayId, editSeedKey, editingClosed]);
 
   // Deferred Heatmap layer init: putting HeatmapLayer in the initial
   // new Map({ layers: [...] }) array silently breaks OL 10.9's renderer and
