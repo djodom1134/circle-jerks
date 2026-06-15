@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from .geo import Point, distance_nm
 
@@ -462,19 +462,20 @@ def read_operations(
     return conn.execute(query, args).fetchall()
 
 
-def persist_events(conn: sqlite3.Connection, events) -> int:
+def persist_events(conn: sqlite3.Connection, events: Iterable[dict]) -> int:
     """Upsert each detector event as an operation row.
 
-    Returns the number of events processed (events missing an id or airport are
-    skipped). Idempotency is enforced by `upsert_operation`'s ON CONFLICT.
+    Returns the number of events ATTEMPTED (events missing an id, airport, or type
+    are skipped and not counted; duplicates ARE counted even though their insert is
+    a no-op via ON CONFLICT). Idempotency is enforced by upsert_operation.
     """
-    processed = 0
+    attempted = 0
     for event in events:
-        if not event.get("id") or not event.get("airport_icao"):
+        if not event.get("id") or not event.get("airport_icao") or not event.get("type"):
             continue
         upsert_operation(conn, operation_from_event(event))
-        processed += 1
-    return processed
+        attempted += 1
+    return attempted
 
 
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:

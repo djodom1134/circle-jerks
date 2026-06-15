@@ -194,6 +194,17 @@ def test_persist_events_skips_events_without_id_or_airport(tmp_path):
     assert db.read_operations(conn, "KBJC", 0, 10000) == []
 
 
+def test_persist_events_skips_events_without_type(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    events = [
+        {"id": "notype1", "icao24": "a", "timestamp": 1000, "airport_icao": "KBJC"},  # no type
+    ]
+    processed = db.persist_events(conn, events)
+    conn.commit()
+    assert processed == 0
+    assert db.read_operations(conn, "KBJC", 0, 10000) == []
+
+
 def test_detected_circle_is_persisted(tmp_path):
     conn = seeded_conn(tmp_path / "t.sqlite3")
     ap = airport_kbjc()
