@@ -345,13 +345,10 @@ def _detect_circles_in_samples(
     return events
 
 
-def detect_circles(track: list[dict], airport: Airport, params: ScanParams) -> list[dict]:
-    recent = samples_in_last(track, 20 * 60)
-    crossing = _detect_home_airport_crossings(recent, airport, params)
-    closed_lap = _detect_circles_in_samples(recent, airport, params)
-    # Closed-lap events are richer; suppress any line-crossing event whose
-    # timestamp falls inside a closed-lap's [start, end] window so a single
-    # real lap never counts twice.
+def _merge_circle_events(crossing: list[dict], closed_lap: list[dict]) -> list[dict]:
+    """Union line-crossing and closed-lap circle events by id. Closed-lap events
+    are richer; suppress any line-crossing whose timestamp falls inside a
+    closed-lap's [start, end] window so a single real lap never counts twice."""
     suppressed: set[str] = set()
     for lap in closed_lap:
         start = lap.get("start_timestamp", lap["timestamp"])
@@ -365,6 +362,14 @@ def detect_circles(track: list[dict], airport: Airport, params: ScanParams) -> l
     return sorted(by_id.values(), key=lambda e: e["timestamp"])
 
 
+def detect_circles(track: list[dict], airport: Airport, params: ScanParams) -> list[dict]:
+    recent = samples_in_last(track, 20 * 60)
+    return _merge_circle_events(
+        _detect_home_airport_crossings(recent, airport, params),
+        _detect_circles_in_samples(recent, airport, params),
+    )
+
+
 def detect_circles_over_period(
     track: list[dict],
     airport: Airport,
@@ -376,7 +381,12 @@ def detect_circles_over_period(
         sample for sample in sorted(track, key=lambda row: row["timestamp"])
         if start_ts - 20 * 60 <= sample["timestamp"] <= end_ts
     ]
-    return _detect_home_airport_crossings(samples, airport, params, start_ts, end_ts)
+    # Both detectors over the period so closed-lap events (which carry the lap
+    # window deviation needs) reach the operations log for backfilled scans too.
+    return _merge_circle_events(
+        _detect_home_airport_crossings(samples, airport, params, start_ts, end_ts),
+        _detect_circles_in_samples(samples, airport, params),
+    )
 
 
 # Altitude cap above which crossings of the home↔airport line don't count as

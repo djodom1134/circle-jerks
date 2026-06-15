@@ -230,3 +230,19 @@ def test_closed_lap_circle_event_has_lap_time_bounds():
     assert "start_timestamp" in lap and "end_timestamp" in lap
     assert lap["start_timestamp"] <= lap["end_timestamp"] <= lap["timestamp"] + 1
     assert lap["end_timestamp"] - lap["start_timestamp"] >= 120  # the lap spans real time
+
+
+def test_period_circle_detection_includes_closed_lap():
+    # The historical/backfill variant must also emit closed-lap events (with lap
+    # bounds) so deviation gets computed for backfilled scans, not just live ones.
+    from app.detectors import detect_circles_over_period
+    ap = airport_kbjc()
+    events = detect_circles_over_period(
+        closed_loop_track(), ap,
+        ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2),
+        1000, 1300,
+    )
+    assert any(
+        e.get("detection_method") == "course_turn_closed_lap" and "start_timestamp" in e
+        for e in events
+    )

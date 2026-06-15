@@ -57,12 +57,15 @@ def _loop_sense(lonlat: list[tuple[float, float]]) -> int | None:
     return None
 
 
-def match_pattern(samples: list[dict], patterns: list[dict]) -> dict | None:
-    """Pick the pattern the track best follows: prefer matching rotational sense,
-    then nearest by mean perpendicular distance. `patterns` items: {id, geometry}."""
+def _select_pattern(
+    samples: list[dict], patterns: list[dict]
+) -> tuple[dict | None, list[Point] | None]:
+    """Pick the pattern the track best follows (matching rotational sense, then
+    nearest by mean perpendicular distance) and return it WITH its densified
+    polyline so callers don't densify the winner twice. (None, None) if no match."""
     usable = [s for s in samples if s.get("lat") is not None and s.get("lon") is not None]
     if not patterns or len(usable) < 2:
-        return patterns[0] if patterns else None
+        return (None, None)
     track_sense = _loop_sense([(s["lon"], s["lat"]) for s in usable])
 
     densified = []
@@ -70,10 +73,9 @@ def match_pattern(samples: list[dict], patterns: list[dict]) -> dict | None:
         poly = densify_pattern(pat["geometry"])
         if len(poly) < 2:
             continue
-        sense = _loop_sense([(p.lon, p.lat) for p in poly])
-        densified.append((pat, poly, sense))
+        densified.append((pat, poly, _loop_sense([(p.lon, p.lat) for p in poly])))
     if not densified:
-        return None
+        return (None, None)
 
     candidates = densified
     if track_sense is not None:
@@ -81,14 +83,21 @@ def match_pattern(samples: list[dict], patterns: list[dict]) -> dict | None:
         if same:
             candidates = same
 
-    best = None
+    best_pat: dict | None = None
+    best_poly: list[Point] | None = None
     best_mean = float("inf")
     for pat, poly, _sense in candidates:
         mean = fmean(perpendicular_distance_nm(Point(s["lat"], s["lon"]), poly) for s in usable)
         if mean < best_mean:
             best_mean = mean
-            best = pat
-    return best
+            best_pat = pat
+            best_poly = poly
+    return (best_pat, best_poly)
+
+
+def match_pattern(samples: list[dict], patterns: list[dict]) -> dict | None:
+    """Direction-matched + nearest pattern selection. Returns the pattern dict or None."""
+    return _select_pattern(samples, patterns)[0]
 
 
 def compute_deviation(samples: list[dict], polyline: list[Point], corridor_nm: float = CORRIDOR_NM) -> dict | None:
@@ -159,10 +168,10 @@ def store_deviations(conn, airport_icao: str, events: list[dict], tracks_by_icao
         ]
         if len(samples) < 2:
             continue
-        matched = match_pattern(samples, patterns)
-        if matched is None:
+        matched, polyline = _select_pattern(samples, patterns)
+        if matched is None or polyline is None:
             continue
-        metrics = compute_deviation(samples, densify_pattern(matched["geometry"]))
+        metrics = compute_deviation(samples, polyline)
         if metrics is None:
             continue
         _db.update_operation_deviation(conn, event["id"], matched["id"], metrics)
