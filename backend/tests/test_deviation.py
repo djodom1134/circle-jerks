@@ -62,3 +62,25 @@ def test_match_pattern_picks_nearest_same_sense():
 
     assert deviation.match_pattern(track, [near_ccw, far_ccw])["id"] == 1
     assert deviation.match_pattern(track, []) is None
+
+
+def test_update_operation_deviation(tmp_path):
+    from app import db
+    conn = db.connect(str(tmp_path / "t.sqlite3"))
+    conn.executescript(db.SCHEMA)
+    db.seed_db(conn)
+    conn.commit()
+    db.upsert_operation(conn, db.operation_from_event({
+        "id": "dev1", "type": "circle", "icao24": "a", "callsign": "N1",
+        "timestamp": 1000, "airport_icao": "KBJC",
+    }))
+    db.update_operation_deviation(conn, "dev1", 7, {
+        "deviation_mean_nm": 0.42, "deviation_peak_nm": 0.9,
+        "time_off_pattern_s": 60, "time_total_s": 240, "pct_off_pattern": 0.25,
+    })
+    conn.commit()
+    row = db.read_operations(conn, "KBJC", 0, 10000)[0]
+    assert row["matched_pattern_id"] == 7
+    assert row["deviation_mean_nm"] == 0.42
+    assert row["pct_off_pattern"] == 0.25
+    assert row["time_total_s"] == 240

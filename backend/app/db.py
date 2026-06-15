@@ -496,6 +496,35 @@ def persist_events(conn: sqlite3.Connection, events: Iterable[dict]) -> int:
     return attempted
 
 
+def update_operation_deviation(
+    conn: sqlite3.Connection,
+    op_id: str,
+    matched_pattern_id: int | None,
+    metrics: dict,
+) -> None:
+    conn.execute(
+        """
+        UPDATE operations SET
+          matched_pattern_id = ?,
+          deviation_mean_nm = ?,
+          deviation_peak_nm = ?,
+          time_off_pattern_s = ?,
+          time_total_s = ?,
+          pct_off_pattern = ?
+        WHERE id = ?
+        """,
+        (
+            matched_pattern_id,
+            metrics["deviation_mean_nm"],
+            metrics["deviation_peak_nm"],
+            metrics["time_off_pattern_s"],
+            metrics["time_total_s"],
+            metrics["pct_off_pattern"],
+            op_id,
+        ),
+    )
+
+
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
     row = conn.execute("SELECT * FROM airports WHERE icao = ?", (icao.upper(),)).fetchone()
     return row_to_airport(row) if row else None
