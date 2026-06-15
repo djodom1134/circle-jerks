@@ -1335,6 +1335,17 @@ async def complaint_form(
     }
 
 
+@app.get("/airports/{icao}/flow")
+async def get_airport_flow(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        active = db.current_flow(conn, icao)
+        changes = db.recent_runway_changes(conn, icao, 20)
+    return {"airport_icao": icao.upper(), "active": active, "recent_changes": changes}
+
+
 @app.get("/airports/{icao}/runways")
 async def get_airport_runways(
     icao: str,

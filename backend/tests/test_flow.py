@@ -136,3 +136,34 @@ def test_services_calls_flow_process():
     src = inspect.getsource(services.run_detectors_for_monitor)
     assert "flow.process" in src
     assert "get_wind_summary" in src
+
+
+def test_flow_endpoint(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        empty = client.get("/airports/KBJC/flow")
+        assert empty.status_code == 200
+        assert empty.json()["active"] is None
+        assert empty.json()["recent_changes"] == []
+
+    # seed a flow + change directly, then read it back
+    conn = db.connect(str(tmp_path / "circlejerk.sqlite3"))
+    db.open_flow(conn, "KBJC", "30R", 1000, 300, 8.0)
+    db.insert_runway_change(conn, "KBJC", "12L", "30R", 1000,
+                            {"icao24": "a", "callsign": "N1", "registration": "N1", "id": "op1"}, 300, 8.0, 1)
+    conn.commit(); conn.close()
+
+    with TestClient(app) as client:
+        resp = client.get("/airports/KBJC/flow")
+        data = resp.json()
+        assert data["active"]["active_runway_id"] == "30R"
+        assert data["recent_changes"][0]["to_runway_id"] == "30R"
+        assert data["recent_changes"][0]["wind_favored_new"] == 1
