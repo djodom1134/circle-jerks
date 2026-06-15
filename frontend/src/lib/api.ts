@@ -306,6 +306,17 @@ async function postJson<T>(path: string, body: unknown, timeoutMs?: number): Pro
   return response.json() as Promise<T>;
 }
 
+async function putJson<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs,
+  });
+  if (!response.ok) throw await errorFromResponse(response);
+  return response.json() as Promise<T>;
+}
+
 // Complaint generation has a tight timeout — if Groq doesn't answer fast,
 // the caller falls back to the deterministic browser-side draft instead of
 // leaving the user staring at a spinner.
@@ -665,4 +676,114 @@ export function adminSession() {
 
 export function adminDashboard() {
   return adminJson<AdminDashboardResponse>("/admin/dashboard");
+}
+
+// ─── Pattern API types ────────────────────────────────────────────────────────
+
+export interface PatternPoint {
+  lat: number;
+  lon: number;
+}
+
+export interface PatternGeometry {
+  points: PatternPoint[];
+  closed: boolean;
+  spline: string;
+}
+
+export interface RunwayPattern {
+  id: number;
+  icao: string;
+  runway_id: string;
+  version: number;
+  name: string | null;
+  locked: boolean;
+  geometry: PatternGeometry;
+  change_note: string | null;
+  created_at: number;
+}
+
+export interface PatternResponse {
+  pattern: RunwayPattern | null;
+}
+
+export interface AirportPatternsResponse {
+  airport_icao: string;
+  patterns: RunwayPattern[];
+}
+
+export interface PatternTemplateResponse {
+  geometry: PatternGeometry;
+}
+
+export interface PatternVersion {
+  id: number;
+  version: number;
+  name: string | null;
+  is_current: boolean;
+  locked: boolean;
+  editor_visitor_id: string | null;
+  change_note: string | null;
+  created_at: number;
+}
+
+export interface PatternHistoryResponse {
+  versions: PatternVersion[];
+}
+
+export interface RunwayInfo {
+  icao: string;
+  runway_id: string;
+  lat_threshold: number;
+  lon_threshold: number;
+  heading_deg: number;
+  length_ft: number;
+}
+
+export interface AirportRunwaysResponse {
+  airport_icao: string;
+  runways: RunwayInfo[];
+}
+
+export interface PatternSaveBody {
+  points: PatternPoint[];
+  closed: boolean;
+  name?: string | null;
+  change_note?: string | null;
+  visitor_id?: string | null;
+}
+
+// ─── Pattern API functions ────────────────────────────────────────────────────
+
+const enc = encodeURIComponent;
+
+export function getAirportRunways(icao: string) {
+  return getJson<AirportRunwaysResponse>(`/airports/${enc(icao)}/runways`);
+}
+
+export function getAirportPatterns(icao: string) {
+  return getJson<AirportPatternsResponse>(`/airports/${enc(icao)}/patterns`);
+}
+
+export function getRunwayPattern(icao: string, runwayId: string) {
+  return getJson<PatternResponse>(`/runways/${enc(icao)}/${enc(runwayId)}/pattern`);
+}
+
+export function getPatternTemplate(icao: string, runwayId: string, side: "left" | "right" = "left") {
+  return getJson<PatternTemplateResponse>(`/runways/${enc(icao)}/${enc(runwayId)}/pattern/template?side=${side}`);
+}
+
+export function savePattern(icao: string, runwayId: string, body: PatternSaveBody) {
+  return putJson<PatternResponse>(`/runways/${enc(icao)}/${enc(runwayId)}/pattern`, body);
+}
+
+export function getPatternHistory(icao: string, runwayId: string) {
+  return getJson<PatternHistoryResponse>(`/runways/${enc(icao)}/${enc(runwayId)}/pattern/history`);
+}
+
+export function revertPattern(icao: string, runwayId: string, version: number, visitorId: string | null) {
+  return postJson<PatternResponse>(`/runways/${enc(icao)}/${enc(runwayId)}/pattern/revert`, {
+    version,
+    visitor_id: visitorId,
+  });
 }
