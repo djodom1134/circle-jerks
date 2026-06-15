@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import MapView from "./components/MapView";
 import OnboardingTour, { shouldShowOnboarding } from "./components/OnboardingTour";
+import PatternEditorPanel from "./components/PatternEditorPanel";
 import WindIndicator from "./components/WindIndicator";
 import BackfillBanner from "./components/BackfillBanner";
 import buyMeCoffeeQrUrl from "./assets/buy-me-a-coffee-qr.png";
@@ -15,6 +16,7 @@ import {
   complaintForm,
   geocode,
   reverseGeocode,
+  getAirportPatterns,
   getAirportSosaUrl,
   getAtcFeeds,
   getConfig,
@@ -33,7 +35,9 @@ import {
   type LiveStatusResponse,
   type MessagePreferences,
   type Offender,
+  type PatternPoint,
   type RepeatOffender,
+  type RunwayPattern,
   type ScanParams,
   type ScanResponse,
   type SponsorsResponse,
@@ -101,6 +105,23 @@ export default function App() {
   const [repeatOffenders, setRepeatOffenders] = useState<RepeatOffender[]>([]);
   const [liveStatus, setLiveStatus] = useState<LiveStatusResponse | null>(null);
   const [sosaUrl, setSosaUrl] = useState<string>("https://www.saveourskiesalliance.org/");
+  const [patternEditing, setPatternEditing] = useState(false);
+  const [editingRunwayId, setEditingRunwayId] = useState<string | null>(null);
+  const [editingPoints, setEditingPoints] = useState<PatternPoint[]>([]);
+  const [editSeedKey, setEditSeedKey] = useState(0);
+  const [patterns, setPatterns] = useState<RunwayPattern[]>([]);
+
+  function seedEditingPoints(points: PatternPoint[]) {
+    setEditingPoints(points);
+    setEditSeedKey((k) => k + 1);
+  }
+
+  function reloadPatterns() {
+    if (!airport?.icao) return;
+    getAirportPatterns(airport.icao).then((r) => setPatterns(r.patterns)).catch(() => setPatterns([]));
+  }
+
+  useEffect(() => { reloadPatterns(); /* eslint-disable-next-line */ }, [airport?.icao]);
 
   useEffect(() => {
     getConfig()
@@ -445,6 +466,15 @@ export default function App() {
             >
               <Flame size={16} aria-hidden="true" />
             </button>
+            <button
+              className={`map-icon-toggle${patternEditing ? " active" : ""}`}
+              title="Edit VNAP patterns"
+              aria-label="Edit VNAP patterns"
+              onClick={() => { setPatternEditing((v) => !v); if (patternEditing) { setEditingRunwayId(null); setEditingPoints([]); } }}
+              disabled={!airport?.icao}
+            >
+              <MapPin size={16} />
+            </button>
             <AtcListenButton airportIcao={airport?.icao} />
           </div>
           <WindIndicator airportIcao={airport?.icao ?? null} windowCode={windowCode} />
@@ -461,7 +491,24 @@ export default function App() {
             autoZoom={autoZoom}
             showHeatmap={showHeatmap}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
+            patterns={patterns}
+            editingRunwayId={patternEditing ? editingRunwayId : null}
+            editingPoints={editingPoints}
+            editingClosed={true}
+            editSeedKey={editSeedKey}
+            onEditingPointsChange={setEditingPoints}
           />
+          {patternEditing && airport?.icao && (
+            <PatternEditorPanel
+              airportIcao={airport.icao}
+              runwayId={editingRunwayId}
+              points={editingPoints}
+              onSelectRunway={(rwy) => { setEditingRunwayId(rwy); setEditingPoints([]); setEditSeedKey((k) => k + 1); }}
+              onSeedPoints={seedEditingPoints}
+              onClose={() => { setPatternEditing(false); setEditingRunwayId(null); setEditingPoints([]); }}
+              onSaved={reloadPatterns}
+            />
+          )}
         </section>
 
         <section className="side-panel">
