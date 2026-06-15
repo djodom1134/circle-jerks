@@ -4,7 +4,7 @@ import pytest
 
 from app import db
 from app.db import Airport
-from app.detectors import detect_events
+from app.detectors import detect_circles, detect_events
 from app.domain import ScanParams
 
 
@@ -220,3 +220,13 @@ def test_detected_circle_is_persisted(tmp_path):
     rows = db.read_operations(conn, "KBJC", 0, 10_000)
     assert any(r["type"] == "circle" for r in rows)
     assert all(r["icao"] == "KBJC" for r in rows)
+
+
+def test_closed_lap_circle_event_has_lap_time_bounds():
+    from app.detectors import detect_circles
+    ap = airport_kbjc()
+    events = detect_circles(closed_loop_track(), ap, ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2))
+    lap = next(e for e in events if e.get("detection_method") == "course_turn_closed_lap")
+    assert "start_timestamp" in lap and "end_timestamp" in lap
+    assert lap["start_timestamp"] <= lap["end_timestamp"] <= lap["timestamp"] + 1
+    assert lap["end_timestamp"] - lap["start_timestamp"] >= 120  # the lap spans real time

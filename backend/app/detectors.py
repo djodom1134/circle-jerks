@@ -273,6 +273,8 @@ def _detect_circles_in_samples(
             "turn_degrees": int(round(turn_degrees)),
             "turn_direction": "right" if turn_degrees > 0 else "left",
             "detection_method": "course_turn_closed_lap",
+            "start_timestamp": int(loop_samples[0]["timestamp"]),
+            "end_timestamp": int(loop_samples[-1]["timestamp"]),
             "alt_band_ft": [
                 int(min(altitudes)) if altitudes else None,
                 int(max(altitudes)) if altitudes else None,
@@ -344,7 +346,23 @@ def _detect_circles_in_samples(
 
 
 def detect_circles(track: list[dict], airport: Airport, params: ScanParams) -> list[dict]:
-    return _detect_home_airport_crossings(samples_in_last(track, 20 * 60), airport, params)
+    recent = samples_in_last(track, 20 * 60)
+    crossing = _detect_home_airport_crossings(recent, airport, params)
+    closed_lap = _detect_circles_in_samples(recent, airport, params)
+    # Closed-lap events are richer; suppress any line-crossing event whose
+    # timestamp falls inside a closed-lap's [start, end] window so a single
+    # real lap never counts twice.
+    suppressed: set[str] = set()
+    for lap in closed_lap:
+        start = lap.get("start_timestamp", lap["timestamp"])
+        end = lap.get("end_timestamp", lap["timestamp"])
+        for xing in crossing:
+            if start <= xing["timestamp"] <= end:
+                suppressed.add(xing["id"])
+    by_id: dict[str, dict] = {e["id"]: e for e in crossing if e["id"] not in suppressed}
+    for e in closed_lap:
+        by_id[e["id"]] = e
+    return sorted(by_id.values(), key=lambda e: e["timestamp"])
 
 
 def detect_circles_over_period(
