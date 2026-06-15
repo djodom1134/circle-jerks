@@ -264,6 +264,23 @@ CREATE TABLE IF NOT EXISTS operations (
 CREATE INDEX IF NOT EXISTS idx_operations_icao_ts ON operations(icao, timestamp);
 CREATE INDEX IF NOT EXISTS idx_operations_icao24 ON operations(icao24);
 CREATE INDEX IF NOT EXISTS idx_operations_type ON operations(type);
+
+CREATE TABLE IF NOT EXISTS runway_patterns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  icao TEXT NOT NULL,
+  runway_id TEXT NOT NULL,
+  geometry_json TEXT NOT NULL,
+  name TEXT,
+  version INTEGER NOT NULL,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  locked INTEGER NOT NULL DEFAULT 0,
+  editor_visitor_id TEXT,
+  editor_ip TEXT,
+  change_note TEXT,
+  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+  FOREIGN KEY (icao, runway_id) REFERENCES runways(icao, runway_id)
+);
+CREATE INDEX IF NOT EXISTS idx_runway_patterns_current ON runway_patterns(icao, runway_id, is_current);
 """
 
 
@@ -546,6 +563,14 @@ def runways_for_airport(conn: sqlite3.Connection, icao: str) -> list[dict]:
         (icao.upper(),),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_runway(conn: sqlite3.Connection, icao: str, runway_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM runways WHERE icao = ? AND runway_id = ?",
+        (icao.upper(), runway_id),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def complaint_form(conn: sqlite3.Connection, icao: str) -> dict | None:

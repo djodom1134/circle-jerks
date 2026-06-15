@@ -37,3 +37,16 @@ def test_destination_point_projects_by_bearing_and_distance():
     east = destination_point(start, 90.0, 30.0)
     assert east.lon > start.lon
     assert abs(distance_nm(start, east) - 30.0) < 0.5
+
+
+def test_runway_patterns_table_and_get_runway(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(runway_patterns)").fetchall()}
+    assert {"id", "icao", "runway_id", "geometry_json", "version",
+            "is_current", "locked", "editor_visitor_id", "change_note", "created_at"} <= cols
+
+    rwy = db.get_runway(conn, "KBJC", "12L")
+    assert rwy is not None
+    assert rwy["heading_deg"] == 120
+    assert rwy["length_ft"] == 9000
+    assert db.get_runway(conn, "KBJC", "ZZ") is None
