@@ -41,3 +41,38 @@ def test_flow_tables_and_helpers(tmp_path):
     assert changes[0]["cowboy_callsign"] == "N4052F"
     assert changes[0]["trigger_op_id"] == "op9"
     assert changes[0]["wind_favored_new"] == 0
+
+
+def _op(ts, rid, icao24="a", oid=None):
+    return {"timestamp": ts, "runway_id": rid, "icao24": icao24, "callsign": "N1",
+            "registration": "N1", "id": oid or f"op{ts}"}
+
+
+def test_trailing_run_and_established_end():
+    ops = [_op(0, "12L"), _op(60, "12L"), _op(120, "30R"), _op(180, "30R"), _op(240, "30R")]
+    rid, run_len, span = flow.trailing_run(ops)
+    assert rid == "30R" and run_len == 3 and span == 120
+
+    # 3 consecutive 30R establishes 30R over a previous 12L
+    assert flow.established_end(ops, "12L") == "30R"
+    # only 2 consecutive, short span → not yet established, keep previous
+    assert flow.established_end([_op(0, "12L"), _op(60, "30R"), _op(120, "30R")], "12L") == "12L"
+    # 2 ops but spanning >= 10 min → established by time
+    assert flow.established_end([_op(0, "12L"), _op(60, "30R"), _op(700, "30R")], "12L") == "30R"
+    # empty → keep previous
+    assert flow.established_end([], "12L") == "12L"
+
+
+def test_cowboy_for_end_is_earliest_of_trailing_run():
+    ops = [_op(0, "12L"), _op(120, "30R", oid="first30"), _op(180, "30R"), _op(240, "30R", oid="last30")]
+    cowboy = flow.cowboy_for_end(ops, "30R")
+    assert cowboy["id"] == "first30"
+
+
+def test_headwind_component():
+    # wind from 300 onto runway heading 300 → full headwind (+)
+    assert flow.headwind_component(300, 300, 10.0) == 10.0
+    # opposite runway 120 → tailwind (negative)
+    assert flow.headwind_component(120, 300, 10.0) == -10.0
+    assert flow.headwind_component(None, 300, 10.0) is None
+    assert flow.headwind_component(300, None, 10.0) is None
