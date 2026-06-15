@@ -352,6 +352,7 @@ async def run_detectors_for_monitor(
     # Fetch existing event IDs ONCE (not per-event) — event_exists re-scanned
     # the whole events set on every call, which was O(events²) per scan.
     existing_ids = await store.existing_event_ids(monitor["hash"])
+    new_events: list[dict] = []
     for icao24, track in zip(icao24s, tracks):
         if not track_intersects_bbox(track, tuple(monitor["bbox"])):
             continue
@@ -364,7 +365,12 @@ async def run_detectors_for_monitor(
             if event["id"] not in existing_ids:
                 await store.add_event(monitor["hash"], event, settings.event_ttl_seconds)
                 existing_ids.add(event["id"])
+                new_events.append(event)
                 written += 1
+    # Durably log the ops so the KPIs page / deviation / rotation phases have
+    # history beyond the ephemeral Redis (~4h) + archive (~24h) windows.
+    if new_events:
+        db.persist_events(conn, new_events)
     return written
 
 

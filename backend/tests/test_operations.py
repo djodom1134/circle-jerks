@@ -192,3 +192,20 @@ def test_persist_events_skips_events_without_id_or_airport(tmp_path):
     conn.commit()
     assert processed == 0
     assert db.read_operations(conn, "KBJC", 0, 10000) == []
+
+
+def test_detected_circle_is_persisted(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    ap = airport_kbjc()
+    runways = db.runways_for_airport(conn, "KBJC")
+    params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2)
+
+    events = detect_events(closed_loop_track(), ap, runways, params)
+    assert any(e["type"] == "circle" for e in events)  # sanity: detector fired
+
+    db.persist_events(conn, events)
+    conn.commit()
+
+    rows = db.read_operations(conn, "KBJC", 0, 10_000)
+    assert any(r["type"] == "circle" for r in rows)
+    assert all(r["icao"] == "KBJC" for r in rows)
