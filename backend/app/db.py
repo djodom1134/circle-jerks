@@ -282,6 +282,36 @@ CREATE TABLE IF NOT EXISTS runway_patterns (
   FOREIGN KEY (icao, runway_id) REFERENCES runways(icao, runway_id)
 );
 CREATE INDEX IF NOT EXISTS idx_runway_patterns_current ON runway_patterns(icao, runway_id, is_current);
+
+CREATE TABLE IF NOT EXISTS runway_flow (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  icao TEXT NOT NULL,
+  active_runway_id TEXT NOT NULL,
+  established_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  wind_from_deg INTEGER,
+  wind_speed_kt REAL,
+  op_count INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (icao) REFERENCES airports(icao)
+);
+CREATE INDEX IF NOT EXISTS idx_runway_flow_icao ON runway_flow(icao, established_at DESC);
+
+CREATE TABLE IF NOT EXISTS runway_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  icao TEXT NOT NULL,
+  from_runway_id TEXT,
+  to_runway_id TEXT NOT NULL,
+  changed_at INTEGER NOT NULL,
+  cowboy_icao24 TEXT,
+  cowboy_callsign TEXT,
+  cowboy_registration TEXT,
+  wind_from_deg INTEGER,
+  wind_speed_kt REAL,
+  wind_favored_new INTEGER,
+  trigger_op_id TEXT,
+  FOREIGN KEY (icao) REFERENCES airports(icao)
+);
+CREATE INDEX IF NOT EXISTS idx_runway_changes_icao ON runway_changes(icao, changed_at DESC);
 """
 
 
@@ -523,6 +553,68 @@ def update_operation_deviation(
             op_id,
         ),
     )
+
+
+def update_operation_wind(conn: sqlite3.Connection, op_id: str,
+                          wind_from_deg: int | None, wind_speed_kt: float | None,
+                          headwind_kt: float | None) -> None:
+    conn.execute(
+        "UPDATE operations SET wind_from_deg = ?, wind_speed_kt = ?, headwind_kt = ? WHERE id = ?",
+        (wind_from_deg, wind_speed_kt, headwind_kt, op_id),
+    )
+
+
+def current_flow(conn: sqlite3.Connection, icao: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM runway_flow WHERE icao = ? AND ended_at IS NULL "
+        "ORDER BY established_at DESC LIMIT 1",
+        (icao.upper(),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def close_open_flow(conn: sqlite3.Connection, icao: str, ended_at: int) -> None:
+    conn.execute(
+        "UPDATE runway_flow SET ended_at = ? WHERE icao = ? AND ended_at IS NULL",
+        (ended_at, icao.upper()),
+    )
+
+
+def open_flow(conn: sqlite3.Connection, icao: str, runway_id: str, established_at: int,
+              wind_from_deg: int | None, wind_speed_kt: float | None) -> None:
+    conn.execute(
+        """
+        INSERT INTO runway_flow (icao, active_runway_id, established_at, wind_from_deg, wind_speed_kt)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (icao.upper(), runway_id, established_at, wind_from_deg, wind_speed_kt),
+    )
+
+
+def insert_runway_change(conn: sqlite3.Connection, icao: str, from_runway_id: str | None,
+                         to_runway_id: str, changed_at: int, cowboy: dict | None,
+                         wind_from_deg: int | None, wind_speed_kt: float | None,
+                         wind_favored_new: int) -> None:
+    cowboy = cowboy or {}
+    conn.execute(
+        """
+        INSERT INTO runway_changes
+          (icao, from_runway_id, to_runway_id, changed_at, cowboy_icao24, cowboy_callsign,
+           cowboy_registration, wind_from_deg, wind_speed_kt, wind_favored_new, trigger_op_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (icao.upper(), from_runway_id, to_runway_id, changed_at,
+         cowboy.get("icao24"), cowboy.get("callsign"), cowboy.get("registration"),
+         wind_from_deg, wind_speed_kt, wind_favored_new, cowboy.get("id")),
+    )
+
+
+def recent_runway_changes(conn: sqlite3.Connection, icao: str, limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM runway_changes WHERE icao = ? ORDER BY changed_at DESC LIMIT ?",
+        (icao.upper(), limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
