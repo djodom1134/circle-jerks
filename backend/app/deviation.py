@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json as _json
 from statistics import fmean
 
 from .geo import Point, closest_segment_approach_nm
+from . import db as _db
 
 CORRIDOR_NM = 0.25
 
@@ -123,3 +125,46 @@ def compute_deviation(samples: list[dict], polyline: list[Point], corridor_nm: f
         "time_total_s": time_total,
         "pct_off_pattern": round(time_off / time_total, 3),
     }
+
+
+def store_deviations(conn, airport_icao: str, events: list[dict], tracks_by_icao24: dict[str, list[dict]]) -> int:
+    """For each closed-lap circle event with lap bounds, match a current pattern,
+    compute deviation over the lap's samples, and write it onto the operation.
+    No-op when the airport has no patterns. Returns the number of ops updated."""
+    pattern_rows = _db.current_patterns_for_airport(conn, airport_icao)
+    if not pattern_rows:
+        return 0
+    patterns = []
+    for row in pattern_rows:
+        try:
+            patterns.append({"id": row["id"], "geometry": _json.loads(row["geometry_json"])})
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not patterns:
+        return 0
+
+    updated = 0
+    for event in events:
+        if event.get("type") != "circle":
+            continue
+        start = event.get("start_timestamp")
+        end = event.get("end_timestamp")
+        if start is None or end is None:
+            continue
+        track = tracks_by_icao24.get(event.get("icao24")) or []
+        samples = [
+            s for s in track
+            if s.get("lat") is not None and s.get("lon") is not None
+            and start <= int(s.get("timestamp", -1)) <= end
+        ]
+        if len(samples) < 2:
+            continue
+        matched = match_pattern(samples, patterns)
+        if matched is None:
+            continue
+        metrics = compute_deviation(samples, densify_pattern(matched["geometry"]))
+        if metrics is None:
+            continue
+        _db.update_operation_deviation(conn, event["id"], matched["id"], metrics)
+        updated += 1
+    return updated

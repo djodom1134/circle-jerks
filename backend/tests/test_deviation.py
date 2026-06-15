@@ -84,3 +84,45 @@ def test_update_operation_deviation(tmp_path):
     assert row["deviation_mean_nm"] == 0.42
     assert row["pct_off_pattern"] == 0.25
     assert row["time_total_s"] == 240
+
+
+def test_store_deviations_end_to_end(tmp_path):
+    import json
+    from app import db
+    from app.detectors import detect_events
+    from app.domain import ScanParams
+    # local fixtures (same as test_operations.py)
+    from app.db import Airport
+
+    def ap():
+        return Airport(icao="KBJC", iata="BJC", name="x", city="x", country="US",
+                       lat=39.9088, lon=-105.1172, elevation_ft=5673, is_towered=True)
+
+    def sample(ts, lat, lon, alt_agl=900):
+        return {"icao24": "abc123", "callsign": "N1", "timestamp": ts, "lat": lat, "lon": lon,
+                "geo_altitude_ft": 5673 + alt_agl, "velocity_kt": 80, "vertical_rate_fpm": 0, "on_ground": False}
+
+    pts = [(39.9238, -105.1172), (39.9194, -105.1013), (39.9088, -105.0950), (39.8982, -105.1013),
+           (39.8938, -105.1172), (39.8982, -105.1331), (39.9088, -105.1394), (39.9194, -105.1331), (39.9238, -105.1172)]
+    track = [sample(1000 + i * 30, lat, lon) for i, (lat, lon) in enumerate(pts)]
+
+    conn = db.connect(str(tmp_path / "t.sqlite3"))
+    conn.executescript(db.SCHEMA); db.seed_db(conn); conn.commit()
+
+    # Save a pattern that IS the flown loop → deviation should be small.
+    geom = json.dumps({"points": [{"lat": lat, "lon": lon} for lat, lon in pts], "closed": True, "spline": "catmull-rom"})
+    saved = db.save_runway_pattern(conn, "KBJC", "12L", geom, name="loop")
+
+    runways = db.runways_for_airport(conn, "KBJC")
+    events = detect_events(track, ap(), runways, ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2))
+    db.persist_events(conn, events)
+    deviation.store_deviations(conn, "KBJC", events, {"abc123": track})
+    conn.commit()
+
+    rows = [r for r in db.read_operations(conn, "KBJC", 0, 10000) if r["type"] == "circle"]
+    assert rows, "expected a persisted circle op"
+    op = rows[0]
+    assert op["matched_pattern_id"] == saved["id"]
+    assert op["deviation_mean_nm"] is not None
+    assert 0.0 <= op["pct_off_pattern"] <= 1.0
+    assert op["deviation_mean_nm"] < 0.5  # track ≈ pattern
