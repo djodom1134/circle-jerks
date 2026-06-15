@@ -47,3 +47,18 @@ def test_compute_deviation_off_pattern_is_high():
 def test_compute_deviation_needs_two_samples():
     line = [Point(0.0, 0.0), Point(0.0, 0.2)]
     assert deviation.compute_deviation(_samples([(0.0, 0.0)]), line) is None
+
+
+def test_match_pattern_picks_nearest_same_sense():
+    # Aircraft flies a small CCW square near (0,0).
+    track = _samples([(0.0, 0.0), (0.0, 0.02), (0.02, 0.02), (0.02, 0.0), (0.0, 0.0)])
+
+    near_ccw = {"id": 1, "geometry": {"points": [
+        {"lat": 0.0, "lon": 0.0}, {"lat": 0.0, "lon": 0.02},
+        {"lat": 0.02, "lon": 0.02}, {"lat": 0.02, "lon": 0.0}], "closed": True}}
+    far_ccw = {"id": 2, "geometry": {"points": [
+        {"lat": 1.0, "lon": 1.0}, {"lat": 1.0, "lon": 1.02},
+        {"lat": 1.02, "lon": 1.02}, {"lat": 1.02, "lon": 1.0}], "closed": True}}
+
+    assert deviation.match_pattern(track, [near_ccw, far_ccw])["id"] == 1
+    assert deviation.match_pattern(track, []) is None

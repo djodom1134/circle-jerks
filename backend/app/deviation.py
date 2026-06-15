@@ -41,6 +41,54 @@ def perpendicular_distance_nm(point: Point, polyline: list[Point]) -> float:
     return best
 
 
+def _loop_sense(lonlat: list[tuple[float, float]]) -> int | None:
+    """Signed-area sense of a loop in (lon, lat) space: +1 CCW, -1 CW, None if degenerate."""
+    if len(lonlat) < 3:
+        return None
+    area = 0.0
+    for (x1, y1), (x2, y2) in zip(lonlat, lonlat[1:] + [lonlat[0]]):
+        area += x1 * y2 - x2 * y1
+    if area > 0:
+        return 1
+    if area < 0:
+        return -1
+    return None
+
+
+def match_pattern(samples: list[dict], patterns: list[dict]) -> dict | None:
+    """Pick the pattern the track best follows: prefer matching rotational sense,
+    then nearest by mean perpendicular distance. `patterns` items: {id, geometry}."""
+    usable = [s for s in samples if s.get("lat") is not None and s.get("lon") is not None]
+    if not patterns or len(usable) < 2:
+        return patterns[0] if patterns else None
+    track_sense = _loop_sense([(s["lon"], s["lat"]) for s in usable])
+
+    densified = []
+    for pat in patterns:
+        poly = densify_pattern(pat["geometry"])
+        if len(poly) < 2:
+            continue
+        sense = _loop_sense([(p.lon, p.lat) for p in poly])
+        densified.append((pat, poly, sense))
+    if not densified:
+        return None
+
+    candidates = densified
+    if track_sense is not None:
+        same = [d for d in densified if d[2] == track_sense]
+        if same:
+            candidates = same
+
+    best = None
+    best_mean = float("inf")
+    for pat, poly, _sense in candidates:
+        mean = fmean(perpendicular_distance_nm(Point(s["lat"], s["lon"]), poly) for s in usable)
+        if mean < best_mean:
+            best_mean = mean
+            best = pat
+    return best
+
+
 def compute_deviation(samples: list[dict], polyline: list[Point], corridor_nm: float = CORRIDOR_NM) -> dict | None:
     """Roll the two deviation KPIs over a circle's track window.
 
