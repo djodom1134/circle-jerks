@@ -26,7 +26,7 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import db
+from . import db, patterns
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -108,10 +108,31 @@ class ActivitySubmissionRequest(BaseModel):
     targets: list[ActivityAircraft] = Field(default_factory=list, max_length=80)
 
 
+class PatternPoint(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+
+
+class PatternSaveRequest(BaseModel):
+    points: list[PatternPoint] = Field(min_length=1, max_length=50)
+    closed: bool = True
+    name: str | None = Field(default=None, max_length=80)
+    change_note: str | None = Field(default=None, max_length=200)
+    visitor_id: str | None = Field(default=None, min_length=8, max_length=80)
+
+
+class PatternRevertRequest(BaseModel):
+    version: int = Field(ge=1)
+    visitor_id: str | None = Field(default=None, min_length=8, max_length=80)
+
+
 class AdminLoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=400)
 
+
+PATTERN_EDIT_WINDOW_S = 3600
+PATTERN_EDIT_MAX_PER_WINDOW = 30
 
 DEMO_USER_LAT = 40.1672
 DEMO_USER_LON = -105.1019
@@ -165,6 +186,20 @@ def client_ip(request: Request) -> str | None:
     if real_ip:
         return real_ip.strip()[:80] or None
     return request.client.host[:80] if request.client else None
+
+
+def _pattern_response(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "icao": row["icao"],
+        "runway_id": row["runway_id"],
+        "version": row["version"],
+        "name": row["name"],
+        "locked": bool(row["locked"]),
+        "geometry": json.loads(row["geometry_json"]),
+        "change_note": row.get("change_note"),
+        "created_at": row["created_at"],
+    }
 
 
 def user_agent(request: Request) -> str | None:
@@ -1298,3 +1333,38 @@ async def complaint_form(
             "last_verified": None,
         },
     }
+
+
+@app.get("/airports/{icao}/patterns")
+async def get_airport_patterns(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        patterns_out = [_pattern_response(row) for row in db.current_patterns_for_airport(conn, icao)]
+    return {"airport_icao": icao.upper(), "patterns": patterns_out}
+
+
+@app.get("/runways/{icao}/{runway_id}/pattern")
+async def get_runway_pattern(
+    icao: str,
+    runway_id: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        row = db.get_current_pattern(conn, icao, runway_id)
+    return {"pattern": _pattern_response(row) if row else None}
+
+
+@app.get("/runways/{icao}/{runway_id}/pattern/template")
+async def get_runway_pattern_template(
+    icao: str,
+    runway_id: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    side: Annotated[str, Query(pattern="^(left|right)$")] = "left",
+):
+    with db_session(settings.database_path) as conn:
+        runway = db.get_runway(conn, icao, runway_id)
+    if runway is None:
+        raise HTTPException(status_code=404, detail="runway not found")
+    return {"geometry": patterns.generate_template_pattern(runway, side=side)}

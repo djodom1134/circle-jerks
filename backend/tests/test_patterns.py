@@ -139,3 +139,23 @@ def test_pattern_history_revert_and_rate_count(tmp_path):
     assert count_v2 == 1
     # window excludes old edits
     assert db.count_recent_pattern_edits(conn, "visitor-1", "1.1.1.1", 9_999_999_999) == 0
+
+
+def test_pattern_read_endpoints(tmp_path, monkeypatch):
+    with api_client(tmp_path, monkeypatch) as client:
+        # template for a real runway
+        resp = client.get("/runways/KBJC/12L/pattern/template", params={"side": "left"})
+        assert resp.status_code == 200
+        geom = resp.json()["geometry"]
+        assert len(geom["points"]) == 5 and geom["closed"] is True
+
+        # template for unknown runway → 404
+        assert client.get("/runways/KBJC/ZZ/pattern/template").status_code == 404
+
+        # no pattern yet
+        resp = client.get("/runways/KBJC/12L/pattern")
+        assert resp.status_code == 200 and resp.json()["pattern"] is None
+
+        # airport patterns list is empty
+        resp = client.get("/airports/KBJC/patterns")
+        assert resp.status_code == 200 and resp.json()["patterns"] == []
