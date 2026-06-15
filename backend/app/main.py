@@ -1368,3 +1368,73 @@ async def get_runway_pattern_template(
     if runway is None:
         raise HTTPException(status_code=404, detail="runway not found")
     return {"geometry": patterns.generate_template_pattern(runway, side=side)}
+
+
+@app.put("/runways/{icao}/{runway_id}/pattern")
+async def save_runway_pattern_endpoint(
+    icao: str,
+    runway_id: str,
+    payload: PatternSaveRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    now = int(time.time())
+    ip = client_ip(request)
+    with db_session(settings.database_path) as conn:
+        airport = db.get_airport(conn, icao)
+        if airport is None:
+            raise HTTPException(status_code=404, detail="airport not found")
+        if db.get_runway(conn, icao, runway_id) is None:
+            raise HTTPException(status_code=404, detail="runway not found")
+        current = db.get_current_pattern(conn, icao, runway_id)
+        if current and current["locked"]:
+            raise HTTPException(status_code=409, detail="pattern is locked")
+        points = [{"lat": p.lat, "lon": p.lon} for p in payload.points]
+        error = patterns.validate_pattern_geometry(points, airport)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        recent = db.count_recent_pattern_edits(conn, payload.visitor_id, ip, now - PATTERN_EDIT_WINDOW_S)
+        if recent >= PATTERN_EDIT_MAX_PER_WINDOW:
+            raise HTTPException(status_code=429, detail="too many pattern edits; slow down")
+        geometry = {"points": points, "closed": payload.closed, "spline": patterns.PATTERN_SPLINE}
+        saved = db.save_runway_pattern(
+            conn, icao, runway_id, json.dumps(geometry),
+            name=payload.name, editor_visitor_id=payload.visitor_id,
+            editor_ip=ip, change_note=payload.change_note,
+        )
+    return {"pattern": _pattern_response(saved)}
+
+
+@app.get("/runways/{icao}/{runway_id}/pattern/history")
+async def get_runway_pattern_history(
+    icao: str,
+    runway_id: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        versions = db.list_pattern_versions(conn, icao, runway_id)
+    return {"versions": [
+        {**v, "is_current": bool(v["is_current"]), "locked": bool(v["locked"])}
+        for v in versions
+    ]}
+
+
+@app.post("/runways/{icao}/{runway_id}/pattern/revert")
+async def revert_runway_pattern_endpoint(
+    icao: str,
+    runway_id: str,
+    payload: PatternRevertRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        current = db.get_current_pattern(conn, icao, runway_id)
+        if current and current["locked"]:
+            raise HTTPException(status_code=409, detail="pattern is locked")
+        saved = db.revert_pattern(
+            conn, icao, runway_id, payload.version,
+            editor_visitor_id=payload.visitor_id, editor_ip=client_ip(request),
+        )
+        if saved is None:
+            raise HTTPException(status_code=404, detail="version not found")
+    return {"pattern": _pattern_response(saved)}

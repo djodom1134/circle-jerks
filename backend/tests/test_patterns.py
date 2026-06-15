@@ -159,3 +159,54 @@ def test_pattern_read_endpoints(tmp_path, monkeypatch):
         # airport patterns list is empty
         resp = client.get("/airports/KBJC/patterns")
         assert resp.status_code == 200 and resp.json()["patterns"] == []
+
+
+def test_pattern_save_history_revert_flow(tmp_path, monkeypatch):
+    with api_client(tmp_path, monkeypatch) as client:
+        body1 = {"points": [{"lat": 39.92, "lon": -105.13}, {"lat": 39.93, "lon": -105.14}],
+                 "closed": True, "name": "v1", "visitor_id": "visitor-123456"}
+        r1 = client.put("/runways/KBJC/12L/pattern", json=body1)
+        assert r1.status_code == 200
+        assert r1.json()["pattern"]["version"] == 1
+
+        body2 = {"points": [{"lat": 39.94, "lon": -105.15}], "name": "v2", "visitor_id": "visitor-123456"}
+        r2 = client.put("/runways/KBJC/12L/pattern", json=body2)
+        assert r2.json()["pattern"]["version"] == 2
+
+        # get-current reflects v2
+        assert client.get("/runways/KBJC/12L/pattern").json()["pattern"]["version"] == 2
+
+        # history has 2 versions, newest first
+        hist = client.get("/runways/KBJC/12L/pattern/history").json()["versions"]
+        assert [v["version"] for v in hist] == [2, 1]
+
+        # revert to v1 → new v3 with v1 geometry
+        rev = client.post("/runways/KBJC/12L/pattern/revert", json={"version": 1, "visitor_id": "visitor-123456"})
+        assert rev.status_code == 200
+        assert rev.json()["pattern"]["version"] == 3
+        assert rev.json()["pattern"]["geometry"]["points"][0]["lat"] == 39.92
+
+        # revert to missing version → 404
+        assert client.post("/runways/KBJC/12L/pattern/revert", json={"version": 99, "visitor_id": "visitor-123456"}).status_code == 404
+
+
+def test_pattern_save_rejects_out_of_bounds_point(tmp_path, monkeypatch):
+    with api_client(tmp_path, monkeypatch) as client:
+        body = {"points": [{"lat": 41.5, "lon": -105.13}], "visitor_id": "visitor-123456"}  # ~90 nm away
+        r = client.put("/runways/KBJC/12L/pattern", json=body)
+        assert r.status_code == 400
+
+
+def test_pattern_save_unknown_runway_404(tmp_path, monkeypatch):
+    with api_client(tmp_path, monkeypatch) as client:
+        body = {"points": [{"lat": 39.92, "lon": -105.13}], "visitor_id": "visitor-123456"}
+        assert client.put("/runways/KBJC/ZZ/pattern", json=body).status_code == 404
+
+
+def test_pattern_save_rate_limited(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.main.PATTERN_EDIT_MAX_PER_WINDOW", 2)
+    with api_client(tmp_path, monkeypatch) as client:
+        body = {"points": [{"lat": 39.92, "lon": -105.13}], "visitor_id": "visitor-123456"}
+        assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 200
+        assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 200
+        assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 429
