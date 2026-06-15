@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import MapView from "./components/MapView";
 import OnboardingTour, { shouldShowOnboarding } from "./components/OnboardingTour";
+import WindIndicator from "./components/WindIndicator";
+import BackfillBanner from "./components/BackfillBanner";
 import buyMeCoffeeQrUrl from "./assets/buy-me-a-coffee-qr.png";
 import logoUrl from "./assets/circle-jerks-logo.png";
 import {
@@ -12,6 +14,8 @@ import {
   complaintSummary,
   complaintForm,
   geocode,
+  reverseGeocode,
+  getAirportSosaUrl,
   getAtcFeeds,
   getConfig,
   getLiveStatus,
@@ -64,7 +68,7 @@ function windowFromQuery(): WindowCode {
   const value = new URLSearchParams(window.location.search).get("window");
   if (WINDOWS.some((item) => item.code === value)) return value as WindowCode;
   const stored = readPreferences().window;
-  return stored && WINDOWS.some((item) => item.code === stored) ? stored : "1h";
+  return stored && WINDOWS.some((item) => item.code === stored) ? stored : "today";
 }
 
 function storedLocation(preferences: StoredPreferences) {
@@ -85,20 +89,46 @@ export default function App() {
   const [selected, setSelected] = useState<Offender | null>(null);
   const [formUrl, setFormUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading configuration");
-  const [airportQuery, setAirportQuery] = useState("");
+  const [airportQuery, setAirportQuery] = useState(
+    () => preferences.airport_query ?? preferences.airport_icao ?? ""
+  );
   const [airportResults, setAirportResults] = useState<Airport[]>([]);
-  const [addressQuery, setAddressQuery] = useState("");
+  const [addressQuery, setAddressQuery] = useState(() => preferences.user_address ?? "");
   const [autoZoom, setAutoZoom] = useState(true);
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
   const [repeatOffenders, setRepeatOffenders] = useState<RepeatOffender[]>([]);
   const [liveStatus, setLiveStatus] = useState<LiveStatusResponse | null>(null);
+  const [sosaUrl, setSosaUrl] = useState<string>("https://www.saveourskiesalliance.org/");
 
   useEffect(() => {
     getConfig()
       .then(setConfig)
       .catch((error) => setStatus(`Configuration failed: ${error.message}`));
+  }, []);
+
+  // Suppress browser-level zoom (Ctrl/Cmd + wheel, Ctrl/Cmd + +/-/0, pinch
+  // trackpad). The map has its own zoom controls; page zoom just breaks the
+  // grid layout and confuses users.
+  useEffect(() => {
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (["+", "-", "=", "_", "0"].includes(event.key)) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, []);
 
   useEffect(() => {
@@ -129,7 +159,7 @@ export default function App() {
     let cancelled = false;
     async function refresh() {
       try {
-        const [s, r, ls] = await Promise.all([getSponsors(), getRepeatOffenders(12), getLiveStatus()]);
+        const [s, r, ls] = await Promise.all([getSponsors(), getRepeatOffenders(10), getLiveStatus()]);
         if (cancelled) return;
         setSponsors(s);
         setRepeatOffenders(r.aircraft);
@@ -182,6 +212,69 @@ export default function App() {
       window: windowCode
     }));
   }, [airport?.icao, userLocation.lat, userLocation.lon, windowCode]);
+
+  // Reflect detected/stored/recomputed airport in the input box. Updates
+  // unconditionally on every airport change — picking a new home location
+  // (geocode, right-click, or geolocation) recomputes the nearest airport,
+  // and the input must follow. If the user is in the middle of typing an
+  // airport search, the dropdown of results still appears below, and they
+  // can click a result to override.
+  useEffect(() => {
+    if (!airport) return;
+    setAirportQuery(airport.icao);
+  }, [airport?.icao]);
+
+  // Look up the Save Our Skies Alliance page for the current airport so the
+  // "Volunteer / get involved" CTA points to the right airport-specific page.
+  // Falls back to the SOSA home when no per-airport page exists yet.
+  useEffect(() => {
+    if (!airport?.icao) return;
+    let cancelled = false;
+    getAirportSosaUrl(airport.icao)
+      .then((result) => {
+        if (!cancelled && result?.url) setSosaUrl(result.url);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [airport?.icao]);
+
+  // Reverse-geocode the user's coords to fill the location input on first
+  // detection. Skip if the user already typed an address or we have one stored.
+  useEffect(() => {
+    if (addressQuery.trim() !== "") return;
+    if (!Number.isFinite(userLocation.lat) || !Number.isFinite(userLocation.lon)) return;
+    let cancelled = false;
+    reverseGeocode(userLocation.lat, userLocation.lon)
+      .then((result) => {
+        if (cancelled) return;
+        const label = result.short_name ?? result.display_name ?? "";
+        if (label) {
+          setAddressQuery((current) => (current.trim() === "" ? label : current));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [userLocation.lat, userLocation.lon]);
+
+  // Persist whatever the user (or auto-fill) put into the inputs so we can
+  // restore on the next visit.
+  useEffect(() => {
+    setPreferences((current) => {
+      if ((current.airport_query ?? "") === airportQuery) return current;
+      return { ...current, airport_query: airportQuery };
+    });
+  }, [airportQuery]);
+
+  useEffect(() => {
+    setPreferences((current) => {
+      if ((current.user_address ?? "") === addressQuery) return current;
+      return { ...current, user_address: addressQuery };
+    });
+  }, [addressQuery]);
 
   useEffect(() => {
     writePreferences(preferences);
@@ -314,7 +407,7 @@ export default function App() {
           {airportResults.length > 0 && (
             <div className="result-menu">
               {airportResults.map((candidate) => (
-                <button key={candidate.icao} onClick={() => { setAirport(candidate); setAirportResults([]); }}>
+                <button key={candidate.icao} onClick={() => { setAirport(candidate); setAirportQuery(candidate.icao); setAirportResults([]); }}>
                   <strong>{candidate.icao}</strong> {candidate.name}
                 </button>
               ))}
@@ -354,6 +447,12 @@ export default function App() {
             </button>
             <AtcListenButton airportIcao={airport?.icao} />
           </div>
+          <WindIndicator airportIcao={airport?.icao ?? null} windowCode={windowCode} />
+          <BackfillBanner
+            airportIcao={airport?.icao ?? null}
+            windowCode={windowCode}
+            onShortenWindow={() => setWindowCode("1h")}
+          />
           <MapView
             airport={airport}
             userLocation={userLocation}
@@ -403,7 +502,7 @@ export default function App() {
               Prepare complaint
             </button>
           </div>
-          <Counters data={scanData} />
+          <Counters data={scanData} status={status} onRefresh={refreshScan} />
           <OffenderTable
             offenders={scanData?.offenders ?? []}
             selected={selected}
@@ -437,6 +536,12 @@ export default function App() {
         }}
       />
 
+      <MovementSection
+        supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL}
+        volunteerUrl={sosaUrl}
+        airportLabel={airport ? `${airport.name}${airport.iata ? ` (${airport.iata})` : ""}` : null}
+      />
+
       <SponsorsSection sponsors={sponsors} supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL} />
 
       {showOnboarding && <OnboardingTour onClose={() => setShowOnboarding(false)} />}
@@ -456,10 +561,10 @@ function RepeatOffendersSection({
   if (offenders.length === 0) {
     return (
       <section className="bottom-section repeat-offenders empty">
-        <h2>Repeat offenders</h2>
+        <h2>Worst offenders</h2>
         <p>
           No aircraft has been reported more than once {airportIcao ? `near ${airportIcao}` : "yet"}. As complaints
-          come in, the worst repeat offenders will show up here.
+          come in, the worst offenders will show up here, ranked by total circles flown.
         </p>
       </section>
     );
@@ -467,35 +572,131 @@ function RepeatOffendersSection({
   return (
     <section className="bottom-section repeat-offenders">
       <header>
-        <h2>Repeat offenders</h2>
-        <p>Aircraft reported by users more than once — the most-complained-about planes in the area.</p>
+        <h2>Worst offenders</h2>
+        <p>Ranked by total circles flown — the biggest jerks in the area.</p>
       </header>
-      <div className="offender-grid">
-        {offenders.map((row) => {
+      <ol className="offender-leaderboard">
+        {offenders.map((row, index) => {
           const label =
             row.registration || row.callsign?.trim() || row.icao24.toUpperCase();
           const subtitle = [row.type_description || row.type_icao, row.operator]
             .filter(Boolean)
             .join(" · ");
+          const origin = row.origin_label || row.origin_airport_icao;
           return (
-            <button
-              key={row.icao24}
-              className="offender-card"
-              onClick={() => onSelect(row.icao24)}
-              title="Open complaint panel for this aircraft (if currently active)"
-            >
-              <div className="offender-card-head">
-                <strong>{label}</strong>
-                <span className="offender-count">{row.report_count}×</span>
-              </div>
-              {subtitle && <div className="offender-subtitle">{subtitle}</div>}
-              <div className="offender-meta">
-                last reported {formatLocalTime(row.last_reported_at)}
-              </div>
-            </button>
+            <li key={row.icao24}>
+              <button
+                className="offender-card"
+                onClick={() => onSelect(row.icao24)}
+                title="Open complaint panel for this aircraft (if currently active)"
+              >
+                <div className="offender-rank" aria-hidden="true">#{index + 1}</div>
+                <div className="offender-body">
+                  <div className="offender-card-head">
+                    <strong>{label}</strong>
+                    <span className="offender-circles" title="Total circles flown — the biggest jerk signal">
+                      {row.total_circles}× circles
+                    </span>
+                  </div>
+                  {subtitle && <div className="offender-subtitle">{subtitle}</div>}
+                  {origin && (
+                    <div className="offender-origin">
+                      Based at <strong>{origin}</strong>
+                    </div>
+                  )}
+                  <div className="offender-stats">
+                    <span title="Low approaches">{row.total_low_approaches} low</span>
+                    <span title="Passes over reporters' houses">{row.total_passes_over_user} over homes</span>
+                    <span title="Touch-and-gos">{row.total_touch_and_gos} t&amp;g</span>
+                    <span title="Times reported by neighbors">{row.report_count}× reported</span>
+                  </div>
+                  <div className="offender-meta">
+                    last reported {formatLocalTime(row.last_reported_at)}
+                  </div>
+                </div>
+              </button>
+            </li>
           );
         })}
+      </ol>
+    </section>
+  );
+}
+
+function MovementSection({
+  supportUrl,
+  volunteerUrl,
+  airportLabel,
+}: {
+  supportUrl: string;
+  volunteerUrl: string;
+  airportLabel: string | null;
+}) {
+  const isAirportSpecific = volunteerUrl !== "https://www.saveourskiesalliance.org/";
+  return (
+    <section className="bottom-section movement">
+      <header>
+        <h2>Take back the skies.</h2>
+        <p>
+          A handful of pilots and special-interest lobbyists treat the airspace
+          over your house as their personal practice yard. We're a grass-roots
+          effort to balance the scales — and to remind the people in the sky
+          that the rest of us live, sleep, and raise kids underneath it.
+        </p>
+      </header>
+
+      <div className="movement-pillars">
+        <article className="movement-card">
+          <h3>Educate the cockpit</h3>
+          <p>
+            Donations fund outreach to flight schools and student pilots:
+            noise-abatement procedures, safer departure tracks over populated
+            areas, and the basic civic awareness that "legal" is not the same
+            as "neighborly."
+          </p>
+        </article>
+
+        <article className="movement-card">
+          <h3>Speak louder than the lobby</h3>
+          <p>
+            AOPA and friends are organized, funded, and loud. We're catching up.
+            Every complaint filed, every neighbor signed up, every dollar in the
+            jar makes it harder for our elected officials to keep pretending
+            this isn't a public-health issue.
+          </p>
+        </article>
+
+        <article className="movement-card">
+          <h3>Volunteer</h3>
+          <p>
+            We need analysts, designers, organizers, lawyers, and locals in
+            every airport community. If you can spare an evening — or a
+            lifetime — we'd love your help.
+          </p>
+        </article>
       </div>
+
+      <div className="movement-actions">
+        <a className="movement-cta primary" href={supportUrl} target="_blank" rel="noreferrer">
+          Donate to the effort
+        </a>
+        <a
+          className="movement-cta secondary"
+          href={volunteerUrl}
+          target="_blank"
+          rel="noreferrer"
+          title={
+            isAirportSpecific && airportLabel
+              ? `Save Our Skies Alliance page for ${airportLabel}`
+              : "Save Our Skies Alliance"
+          }
+        >
+          {isAirportSpecific && airportLabel
+            ? `Volunteer at ${airportLabel}`
+            : "Volunteer / get involved"}
+        </a>
+      </div>
+
     </section>
   );
 }
@@ -650,17 +851,62 @@ function BackfillStatusIcon({ backfill }: { backfill?: ScanResponse["historical_
   );
 }
 
-function Counters({ data }: { data: ScanResponse | null }) {
+function Counters({
+  data,
+  status,
+  onRefresh,
+}: {
+  data: ScanResponse | null;
+  status: string;
+  onRefresh: () => Promise<void> | void;
+}) {
   const counters = data?.counters;
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  };
   return (
-    <div className="counter-strip">
-      <div><strong>{counters?.circles ?? 0}</strong><span>circles</span></div>
-      <div><strong>{counters?.touch_and_gos ?? 0}</strong><span>touch-and-gos</span></div>
-      <div><strong>{counters?.passes ?? 0}</strong><span>passes over you</span></div>
-      <div><strong>{counters?.offenders_active_now ?? 0}</strong><span>circling now</span></div>
-      <div><strong>{data?.tracks.length ?? 0}</strong><span>tracked paths {counters?.label ?? ""}</span></div>
+    <div className="panel-block counters-block">
+      <div className="counters-header">
+        <span className="counters-status" title={status}>{status}</span>
+        <button
+          type="button"
+          className="counters-refresh"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          title="Force a fresh scan now (otherwise auto-refreshes every 5s)"
+          aria-label="Refresh scan data"
+        >
+          <RotateCw size={14} aria-hidden="true" className={refreshing ? "spin" : undefined} />
+          <span>{refreshing ? "Refreshing…" : "Refresh"}</span>
+        </button>
+      </div>
+      <div className="counter-strip">
+        <div><strong>{counters?.circles ?? 0}</strong><span>circles</span></div>
+        <div><strong>{counters?.touch_and_gos ?? 0}</strong><span>touch-and-gos</span></div>
+        <div><strong>{counters?.passes ?? 0}</strong><span>passes over you</span></div>
+        <div><strong>{counters?.offenders_active_now ?? 0}</strong><span>circling now</span></div>
+        <div><strong>{data?.tracks.length ?? 0}</strong><span>tracked paths {counters?.label ?? ""}</span></div>
+      </div>
     </div>
   );
+}
+
+function runwayBreakdownLabel(breakdown: Record<string, number>): string {
+  const entries = Object.entries(breakdown);
+  if (entries.length === 0) return "";
+  // Sorted descending by count so the most-used runway leads.
+  entries.sort((a, b) => b[1] - a[1]);
+  if (entries.length === 1) {
+    return `rwy ${entries[0][0]}`;
+  }
+  return entries.map(([rwy, n]) => `${n}×${rwy}`).join(" ");
 }
 
 function originDisplay(row: Offender) {
@@ -683,7 +929,7 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
           <span>Callsign</span><span>Origin</span><span>Score</span><span>Cir</span><span>TG</span><span>Pass</span><span>Avg over you</span>
         </div>
         {offenders.length === 0 && <div className="empty-row">No events in this window yet.</div>}
-        {offenders.map((row) => (
+        {offenders.slice(0, 10).map((row) => (
           <button
             key={row.icao24}
             className={`table-row ${selected?.icao24 === row.icao24 ? "selected" : ""}`}
@@ -696,7 +942,12 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
             <span>{originDisplay(row).label}<small>{originDisplay(row).detail}</small></span>
             <span>{row.score}</span>
             <span>{row.circles}</span>
-            <span>{row.touch_and_gos}</span>
+            <span>
+              {row.touch_and_gos}
+              {row.runway_breakdown && Object.keys(row.runway_breakdown).length > 0 && (
+                <small>{runwayBreakdownLabel(row.runway_breakdown)}</small>
+              )}
+            </span>
             <span>{row.passes}</span>
             <span>{numberOrDash(row.avg_altitude_over_user_ft_agl, " ft")}</span>
           </button>
@@ -751,8 +1002,11 @@ function complaintErrorLabel(error: unknown) {
   if (error instanceof ApiError && error.status === 404) {
     return "Combined complaint endpoint was not available, so a local combined draft was generated.";
   }
-  if (error instanceof Error) return error.message;
-  return "Combined complaint failed";
+  if (error instanceof ApiError && error.status === 408) {
+    return "AI request timed out; generated a local draft instead.";
+  }
+  if (error instanceof Error) return `${error.message}; generated a local draft instead.`;
+  return "Combined complaint failed; generated a local draft instead.";
 }
 
 function localCombinedComplaint(
@@ -1244,22 +1498,15 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
   const [complaint, setComplaint] = useState<GeneratedComplaint | null>(null);
   const [detailStatus, setDetailStatus] = useState("Select an offender");
   const [shareOpen, setShareOpen] = useState(false);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const targets = useMemo(() => {
     if (complaintMode === "all") return offenders;
     return offender ? [offender] : [];
   }, [complaintMode, offender, offenders]);
-  const targetKey = targets.map((target) => [
-    target.icao24,
-    target.first_event_at,
-    target.last_event_at,
-    target.circles,
-    target.touch_and_gos,
-    target.low_approaches,
-    target.passes,
-    target.avg_altitude_over_user_ft_agl ?? "",
-    target.min_altitude_over_user_ft_agl ?? "",
-    target.origin_label ?? ""
-  ].join(":")).join(",");
+  // Intentionally keyed on icao24 only (not live metrics) so polling refreshes
+  // of scanData don't re-trigger Groq calls. Use the Regenerate button to
+  // rebuild the draft against the latest observations.
+  const targetIdsKey = targets.map((target) => target.icao24).join(",");
   const targetCountKey = targets.map((target) => `${target.icao24}:${reportCounts[target.icao24] ?? 0}`).join(",");
 
   useEffect(() => {
@@ -1305,7 +1552,7 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
         .then((results: ComplaintResponse[]) => {
           if (cancelled) return;
           setComplaint({ text: results[0]?.text ?? "", source: results[0]?.source ?? "unknown" });
-          setDetailStatus(`Description source: ${results[0]?.source ?? "unknown"}`);
+          setDetailStatus("Generated description");
         })
         .catch((error) => {
           if (cancelled) return;
@@ -1314,14 +1561,14 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
             text: localSingleComplaint(target, scanParams, messagePrefs, reportCounts[target.icao24] ?? 0),
             source: "local fallback"
           });
-          setDetailStatus(error instanceof Error ? error.message : "Description failed; generated a local draft instead.");
+          setDetailStatus(complaintErrorLabel(error));
         });
     }, 300);
     return () => {
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [complaintMode, targetKey, targetCountKey, scanParams, sliders, messagePrefs, reportCounts]);
+  }, [complaintMode, targetIdsKey, targetCountKey, refreshNonce, scanParams, sliders, messagePrefs]);
 
   function updateSlider(name: keyof ToneSliders, value: number) {
     onPreferencesChange((current) => ({
@@ -1365,7 +1612,16 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
         window: scanParams.window,
         mode: complaintMode,
         text: complaint.text,
-        targets: targets.map((target) => ({ icao24: target.icao24, callsign: target.callsign }))
+        targets: targets.map((target) => ({
+          icao24: target.icao24,
+          callsign: target.callsign,
+          circles: target.circles,
+          touch_and_gos: target.touch_and_gos,
+          low_approaches: target.low_approaches,
+          passes_over_user: target.passes,
+          origin_airport_icao: target.origin_airport_icao ?? null,
+          origin_label: target.origin_label ?? null,
+        }))
       }).catch(() => undefined);
     }
     setDetailStatus("Copied description");
@@ -1501,13 +1757,26 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
         <div className="complaint-output">
           <div className="complaint-output-header">
             <div className="section-title">Ready to submit complaint</div>
-            <CopyButton text={complaint?.text} />
+            <div className="complaint-output-actions">
+              <button
+                type="button"
+                className="complaint-icon-button"
+                onClick={() => setRefreshNonce((value) => value + 1)}
+                disabled={targets.length === 0}
+                title="Regenerate complaint from latest observations"
+                aria-label="Regenerate complaint"
+              >
+                <RotateCw size={15} aria-hidden="true" />
+              </button>
+              <CopyButton text={complaint?.text} />
+            </div>
           </div>
           <ComplaintSourceBanner source={complaint?.source} />
           <div className="output-status">{detailStatus}</div>
           <p>{complaint?.text ?? "Complaint text will appear here after an offender is selected."}</p>
         </div>
       </div>
+
     </section>
   );
 }
@@ -1665,7 +1934,7 @@ function ComplaintSourceBanner({ source }: { source?: string }) {
     return (
       <div className="complaint-source-banner ok" role="status">
         <CheckCircle2 size={14} aria-hidden="true" />
-        <span>AI-generated by Groq from your real observations.</span>
+        <span>AI-generated from your real observations.</span>
       </div>
     );
   }

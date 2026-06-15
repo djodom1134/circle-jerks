@@ -43,6 +43,8 @@ export interface Offender {
   origin_label?: string | null;
   origin_source?: string | null;
   report_count?: number;
+  /** Breakdown of T&Gs / low approaches by runway_id, e.g. {"11": 3, "29": 7}. */
+  runway_breakdown?: Record<string, number>;
 }
 
 export interface TrackSample {
@@ -132,6 +134,12 @@ export interface ComplaintResponse {
 export interface ActivityAircraft {
   icao24: string;
   callsign?: string | null;
+  circles?: number;
+  touch_and_gos?: number;
+  low_approaches?: number;
+  passes_over_user?: number;
+  origin_airport_icao?: string | null;
+  origin_label?: string | null;
 }
 
 export interface ActivityContext {
@@ -220,7 +228,7 @@ export interface AdminDashboardResponse {
   }>;
 }
 
-const REQUEST_TIMEOUT_MS = 25000;
+const REQUEST_TIMEOUT_MS = 60000;
 
 export class ApiError extends Error {
   status: number;
@@ -258,14 +266,18 @@ async function errorFromResponse(response: Response): Promise<ApiError> {
   return new ApiError(response.status, message || "Request failed");
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit) {
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit & { timeoutMs?: number },
+) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutMs = init?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ApiError(408, "Request timed out; generated a local draft instead.");
+      throw new ApiError(408, "Request timed out");
     }
     throw error;
   } finally {
@@ -273,25 +285,31 @@ async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit) {
   }
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetchWithTimeout(`${API_BASE}${path}`);
+async function getJson<T>(path: string, timeoutMs?: number): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE}${path}`, { timeoutMs });
   if (!response.ok) {
     throw await errorFromResponse(response);
   }
   return response.json() as Promise<T>;
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    timeoutMs,
   });
   if (!response.ok) {
     throw await errorFromResponse(response);
   }
   return response.json() as Promise<T>;
 }
+
+// Complaint generation has a tight timeout — if Groq doesn't answer fast,
+// the caller falls back to the deterministic browser-side draft instead of
+// leaving the user staring at a spinner.
+const COMPLAINT_TIMEOUT_MS = 5000;
 
 async function adminJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, {
@@ -337,6 +355,12 @@ export interface RepeatOffender {
   report_count: number;
   first_reported_at: number;
   last_reported_at: number;
+  total_circles: number;
+  total_touch_and_gos: number;
+  total_low_approaches: number;
+  total_passes_over_user: number;
+  origin_airport_icao?: string | null;
+  origin_label?: string | null;
 }
 
 export interface RepeatOffendersResponse {
@@ -345,7 +369,7 @@ export interface RepeatOffendersResponse {
   aircraft: RepeatOffender[];
 }
 
-export function getRepeatOffenders(limit = 12) {
+export function getRepeatOffenders(limit = 10) {
   return getJson<RepeatOffendersResponse>(`/repeat_offenders?limit=${limit}`);
 }
 
@@ -398,6 +422,133 @@ export function geocode(q: string) {
   }>(`/geocode?q=${encodeURIComponent(q)}`);
 }
 
+export function reverseGeocode(lat: number, lon: number) {
+  return getJson<{ display_name: string | null; short_name: string | null }>(
+    `/reverse_geocode?lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lon))}`
+  );
+}
+
+export interface WindSummary {
+  airport_icao: string;
+  hours: number;
+  current: {
+    observed_at_unix: number | null;
+    report_time: string | null;
+    wind_from_dir_degrees: number | null;
+    wind_speed_kt: number | null;
+    wind_gust_kt: number | null;
+    raw_metar: string | null;
+  } | null;
+  average: {
+    wind_from_dir_degrees: number | null;
+    wind_speed_kt: number | null;
+    wind_gust_max_kt: number | null;
+    sample_count: number;
+  } | null;
+  error: string | null;
+}
+
+export function getWindSummary(airportIcao: string, hours: number) {
+  return getJson<WindSummary>(
+    `/weather/wind?airport_icao=${encodeURIComponent(airportIcao)}&hours=${hours}`
+  );
+}
+
+export interface BackfillStatus {
+  running: boolean;
+  ever_started: boolean;
+  airport_icao: string;
+  started_at?: number;
+  elapsed_seconds?: number;
+  estimated_total_seconds?: number;
+  eta_seconds?: number;
+  completed_at?: number;
+  samples_written?: number;
+  mode?: "cold_start" | "adsblol_cold_start" | "normal" | null;
+  source?: "flightaware" | "adsblol" | null;
+  error?: boolean;
+}
+
+export function getBackfillStatus(airportIcao: string) {
+  return getJson<BackfillStatus>(
+    `/backfill_status?airport_icao=${encodeURIComponent(airportIcao)}`
+  );
+}
+
+export function getAirportSosaUrl(icao: string) {
+  return getJson<{ url: string; source: "curated" | "verified-heuristic" | "fallback" }>(
+    `/airports/${encodeURIComponent(icao)}/sosa_url`
+  );
+}
+
+export type OwnerType =
+  | "individual"
+  | "llc"
+  | "corporation"
+  | "government"
+  | "flight_school"
+  | "university"
+  | "club"
+  | "trust"
+  | "unknown";
+
+export interface AircraftProfile {
+  identity: {
+    nNumber: string | null;
+    icaoHex: string | null;
+    callsign: string | null;
+    identityConfidence: number;
+    identityNotes: string[];
+  };
+  aircraft: {
+    manufacturer: string | null;
+    model: string | null;
+    yearManufactured: number | null;
+    engineType: string | null;
+    typeAircraft: string | null;
+    category: string;
+  };
+  registration: {
+    status: string | null;
+    statusCode: string | null;
+    expirationDate: string | null;
+    certificateIssueDate: string | null;
+    isExpired: boolean;
+    isDeregistered: boolean;
+  };
+  registrant: {
+    name: string | null;
+    city: string | null;
+    state: string | null;
+    country: string | null;
+    ownerType: OwnerType;
+    ownerTypeConfidence: number;
+    ownerTypeReason: string | null;
+  };
+  airmen: {
+    lookupAvailable: boolean;
+    lookupUrl: string | null;
+    lookupLabel: string | null;
+    reason: string;
+    disclaimer: string;
+  };
+  disclaimers: string[];
+  sources: Array<{ name: string; updatedAt?: string | null; retrievedAt: string }>;
+  profileVersion: string;
+}
+
+export function getAircraftProfile(params: {
+  nNumber?: string | null;
+  icaoHex?: string | null;
+  callsign?: string | null;
+}) {
+  const qs = new URLSearchParams();
+  if (params.nNumber) qs.set("nNumber", params.nNumber);
+  if (params.icaoHex) qs.set("icaoHex", params.icaoHex);
+  if (params.callsign) qs.set("callsign", params.callsign);
+  return getJson<AircraftProfile>(`/aircraft/profile?${qs.toString()}`);
+}
+
 export function scan(params: ScanParams) {
   const query = new URLSearchParams({
     airport_icao: params.airport_icao,
@@ -441,7 +592,7 @@ export function aircraftDetail(
     include_db_at_home: String(message.include_db_at_home),
     previous_report_count: String(reportCount)
   });
-  return getJson<ComplaintResponse>(`/aircraft/${icao24}/detail?${query.toString()}`);
+  return getJson<ComplaintResponse>(`/aircraft/${icao24}/detail?${query.toString()}`, COMPLAINT_TIMEOUT_MS);
 }
 
 export function complaintSummary(
@@ -451,16 +602,20 @@ export function complaintSummary(
   message: MessagePreferences,
   reportCounts: Record<string, number>
 ) {
-  return postJson<ComplaintResponse & { icao24s: string[] }>("/complaint/summary", {
-    airport_icao: params.airport_icao,
-    user_lat: params.user_lat,
-    user_lon: params.user_lon,
-    window: params.window,
-    icao24s,
-    sliders,
-    message_preferences: message,
-    report_counts: reportCounts
-  });
+  return postJson<ComplaintResponse & { icao24s: string[] }>(
+    "/complaint/summary",
+    {
+      airport_icao: params.airport_icao,
+      user_lat: params.user_lat,
+      user_lon: params.user_lon,
+      window: params.window,
+      icao24s,
+      sliders,
+      message_preferences: message,
+      report_counts: reportCounts
+    },
+    COMPLAINT_TIMEOUT_MS,
+  );
 }
 
 export function recordHeartbeat(context: ActivityContext & { path?: string }) {

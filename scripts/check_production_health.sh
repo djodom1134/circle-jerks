@@ -50,14 +50,16 @@ fi
 
 curl_health() {
   local url="$1"
-  curl -fsS --max-time 20 "$url" >/dev/null
+  # Retry 2x with a 3s delay before declaring failure — a single queued
+  # request behind a slow scan should not light up an alarm.
+  curl -fsS --max-time 8 --retry 2 --retry-delay 3 --retry-all-errors "$url" >/dev/null
 }
 
 curl_health_resolved() {
   local host="$1"
   local ip="$2"
   local path="$3"
-  curl -fsS --max-time 20 --resolve "$host:443:$ip" "https://$host$path" >/dev/null
+  curl -fsS --max-time 8 --retry 2 --retry-delay 3 --retry-all-errors --resolve "$host:443:$ip" "https://$host$path" >/dev/null
 }
 
 public_dns_ips() {

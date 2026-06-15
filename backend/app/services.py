@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections import Counter
+import asyncio
+import logging
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import db
+from . import adsbdb, archive, db
 from .db import Airport
 from .detectors import closest_over_user_rows, detect_events, detect_events_over_period, event_counts, pass_geometry_key
 from .domain import ScanParams, hour_label, local_time_label, location_hash, monitor_hash
@@ -37,6 +40,11 @@ ORIGIN_LOOKBACK_SECONDS = 12 * 3600
 ORIGIN_LOOKAHEAD_SECONDS = 2 * 3600
 ORIGIN_STRONG_CACHE_SECONDS = 24 * 3600
 ORIGIN_WEAK_CACHE_SECONDS = 10 * 60
+# Only do the expensive origin lookup (FA + OpenSky chain, up to 5 sequential
+# HTTP calls) for the top-N offenders the UI actually displays. Lower-ranked
+# offenders still get cheap local enrichment (report_count, altitude-over-user)
+# so per-aircraft stats stay accurate.
+ORIGIN_ENRICH_LIMIT = 12
 ORIGIN_CITY_CACHE_SECONDS = 7 * 24 * 3600
 ELEVATION_CACHE_SECONDS = 7 * 24 * 3600
 LIVE_DETECTOR_LOOKBACK_SECONDS = 45 * 60
@@ -66,7 +74,190 @@ def monitor_for_params(params: ScanParams, airport: Airport) -> dict:
 async def register_monitor(store: Store, settings: Settings, params: ScanParams, airport: Airport) -> str:
     monitor = monitor_for_params(params, airport)
     await store.register_monitor(monitor["hash"], monitor, settings.monitor_ttl_seconds)
+    # Kick off an on-demand FlightAware backfill the first time we see an
+    # airport (or any time the recency-gate has expired). New locations
+    # otherwise have *no* history until live polling has accumulated for
+    # hours, because the scheduled gap-filler runs only every 15 min and
+    # processes airports in alphabetical order.
+    asyncio.create_task(_maybe_trigger_on_demand_fa_backfill(store, settings, airport.icao))
     return monitor["hash"]
+
+
+# Don't spam FlightAware: at most one on-demand backfill per airport per day.
+# AeroAPI is per-call billed and we have a finite daily quota; cheap repeat
+# attempts would burn the budget for free.
+_FA_ON_DEMAND_GATE_SECONDS = 24 * 3600
+# Bbox half-width (degrees) used to count archive samples near an airport when
+# deciding whether it's "cold". ~0.2° ≈ 12nm — comfortably wraps the typical
+# pattern + approach corridors we care about.
+_ARCHIVE_COUNT_BBOX_DEG = 0.2
+# Coarse client-facing ETA for an on-demand FA backfill. Worst case is
+# ~30 per-flight calls plus 2 airport-flights calls at ~0.5–2s each, so 60s
+# is a safe ceiling that won't surprise users with a longer-than-promised wait.
+_FA_BACKFILL_ESTIMATED_SECONDS = 60
+# Keep the status record around after completion long enough that the next
+# poll cycle (≤5s) sees the "done" state and the frontend banner disappears
+# cleanly, but not so long that stale completions linger across sessions.
+_FA_BACKFILL_STATUS_TTL_SECONDS = 600
+
+
+def _count_airport_archive_samples(
+    settings: Settings,
+    airport_icao: str,
+    horizon_seconds: int = archive.DEFAULT_ARCHIVE_HORIZON_SECONDS,
+) -> int:
+    """Return the rough number of archived track samples near this airport.
+    Synchronous (SQLite); call via asyncio.to_thread from async code."""
+    now = int(time.time())
+    with db.db_session(settings.database_path) as conn:
+        airport = db.get_airport(conn, airport_icao)
+        if not airport:
+            return 0
+        row = conn.execute(
+            "SELECT COUNT(*) AS ct FROM track_archive "
+            "WHERE timestamp > ? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+            (
+                now - horizon_seconds,
+                airport.lat - _ARCHIVE_COUNT_BBOX_DEG,
+                airport.lat + _ARCHIVE_COUNT_BBOX_DEG,
+                airport.lon - _ARCHIVE_COUNT_BBOX_DEG,
+                airport.lon + _ARCHIVE_COUNT_BBOX_DEG,
+            ),
+        ).fetchone()
+        return int(row["ct"]) if row else 0
+
+
+async def _maybe_trigger_on_demand_fa_backfill(
+    store: Store,
+    settings: Settings,
+    airport_icao: str,
+) -> None:
+    """Fire-and-forget: if we haven't backfilled this airport recently,
+    enumerate the last 24h of activity now so the user sees history within
+    a minute of selecting a new location.
+
+    Sources (in priority order, falling through automatically):
+      1. FlightAware AeroAPI — used when enabled AND the key is valid.
+      2. FlightAware AeroAPI cold-start — fires once per 24h per airport,
+         even if FA is otherwise disabled, when the archive is genuinely
+         empty. Bounded by a global rolling-24h budget so a wave of new
+         airports can't blow the spend ceiling. Skipped if the FA key
+         has auth-failed.
+      3. adsb.lol per-aircraft trace backfill — free, ODbL, used whenever
+         FA is unavailable (disabled, no key, or auth-failed). No spend
+         budget; concurrency is capped politely inside the module.
+    """
+    log = logging.getLogger(__name__)
+    icao_upper = airport_icao.upper()
+    gate_key = f"fa_on_demand_backfill:{icao_upper}"
+    status_key = f"fa_backfill_status:{icao_upper}"
+
+    try:
+        # Per-airport cooldown applies to every source — we don't want
+        # repeat visits to spam adsb.lol either.
+        if await store.get_cache(gate_key):
+            return
+
+        # Skip if the archive already has plenty of recent samples here.
+        sample_count = await asyncio.to_thread(
+            _count_airport_archive_samples, settings, icao_upper
+        )
+        if sample_count >= settings.flightaware_cold_start_min_samples:
+            return
+
+        fa_rate_limited = bool(await store.get_cache("flightaware_rate_limited"))
+        fa_auth_failed = bool(await store.get_cache("flightaware_auth_failed"))
+        fa_usable = (
+            settings.flightaware_enabled
+            and bool(settings.flightaware_api_key)
+            and not fa_rate_limited
+            and not fa_auth_failed
+        )
+
+        # Source preference: FA when enabled+healthy, else adsb.lol (free).
+        # The old "FA cold-start with budget" path is gone — when FA is off
+        # for cost reasons, adsb.lol covers it without spending. If FA is on
+        # but auth-failed (e.g., expired key), we silently fall through to
+        # adsb.lol so users still get history.
+        source: str | None = None
+        if fa_usable:
+            source = "flightaware"
+        elif settings.adsblol_historical_enabled:
+            source = "adsblol"
+            if settings.flightaware_enabled and not fa_usable:
+                # FA was meant to be on but isn't reachable — log it once per
+                # cooldown so the operator notices.
+                if fa_auth_failed:
+                    log.info("FA auth_failed; routing %s cold-start to adsb.lol", icao_upper)
+                elif fa_rate_limited:
+                    log.info("FA rate_limited; routing %s cold-start to adsb.lol", icao_upper)
+
+        if source is None:
+            return
+
+        await store.set_cache(gate_key, True, _FA_ON_DEMAND_GATE_SECONDS)
+
+        # Publish a status record the frontend can poll to show an ETA banner.
+        # FA worst case ≈ 60s; adsb.lol cold-start usually 30–45s with 5x
+        # concurrency.  60s is a safe upper bound for either.
+        started_at = int(time.time())
+        mode = "adsblol_cold_start" if source == "adsblol" else "normal"
+        await store.set_cache(
+            status_key,
+            {
+                "running": True,
+                "started_at": started_at,
+                "estimated_total_seconds": _FA_BACKFILL_ESTIMATED_SECONDS,
+                "mode": mode,
+                "source": source,
+            },
+            _FA_BACKFILL_STATUS_TTL_SECONDS,
+        )
+
+        if source == "flightaware":
+            result = await archive.gap_fill_via_flightaware_once(
+                store, settings, only_airport=icao_upper
+            )
+            samples_written = int(result.get("written", 0)) if isinstance(result, dict) else 0
+        else:
+            from . import adsblol_historical
+
+            result = await adsblol_historical.cold_start_backfill(
+                store, settings, airport_icao=icao_upper
+            )
+            samples_written = int(result.get("samples_written", 0)) if isinstance(result, dict) else 0
+
+        log.info(
+            "on-demand backfill %s source=%s mode=%s: %s",
+            icao_upper, source, mode, result,
+        )
+        await store.set_cache(
+            status_key,
+            {
+                "running": False,
+                "started_at": started_at,
+                "completed_at": int(time.time()),
+                "samples_written": samples_written,
+                "mode": mode,
+                "source": source,
+            },
+            _FA_BACKFILL_STATUS_TTL_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 — never let backfill errors leak into scan
+        log.exception("on-demand backfill failed for %s", icao_upper)
+        try:
+            await store.set_cache(
+                status_key,
+                {
+                    "running": False,
+                    "started_at": int(time.time()),
+                    "completed_at": int(time.time()),
+                    "error": True,
+                },
+                _FA_BACKFILL_STATUS_TTL_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def fetch_user_elevation_ft(store: Store, settings: Settings, lat: float, lon: float) -> int | None:
@@ -135,16 +326,32 @@ async def run_detectors_for_monitor(
     written = 0
     now = int(datetime.now(timezone.utc).timestamp())
     detector_end = end_ts or now
-    max_lookback = max(
-        LIVE_DETECTOR_LOOKBACK_SECONDS,
-        settings.opensky_historical_limit_seconds if settings.opensky_historical_enabled else 0,
+    # Tracks are tiered: Redis holds `track_ttl_seconds` of hot data; SQLite
+    # holds up to `archive.DEFAULT_ARCHIVE_HORIZON_SECONDS` of cold data. The
+    # detector should look back over the union so wider scan windows ("today",
+    # multi-hour) still detect events.
+    cold_horizon = archive.DEFAULT_ARCHIVE_HORIZON_SECONDS
+    if start_ts is not None:
+        detector_start = max(start_ts, detector_end - cold_horizon)
+    else:
+        max_lookback = max(
+            LIVE_DETECTOR_LOOKBACK_SECONDS,
+            settings.opensky_historical_limit_seconds if settings.opensky_historical_enabled else 0,
+        )
+        detector_start = detector_end - max_lookback
+    hot_icao24s = await store.list_aircraft()
+    if _window_extends_into_cold_tier(detector_start - 20 * 60, settings):
+        cold_icao24s = db.list_archive_aircraft(conn, detector_start - 20 * 60, detector_end)
+        icao24s = sorted(set(hot_icao24s) | set(cold_icao24s))
+    else:
+        icao24s = hot_icao24s
+    tracks = await bulk_get_tracks_unified(
+        store, conn, settings, icao24s,
+        detector_start - 20 * 60, detector_end,
     )
-    detector_start = max(
-        start_ts if start_ts is not None else detector_end - LIVE_DETECTOR_LOOKBACK_SECONDS,
-        detector_end - max_lookback,
-    )
-    icao24s = await store.list_aircraft()
-    tracks = await store.bulk_get_tracks(icao24s, detector_start - 20 * 60, detector_end)
+    # Fetch existing event IDs ONCE (not per-event) — event_exists re-scanned
+    # the whole events set on every call, which was O(events²) per scan.
+    existing_ids = await store.existing_event_ids(monitor["hash"])
     for icao24, track in zip(icao24s, tracks):
         if not track_intersects_bbox(track, tuple(monitor["bbox"])):
             continue
@@ -154,8 +361,9 @@ async def run_detectors_for_monitor(
             else detect_events(track, airport, runways, params)
         )
         for event in events:
-            if not await store.event_exists(monitor["hash"], event["id"]):
+            if event["id"] not in existing_ids:
                 await store.add_event(monitor["hash"], event, settings.event_ttl_seconds)
+                existing_ids.add(event["id"])
                 written += 1
     return written
 
@@ -385,21 +593,97 @@ async def backfill_historical_states(
     return result
 
 
+def _scan_cache_key(settings: Settings, params: ScanParams) -> str:
+    bucket = max(settings.scan_response_cache_bucket_deg, 0.0001)
+    lat_b = round(params.user_lat / bucket) * bucket
+    lon_b = round(params.user_lon / bucket) * bucket
+    return (
+        f"scan_response:{params.airport_icao.upper()}:"
+        f"{lat_b:.4f}:{lon_b:.4f}:{params.window}:"
+        f"{params.ring_nm}:{params.pass_radius_nm}:{params.pass_ceiling_ft}"
+    )
+
+
+# In-process singleflight: collapse concurrent identical scans within a worker
+# into one computation. The frontend polls /scan every 5s but a cold scan can
+# take many seconds; without this, polls stack up and saturate all workers,
+# making every scan slow (the "stuck on loading" cascade). Keyed by scan cache
+# key → the in-flight asyncio.Task computing it.
+_scan_inflight: dict[str, "asyncio.Task[dict]"] = {}
+
+
 async def build_scan_response(
     store: Store,
     settings: Settings,
     conn,
     params: ScanParams,
 ) -> dict:
+    cache_key = _scan_cache_key(settings, params)
+    if settings.scan_response_cache_seconds > 0:
+        cached = await store.get_cache(cache_key)
+        if isinstance(cached, dict):
+            cached.setdefault("cache_meta", {})["cached"] = True
+            return cached
+
+        # Singleflight: if another request is already computing this exact key,
+        # await its result instead of kicking off a duplicate computation.
+        inflight = _scan_inflight.get(cache_key)
+        if inflight is not None and not inflight.done():
+            return await asyncio.shield(inflight)
+
+        async def _compute_and_cache() -> dict:
+            # Use a dedicated DB connection, NOT the caller's `conn`: the
+            # originating request may be cancelled (client disconnect) and
+            # close its connection while this shielded task is still running.
+            try:
+                with db.db_session(settings.database_path) as own_conn:
+                    resp = await _compute_scan_response(store, settings, own_conn, params)
+                await store.set_cache(cache_key, resp, settings.scan_response_cache_seconds)
+                return resp
+            finally:
+                _scan_inflight.pop(cache_key, None)
+
+        task = asyncio.ensure_future(_compute_and_cache())
+        _scan_inflight[cache_key] = task
+        return await asyncio.shield(task)
+
+    response = await _compute_scan_response(store, settings, conn, params)
+    return response
+
+
+async def _compute_scan_response(
+    store: Store,
+    settings: Settings,
+    conn,
+    params: ScanParams,
+) -> dict:
+    # Per-stage timing so production logs show where slow scans spend their
+    # time. With 3 uvicorn workers and CPU-bound detectors this matters a lot.
+    import logging
+    log = logging.getLogger(__name__)
+    t0 = time.monotonic()
+
+    def lap(stage: str, t_prev: float) -> float:
+        now = time.monotonic()
+        log.info(
+            "scan stage=%s airport=%s window=%s ms=%d",
+            stage, params.airport_icao, params.window, int((now - t_prev) * 1000),
+        )
+        return now
+
     p = await params_with_user_elevation(store, settings, params)
+    t = lap("params", t0)
     window = resolve_window(p.window, settings.timezone)
     airport = db.get_airport(conn, p.airport_icao)
     if not airport:
         raise KeyError(f"unknown airport {p.airport_icao}")
     key = await register_monitor(store, settings, p, airport)
     monitor = monitor_for_params(p, airport)
+    t = lap("monitor_registered", t)
     backfill = await backfill_historical_states(store, settings, monitor, window)
+    t = lap("backfill", t)
     await run_detectors_for_monitor(store, settings, conn, monitor, window.start_ts, window.end_ts)
+    t = lap("detectors", t)
     events = events_for_current_scan(await store.get_events(key, window.start_ts, window.end_ts), p)
     counts = event_counts(events)
     offenders = await enrich_offenders(
@@ -411,10 +695,23 @@ async def build_scan_response(
         offender_rows(events, window, settings.timezone),
         window,
     )
-    offender_tracks = await tracks_for_response(store, offenders, window)
-    recent_tracks = await recent_tracks_for_response(store, window, tuple(monitor["bbox"]))
+    t = lap(f"enrich_offenders n={len(offenders)}", t)
+    offender_tracks = await tracks_for_response(
+        store, offenders, window, conn=conn, settings=settings,
+    )
+    recent_tracks = await recent_tracks_for_response(
+        store, window, tuple(monitor["bbox"]), conn=conn, settings=settings,
+    )
     tracks = merge_track_rows(offender_tracks, recent_tracks)
+    t = lap(f"tracks_for_response tracks={len(tracks)}", t)
+    _record_observed_identities(conn, tracks, window.end_ts)
     active_now = await active_aircraft_count(store, airport, p)
+    log.info(
+        "scan TOTAL airport=%s window=%s ms=%d offenders=%d tracks=%d events=%d",
+        params.airport_icao, params.window,
+        int((time.monotonic() - t0) * 1000),
+        len(offenders), len(tracks), len(events),
+    )
     return {
         "monitor_hash": key,
         "window": window.model_dump(),
@@ -448,10 +745,77 @@ def events_for_current_scan(events: list[dict], params: ScanParams) -> list[dict
     ]
 
 
-async def tracks_for_response(store: Store, offenders: list[dict], window: WindowRange) -> list[dict]:
+# --- Two-tier track reads (Redis hot + SQLite archive) ----------------------
+
+def _window_extends_into_cold_tier(start_ts: int, settings: Settings) -> bool:
+    """True if the requested window reaches back further than the Redis TTL."""
+    return start_ts < int(time.time()) - settings.track_ttl_seconds
+
+
+async def bulk_get_tracks_unified(
+    store: Store,
+    conn,
+    settings: Settings,
+    icao24s: list[str],
+    start_ts: int,
+    end_ts: int,
+) -> list[list[dict]]:
+    """Get track samples from Redis, falling through to the SQLite archive
+    when the window extends beyond hot retention.
+
+    Returns one list per icao24, in the same order as the input.
+    """
+    if not icao24s:
+        return []
+    hot_groups = await store.bulk_get_tracks(icao24s, start_ts, end_ts)
+    if not _window_extends_into_cold_tier(start_ts, settings):
+        return hot_groups
+    archive_by_icao = db.bulk_read_track_archive(conn, icao24s, start_ts, end_ts)
+    merged: list[list[dict]] = []
+    for icao24, hot in zip(icao24s, hot_groups):
+        cold = archive_by_icao.get(icao24.lower(), [])
+        if not cold:
+            merged.append(hot)
+            continue
+        merged.append(archive.merge_hot_and_cold_samples(hot, cold))
+    return merged
+
+
+async def get_track_unified(
+    store: Store,
+    conn,
+    settings: Settings,
+    icao24: str,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    hot = await store.get_track(icao24, start_ts, end_ts)
+    if not _window_extends_into_cold_tier(start_ts, settings):
+        return hot
+    cold = db.read_track_archive(conn, icao24, start_ts, end_ts)
+    if not cold:
+        return hot
+    return archive.merge_hot_and_cold_samples(hot, cold)
+
+
+async def tracks_for_response(
+    store: Store,
+    offenders: list[dict],
+    window: WindowRange,
+    *,
+    conn=None,
+    settings: Settings | None = None,
+) -> list[dict]:
     top_offenders = offenders[:30]
     icao24s = [o["icao24"] for o in top_offenders]
-    track_groups = await store.bulk_get_tracks(icao24s, window.start_ts - 1800, window.end_ts + 1800)
+    start_ts = window.start_ts - 1800
+    end_ts = window.end_ts + 1800
+    if conn is not None and settings is not None:
+        track_groups = await bulk_get_tracks_unified(
+            store, conn, settings, icao24s, start_ts, end_ts,
+        )
+    else:
+        track_groups = await store.bulk_get_tracks(icao24s, start_ts, end_ts)
     rows = []
     for offender, full_track in zip(top_offenders, track_groups):
         if not full_track:
@@ -476,6 +840,33 @@ async def tracks_for_response(store: Store, offenders: list[dict], window: Windo
     return rows
 
 
+def _record_observed_identities(conn, tracks: list[dict], end_ts: int) -> None:
+    """Persist (icao_hex, callsign, normalized_n_number) sightings from a scan.
+
+    Best-effort: failures are swallowed so they can never block scan responses.
+    """
+    try:
+        from .registry import normalize as registry_norm
+
+        for track in tracks:
+            icao_hex = registry_norm.normalize_icao_hex(track.get("icao24"))
+            if not icao_hex:
+                continue
+            callsign = (track.get("callsign") or "").strip().upper() or None
+            n_number = registry_norm.extract_n_number_from_callsign(callsign)
+            confidence = 0.95 if n_number else (0.4 if callsign else 0.1)
+            db.upsert_observed_identity(
+                conn,
+                icao_hex=icao_hex,
+                callsign=callsign,
+                normalized_n_number=n_number,
+                timestamp=int(end_ts),
+                confidence=confidence,
+            )
+    except Exception:  # noqa: BLE001 — never let observation tracking break scan
+        pass
+
+
 def merge_track_rows(primary: list[dict], secondary: list[dict], limit: int = 40) -> list[dict]:
     rows = []
     seen = set()
@@ -496,7 +887,17 @@ async def recent_tracks_for_response(
     window: WindowRange,
     bbox: tuple[float, float, float, float] | None = None,
     limit: int = 40,
+    *,
+    conn=None,
+    settings: Settings | None = None,
 ) -> list[dict]:
+    # Recent/contextual tracks are the gray background paths of *all* aircraft
+    # in the window. We deliberately read ONLY the hot tier (Redis) here, even
+    # for wide windows: pulling every aircraft's full 24h history out of the
+    # SQLite archive scanned hundreds of thousands of rows and hung the scan
+    # for 40+ seconds. The offenders' full archived paths are still served by
+    # tracks_for_response (bounded to ≤30 aircraft), so the worst offenders
+    # keep their complete history; the background context is just last-4h.
     icao24s = await store.list_aircraft()
     track_groups = await store.bulk_get_tracks(icao24s, window.start_ts, window.end_ts)
     rows = []
@@ -542,20 +943,95 @@ async def enrich_offenders(
     offenders: list[dict],
     window: WindowRange,
 ) -> list[dict]:
-    enriched = []
-    for offender in offenders:
-        track = await store.get_track(offender["icao24"], window.start_ts - 1800, window.end_ts + 1800)
-        report_row = conn.execute(
-            "SELECT report_count FROM aircraft_report_counts WHERE icao24 = ?",
-            (offender["icao24"],),
-        ).fetchone()
-        enriched.append({
-            **offender,
-            "report_count": int(report_row["report_count"]) if report_row else 0,
-            **altitude_over_user_summary(track, airport, params, window),
-            **await resolve_origin(store, settings, conn, offender["icao24"], track),
-        })
-    return enriched
+    """Scan-path enrichment: report_count + altitude-over-user + (cached) origin.
+
+    Performance lessons paid for in production wedges:
+
+    1. The async event loop is blocked by synchronous `conn.execute()` calls.
+       8 "parallel" coroutines each doing `conn.execute()` serialize on the
+       sqlite3 connection AND block the loop, so `asyncio.wait_for` timeouts
+       never fire. So: batch every SQLite read into a SINGLE upfront query,
+       BEFORE the gather.
+    2. `resolve_origin` can fan out to ~5 sequential FA / OpenSky calls per
+       offender. On the scan hot path we only consult the local cache + local
+       DB — never the remote APIs. Cold lookups for new aircraft just return
+       "unknown" until the worker / background tasks populate the origin
+       cache. UX impact: rare and self-healing; latency impact: night and day.
+    """
+    icao24s = [o["icao24"] for o in offenders]
+
+    # --- ONE upfront SQLite query for all report_counts (no per-row conn.execute) ---
+    report_counts: dict[str, int] = {}
+    if icao24s:
+        placeholders = ",".join("?" * len(icao24s))
+        rows = conn.execute(
+            f"SELECT icao24, report_count FROM aircraft_report_counts WHERE icao24 IN ({placeholders})",
+            icao24s,
+        ).fetchall()
+        report_counts = {r["icao24"]: int(r["report_count"]) for r in rows}
+
+    sem = asyncio.Semaphore(8)
+
+    async def enrich_one(offender: dict, with_origin: bool) -> dict:
+        async with sem:
+            try:
+                track = await store.get_track(
+                    offender["icao24"], window.start_ts - 1800, window.end_ts + 1800
+                )
+            except Exception:  # noqa: BLE001
+                track = []
+            origin: dict = {}
+            if with_origin:
+                try:
+                    origin = await _resolve_origin_local_only(
+                        store, conn, offender["icao24"], track
+                    )
+                except Exception:  # noqa: BLE001
+                    origin = {}
+            return {
+                **offender,
+                "report_count": report_counts.get(offender["icao24"], 0),
+                **altitude_over_user_summary(track, airport, params, window),
+                **origin,
+            }
+
+    return list(
+        await asyncio.gather(
+            *(
+                enrich_one(o, with_origin=(i < ORIGIN_ENRICH_LIMIT))
+                for i, o in enumerate(offenders)
+            )
+        )
+    )
+
+
+async def _resolve_origin_local_only(
+    store: Store,
+    conn,
+    icao24: str,
+    track: list[dict],
+) -> dict:
+    """Cache + local-DB origin lookup — no FlightAware, no OpenSky.
+
+    Used by the scan hot path; the full chain (resolve_origin) is still
+    available for background / out-of-band enrichment. The "unknown" return
+    is acceptable because (a) repeat aircraft hit the cache and (b) the
+    origin cache is populated by the worker / scheduled tasks over time.
+    """
+    samples = valid_position_samples(track)
+    if not samples:
+        return unknown_origin()
+    first_seen = int(samples[0]["timestamp"])
+    last_seen = int(samples[-1]["timestamp"])
+    cache_key = f"origin:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
+    cached = await store.get_cache(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    local = origin_from_ground_track(conn, track)
+    if local:
+        await store.set_cache(cache_key, local, origin_cache_ttl(local))
+        return local
+    return unknown_origin()
 
 
 def altitude_over_user_summary(
@@ -757,7 +1233,13 @@ def origin_from_point(
 
 
 def origin_from_ground_track(conn, track: list[dict]) -> dict | None:
-    for sample in valid_position_samples(track):
+    # Only the earliest samples are plausible "origin" candidates — once the
+    # aircraft is airborne and en route, later samples aren't where it took
+    # off from. Capping the loop here matters because each iteration calls
+    # nearest_airport, which scans the airports table. With 16k US airports
+    # in the table, iterating hundreds of samples per offender × 12 offenders
+    # was burning all the CPU and starving every request behind it.
+    for sample in valid_position_samples(track)[:8]:
         origin = origin_from_point(
             conn,
             sample["lat"],
@@ -951,15 +1433,31 @@ async def resolve_origin(
         await store.set_cache(cache_key, local_origin, origin_cache_ttl(local_origin))
         return local_origin
 
-    if settings.flightaware_api_key and not await store.get_cache("flightaware_auth_failed"):
-        callsign = next(
-            (sample.get("callsign") for sample in reversed(samples) if sample.get("callsign")),
-            None,
-        )
-        if FlightAwareClient.looks_like_airline_ident(callsign):
+    # Free callsign → origin via adsbdb.com (no key, no per-call cost).
+    # Covers airline scheduled routes; GA aircraft fall through to OpenSky.
+    callsign_for_lookup = next(
+        (sample.get("callsign") for sample in reversed(samples) if sample.get("callsign")),
+        None,
+    )
+    if callsign_for_lookup and adsbdb.looks_like_airline_callsign(callsign_for_lookup):
+        adsbdb_origin = await adsbdb.origin_for_callsign(store, settings, callsign_for_lookup)
+        if adsbdb_origin:
+            await store.set_cache(cache_key, adsbdb_origin, origin_cache_ttl(adsbdb_origin))
+            return adsbdb_origin
+
+    # FlightAware AeroAPI — kept as opt-in fallback (per-call billing). Disabled
+    # by default in production via FLIGHTAWARE_ENABLED=false; flip back on if
+    # you want to pay for the extra coverage adsbdb doesn't have.
+    if (
+        settings.flightaware_enabled
+        and settings.flightaware_api_key
+        and not await store.get_cache("flightaware_auth_failed")
+        and not await store.get_cache("flightaware_rate_limited")
+    ):
+        if callsign_for_lookup and FlightAwareClient.looks_like_airline_ident(callsign_for_lookup):
             fa = FlightAwareClient(settings)
             try:
-                fa_origin = await fa.origin_for_callsign(callsign, first_seen, last_seen)
+                fa_origin = await fa.origin_for_callsign(callsign_for_lookup, first_seen, last_seen)
                 if fa.auth_failed:
                     await store.set_cache("flightaware_auth_failed", True, 600)
                 elif fa.rate_limited:

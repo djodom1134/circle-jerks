@@ -12,8 +12,10 @@ export interface MessagePreferences {
 
 export interface StoredPreferences {
   airport_icao?: string;
+  airport_query?: string;
   user_lat?: number;
   user_lon?: number;
+  user_address?: string;
   window?: WindowCode;
   complaint_mode: ComplaintMode;
   message: MessagePreferences;

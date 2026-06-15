@@ -96,6 +96,11 @@ async def run_forever() -> None:
     db.init_db(settings.database_path)
     store = make_store(settings.redis_url)
     live_sources = LiveStateClient(settings)
+    # Background archiver: copy aging Redis track samples to the SQLite cold
+    # tier so the "today" / 24h scan window survives Redis TTL expiry.
+    from . import archive as track_archive
+
+    archive_task = asyncio.create_task(track_archive.archive_loop(store, settings))
     try:
         while True:
             try:
@@ -143,6 +148,11 @@ async def run_forever() -> None:
                 logger.exception("worker tick failed")
                 await asyncio.sleep(max(10, settings.live_poll_interval_seconds))
     finally:
+        archive_task.cancel()
+        try:
+            await archive_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await live_sources.close()
         await store.close()
 

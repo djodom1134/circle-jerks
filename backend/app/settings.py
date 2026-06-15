@@ -35,7 +35,10 @@ class Settings(BaseSettings):
     opensky_anonymous_poll_interval_seconds: int = 30
     opensky_timeout_seconds: float = 12.0
     opensky_historical_enabled: bool = False
-    opensky_historical_limit_seconds: int = 3600
+    # Backfill reaches back as far as we retain tracks locally. Aligning these
+    # means a fresh Redis (after FLUSH or watchdog trim) can re-hydrate the full
+    # retention window from OpenSky historical state vectors on demand.
+    opensky_historical_limit_seconds: int = 14_400  # 4h, matches track_ttl_seconds
     opensky_historical_step_seconds: int = 30
     opensky_historical_snapshots_per_scan: int = 4
     opensky_historical_backfill_interval_seconds: int = 60
@@ -61,9 +64,56 @@ class Settings(BaseSettings):
 
     default_airport_icao: str = "KBJC"
     monitor_ttl_seconds: int = 900
-    track_ttl_seconds: int = 86_400
-    event_ttl_seconds: int = 86_400
+    # Sized to the managed Valkey memory budget (418MB) — at ~470MB for 24h of
+    # tracks across active airports, the noeviction policy refused new writes
+    # and wedged scan/SQLite. 4h retention keeps total well under the cap; the
+    # "today" window is still served by triggering a historical backfill on
+    # demand from OpenSky when track samples have aged out.
+    track_ttl_seconds: int = 14_400
+    event_ttl_seconds: int = 14_400
     description_ttl_seconds: int = 600
+    # Master switch for FlightAware AeroAPI. Set FLIGHTAWARE_ENABLED=false in
+    # .env to stop spending — origin lookups fall through to adsbdb.com (free)
+    # and OpenSky, and the FA-based historical backfill is skipped entirely.
+    # validation_alias bypasses the CIRCLEJERK_ prefix so users see the plain
+    # name in .env that matches the existing FLIGHTAWARE=... pattern.
+    flightaware_enabled: bool = Field(default=True, validation_alias="FLIGHTAWARE_ENABLED")
+    # Cold-start escape hatch: even with flightaware_enabled=false, fire ONE FA
+    # backfill the first time a user lands on an airport whose archive is empty.
+    # Without this, brand-new locations have no history until live polling has
+    # been running for hours (Longmont works only because we've polled it for
+    # weeks). After the cold-start fires, the per-airport 24h cooldown plus the
+    # daily budget below keep the spend bounded.
+    flightaware_cold_start_enabled: bool = Field(default=True, validation_alias="FLIGHTAWARE_COLD_START_ENABLED")
+    # An airport counts as "cold" when its archive has fewer than this many
+    # samples in the recent retention window. ~500 ≈ a few minutes of live data
+    # at a busy field; well below this means a true cold start.
+    flightaware_cold_start_min_samples: int = Field(default=500, validation_alias="FLIGHTAWARE_COLD_START_MIN_SAMPLES")
+    # Hard cap on cold-start FA spends per rolling 24h across all airports —
+    # circuit breaker against a scraper or unexpected traffic spike enumerating
+    # the whole airport table. At ~$0.10–0.50 per cold-start this caps daily
+    # spend at a few dollars.
+    flightaware_cold_start_daily_budget: int = Field(default=5, validation_alias="FLIGHTAWARE_COLD_START_DAILY_BUDGET")
+    # Free fallback for cold-start backfill: when FlightAware is disabled or
+    # auth_failed, fetch each visible aircraft's recent trace from adsb.lol
+    # and filter to the airport bbox. No budget gate — adsb.lol is ODbL and
+    # we cap concurrency to be polite.
+    adsblol_historical_enabled: bool = Field(default=True, validation_alias="ADSBLOL_HISTORICAL_ENABLED")
+    # /scan response cache. Disabled by default — the managed Valkey instance
+    # is noeviction, and full scan responses (~100KB each) exhausted maxmemory
+    # in production, cascading into SQLite lock contention. Re-enable cautiously
+    # and pair with `allkeys-lru` if that's ever flipped on the cluster.
+    # Short TTL — the frontend polls /scan every 5s; a cold scan can take many
+    # seconds, so without caching, polls stack up and saturate the workers
+    # ("stuck on loading" cascade). 15s means ~2 of every 3 polls hit cache.
+    # Footprint is tiny (a handful of location buckets * one entry each), well
+    # within Valkey headroom now that track TTL is bounded + the watchdog trims.
+    scan_response_cache_seconds: int = 15
+    # Lat/lon bucket size (degrees) used to group users for cache sharing.
+    # ~0.003° ≈ 330 m at 40° latitude — tight enough that "altitude over user"
+    # / "passes over user" don't drift meaningfully between users in the
+    # bucket, loose enough that neighbors share cache.
+    scan_response_cache_bucket_deg: float = 0.003
 
     admin_username: str = "admin"
     admin_password: str | None = Field(default=None, exclude=True)
@@ -75,7 +125,7 @@ class Settings(BaseSettings):
     bmc_api_base_url: str = "https://developers.buymeacoffee.com/api/v1"
     bmc_cache_seconds: int = 300
     repeat_offender_min_reports: int = 2
-    repeat_offender_limit: int = 12
+    repeat_offender_limit: int = 10
 
     max_aircraft_per_scan: int = 500
     request_timeout_seconds: float = 10.0

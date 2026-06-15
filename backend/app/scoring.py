@@ -43,6 +43,17 @@ def offender_rows(events: list[dict], window: WindowRange, tz_name: str) -> list
     rows = []
     for icao24, aircraft_events in group_events_by_aircraft(events).items():
         counts = event_counts(aircraft_events)
+        # Runway breakdown for the offender's T&Gs / low approaches:
+        # e.g. {"11": 4, "29": 7}. Lets the UI say "11 T&Gs on rwy 29" or
+        # "8 T&Gs (5 on 29, 3 on 11)" without re-parsing the event list.
+        runway_breakdown: dict[str, int] = {}
+        for event in aircraft_events:
+            if event.get("type") not in {"touch_and_go", "low_approach"}:
+                continue
+            rwy = event.get("runway_id") or event.get("runway_used")
+            if not rwy:
+                continue
+            runway_breakdown[rwy] = runway_breakdown.get(rwy, 0) + 1
         row = {
             "icao24": icao24,
             "callsign": next((event.get("callsign") for event in reversed(aircraft_events) if event.get("callsign")), icao24.upper()),
@@ -59,6 +70,7 @@ def offender_rows(events: list[dict], window: WindowRange, tz_name: str) -> list
                 ],
                 default=None,
             ),
+            "runway_breakdown": runway_breakdown,
         }
         rows.append(row)
     return sorted(rows, key=lambda row: (-row["score"], row["callsign"]))

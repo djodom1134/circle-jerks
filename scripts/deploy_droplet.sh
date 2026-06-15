@@ -70,7 +70,11 @@ cat >/etc/cron.d/circlejerk-backup <<CRON
 CRON
 
 cat >/etc/cron.d/circlejerk-health <<CRON
-*/5 * * * * root cd $ROOT/app && ./scripts/check_production_health.sh --local >/var/log/circlejerk-health.log 2>&1 || (cd $ROOT/app && docker compose -f docker-compose.prod.yml restart api web caddy >>/var/log/circlejerk-health.log 2>&1)
+*/5 * * * * root cd $ROOT/app && ./scripts/health_gate.sh "./scripts/check_production_health.sh --local" "docker compose -f docker-compose.prod.yml restart api web caddy" >>/var/log/circlejerk-health.log 2>&1
+CRON
+
+cat >/etc/cron.d/circlejerk-watchdog <<CRON
+* * * * * root cd $ROOT/app && docker compose -f docker-compose.prod.yml exec -T api python -m app.watchdog >>/var/log/circlejerk-watchdog.log 2>&1
 CRON
 
 docker compose -f docker-compose.prod.yml up -d --build

@@ -13,8 +13,8 @@ const STEPS: Step[] = [
   {
     title: "Tell us where you live",
     body:
-      "Hit the locate-fixed icon to use your browser's location, or type an address in the top-right “User location” field. The green “Home” dot and the dashed circle around it are how we know who's overhead vs. just nearby.",
-    hint: "Top-right: USER LOCATION field",
+      "Three ways to set your home: allow location sharing when your browser asks, type an address into the top-right field, or right-click anywhere on the map.",
+    hint: "Top-right: USER LOCATION field — or right-click the map",
   },
   {
     title: "Pick a time window",

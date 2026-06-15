@@ -136,25 +136,118 @@ def test_circle_detector_detects_closed_loop():
     assert events[0]["type"] == "circle"
 
 
-def test_circle_detector_counts_offset_traffic_pattern_lap():
+def test_circle_detector_counts_home_airport_line_crossings():
+    """One 'circle' for each time a track crosses the home↔airport segment.
+
+    Setup: airport at (39.9088, -105.1172), home at (40.0, -105.1172) directly
+    north of the airport. The home↔airport segment is a vertical north-south
+    line at lon=-105.1172, lat between ~39.91 and 40.0.
+
+    The track flies east → west across that line, then back west → east, then
+    east → west again. Each crossing counts as one event.
+    """
     ap = airport()
+    home_lat = ap.lat + 0.09  # ~5.4 nm north
+    home_lon = ap.lon
+    # Three crossings: E→W, W→E, E→W. Sample y = midpoint between home/airport.
+    midpoint_lat = (ap.lat + home_lat) / 2
     points = [
-        (ap.lat + 0.010, ap.lon - 0.020),
-        (ap.lat + 0.010, ap.lon - 0.070),
-        (ap.lat - 0.025, ap.lon - 0.070),
-        (ap.lat - 0.035, ap.lon - 0.045),
-        (ap.lat - 0.025, ap.lon - 0.020),
-        (ap.lat + 0.010, ap.lon - 0.020),
+        (midpoint_lat, ap.lon + 0.05),   # east of line
+        (midpoint_lat, ap.lon - 0.05),   # west of line  → crossing #1
+        (midpoint_lat, ap.lon + 0.05),   # east of line  → crossing #2
+        (midpoint_lat, ap.lon - 0.05),   # west of line  → crossing #3
     ]
     track = [sample(1000 + index * 60, lat, lon) for index, (lat, lon) in enumerate(points)]
+    params = ScanParams(airport_icao="KBJC", user_lat=home_lat, user_lon=home_lon, ring_nm=8)
+
+    events = detect_circles(track, ap, params)
+
+    assert len(events) == 3
+    assert all(e["type"] == "circle" for e in events)
+    assert all(e["detection_method"] == "home_airport_line_crossing" for e in events)
+
+
+def test_circle_detector_skips_high_altitude_overflight():
+    """Airliner crossing the home↔airport line at FL250 isn't pattern work."""
+    ap = airport()
+    home_lat = ap.lat + 0.09
+    midpoint_lat = (ap.lat + home_lat) / 2
+    # Same E→W crossing as above but at 25,000 ft AGL (well above pattern altitude).
+    points = [
+        (midpoint_lat, ap.lon + 0.05),
+        (midpoint_lat, ap.lon - 0.05),
+    ]
+    track = [
+        sample(1000 + i * 60, lat, lon, alt_agl=25000)
+        for i, (lat, lon) in enumerate(points)
+    ]
+    params = ScanParams(airport_icao="KBJC", user_lat=home_lat, user_lon=ap.lon)
+
+    events = detect_circles(track, ap, params)
+    assert events == []
+
+
+def test_touch_and_go_event_includes_runway_id_from_heading():
+    """T&G should be tagged with the directional runway (11 vs 29 etc.)."""
+    from app.detectors import _runway_for_direction
+
+    runways = [
+        {"runway_id": "11", "lat_threshold": 40.17, "lon_threshold": -105.18, "heading_deg": 110, "length_ft": 4800},
+        {"runway_id": "29", "lat_threshold": 40.16, "lon_threshold": -105.15, "heading_deg": 290, "length_ft": 4800},
+    ]
+    # Aircraft heading 105° → closest to runway 11 (heading 110°).
+    s11 = {"heading_deg": 105, "lat": 40.165, "lon": -105.16}
+    chosen = _runway_for_direction(s11, runways)
+    assert chosen is not None and chosen["runway_id"] == "11"
+
+    # Aircraft heading 285° → closest to runway 29 (heading 290°).
+    s29 = {"heading_deg": 285, "lat": 40.165, "lon": -105.16}
+    chosen = _runway_for_direction(s29, runways)
+    assert chosen is not None and chosen["runway_id"] == "29"
+
+    # Aircraft heading way off (perpendicular) → no match within tolerance.
+    s_off = {"heading_deg": 0, "lat": 40.165, "lon": -105.16}
+    assert _runway_for_direction(s_off, runways) is None
+
+
+def test_circle_detector_does_not_double_count_racetrack_half_loop():
+    """Regression: a single half-lap of a long racetrack pattern (180° turn,
+    aircraft now on the far side of the oval) must NOT be counted as a full
+    circle. The pre-fix code added a "closure-heading" bonus regardless of
+    actual closure distance, so a 180° turn that flipped heading by 180°
+    looked like 360° and emitted a spurious event.
+    """
+    import math
+
+    ap = airport()
+    # Half-loop: aircraft starts on the south leg heading east, makes a tight
+    # 180° left turn at the east end, ends up on the north leg heading west.
+    # Start and end points are ~1 nm apart (north-south offset), well beyond
+    # the closure-bonus threshold.
+    points: list[tuple[float, float]] = []
+    # Straight leg east, well clear of the airport's 8 nm ring boundary.
+    for i in range(6):
+        points.append((ap.lat - 0.008, ap.lon + i * 0.004))
+    # 180° turn at the east end (heading change concentrated here).
+    turn_center_lat = ap.lat
+    turn_center_lon = ap.lon + 6 * 0.004
+    turn_radius_deg = 0.008
+    for step in range(1, 18):  # 18 steps of 10° = 180°
+        theta = math.radians(-90 + step * 10)  # start pointing south, rotate to north
+        lat = turn_center_lat + turn_radius_deg * math.sin(theta)
+        lon = turn_center_lon + turn_radius_deg * math.cos(theta) * 0.3
+        points.append((lat, lon))
+    # Straight leg west on the north side.
+    for i in range(6):
+        points.append((ap.lat + 0.008, ap.lon + 6 * 0.004 - i * 0.004))
+
+    track = [sample(1000 + i * 25, lat, lon) for i, (lat, lon) in enumerate(points)]
     params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2, ring_nm=8)
 
     events = detect_circles(track, ap, params)
 
-    assert len(events) == 1
-    assert events[0]["detection_method"] == "course_turn_closed_lap"
-    assert events[0]["path_nm"] > 8
-    assert events[0]["closure_nm"] == 0
+    # A 180° turn is half a lap, not a full circle. Must NOT emit.
+    assert events == [], f"half-loop should not emit a circle event, got {events}"
 
 
 def test_circle_detector_ignores_straight_departure():

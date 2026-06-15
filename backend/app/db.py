@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS submission_aircraft (
   icao24 TEXT NOT NULL,
   callsign TEXT,
   registration TEXT,
+  circles INTEGER NOT NULL DEFAULT 0,
+  touch_and_gos INTEGER NOT NULL DEFAULT 0,
+  low_approaches INTEGER NOT NULL DEFAULT 0,
+  passes_over_user INTEGER NOT NULL DEFAULT 0,
+  origin_airport_icao TEXT,
+  origin_label TEXT,
   PRIMARY KEY (submission_id, icao24),
   FOREIGN KEY (submission_id) REFERENCES submission_events(id) ON DELETE CASCADE
 );
@@ -123,6 +129,109 @@ CREATE INDEX IF NOT EXISTS idx_submission_events_ip ON submission_events(ip_addr
 CREATE INDEX IF NOT EXISTS idx_submission_events_visitor ON submission_events(visitor_id);
 CREATE INDEX IF NOT EXISTS idx_submission_events_airport ON submission_events(airport_icao);
 CREATE INDEX IF NOT EXISTS idx_visitor_activity_last_seen ON visitor_activity(last_seen DESC);
+
+CREATE TABLE IF NOT EXISTS aircraft_registry (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  n_number TEXT NOT NULL UNIQUE,
+  icao_hex TEXT,
+  serial_number TEXT,
+  manufacturer TEXT,
+  model TEXT,
+  year_manufactured INTEGER,
+  type_aircraft_code TEXT,
+  type_aircraft_label TEXT,
+  engine_type_code TEXT,
+  engine_type_label TEXT,
+  category_label TEXT,
+  registrant_name TEXT,
+  registrant_street TEXT,
+  registrant_city TEXT,
+  registrant_state TEXT,
+  registrant_zip TEXT,
+  registrant_country TEXT,
+  registration_status_code TEXT,
+  registration_status_label TEXT,
+  certificate_issue_date TEXT,
+  registration_expiration_date TEXT,
+  owner_type TEXT,
+  owner_type_confidence REAL,
+  owner_type_reason TEXT,
+  source TEXT NOT NULL DEFAULT 'FAA_AIRCRAFT_REGISTRY',
+  source_updated_at TEXT,
+  imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_aircraft_registry_icao_hex ON aircraft_registry(icao_hex);
+CREATE INDEX IF NOT EXISTS idx_aircraft_registry_imported_at ON aircraft_registry(imported_at DESC);
+
+CREATE TABLE IF NOT EXISTS aircraft_observed_identity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  icao_hex TEXT NOT NULL,
+  observed_callsign TEXT,
+  normalized_n_number TEXT,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  observation_count INTEGER NOT NULL DEFAULT 1,
+  confidence REAL NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'ADS-B',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(icao_hex, observed_callsign)
+);
+CREATE INDEX IF NOT EXISTS idx_aircraft_observed_icao_hex ON aircraft_observed_identity(icao_hex);
+CREATE INDEX IF NOT EXISTS idx_aircraft_observed_n_number ON aircraft_observed_identity(normalized_n_number);
+
+CREATE TABLE IF NOT EXISTS aircraft_profile_cache (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  icao_hex TEXT,
+  n_number TEXT,
+  profile_json TEXT NOT NULL,
+  profile_version TEXT NOT NULL,
+  generated_at INTEGER NOT NULL,
+  expires_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_aircraft_profile_cache_icao_hex ON aircraft_profile_cache(icao_hex);
+CREATE INDEX IF NOT EXISTS idx_aircraft_profile_cache_n_number ON aircraft_profile_cache(n_number);
+CREATE INDEX IF NOT EXISTS idx_aircraft_profile_cache_expires ON aircraft_profile_cache(expires_at);
+
+-- Cold-tier track storage. Redis holds the recent ~4h hot window (capped to
+-- protect the managed Valkey from OOM). This table archives older samples so
+-- scans for the "today" window can still draw on a full 24h of history without
+-- bloating Redis memory.
+CREATE TABLE IF NOT EXISTS track_archive (
+  icao24 TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  lat REAL,
+  lon REAL,
+  altitude_ft REAL,
+  baro_altitude_ft REAL,
+  geo_altitude_ft REAL,
+  heading_deg REAL,
+  vertical_rate_fpm REAL,
+  callsign TEXT,
+  in_window INTEGER NOT NULL DEFAULT 1,
+  source TEXT,
+  archived_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+  PRIMARY KEY (icao24, timestamp)
+);
+CREATE INDEX IF NOT EXISTS idx_track_archive_timestamp ON track_archive(timestamp);
+CREATE INDEX IF NOT EXISTS idx_track_archive_icao_ts ON track_archive(icao24, timestamp);
+
+CREATE TABLE IF NOT EXISTS aircraft_registry_imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  status TEXT NOT NULL,
+  rows_imported INTEGER NOT NULL DEFAULT 0,
+  rows_skipped INTEGER NOT NULL DEFAULT 0,
+  rows_invalid INTEGER NOT NULL DEFAULT 0,
+  source_url TEXT,
+  source_date TEXT,
+  duration_seconds REAL,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_aircraft_registry_imports_started ON aircraft_registry_imports(started_at DESC);
 """
 
 
@@ -170,8 +279,15 @@ COMPLAINT_SEED = [
 
 def connect(path: str) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    # timeout: wait up to 5s for a write lock instead of immediately raising
+    # "database is locked" (the worker's archive writes contend with API reads).
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    # WAL is set in SCHEMA, but a fresh connection still needs busy_timeout +
+    # a sane synchronous level. NORMAL is durable enough under WAL and much
+    # faster for the archive's high-frequency small writes.
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -179,10 +295,26 @@ def init_db(path: str) -> None:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         seed_db(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(submission_aircraft)").fetchall()}
+    additions = [
+        ("circles", "INTEGER NOT NULL DEFAULT 0"),
+        ("touch_and_gos", "INTEGER NOT NULL DEFAULT 0"),
+        ("low_approaches", "INTEGER NOT NULL DEFAULT 0"),
+        ("passes_over_user", "INTEGER NOT NULL DEFAULT 0"),
+        ("origin_airport_icao", "TEXT"),
+        ("origin_label", "TEXT"),
+    ]
+    for column, decl in additions:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE submission_aircraft ADD COLUMN {column} {decl}")
 
 
 def seed_db(conn: sqlite3.Connection) -> None:
@@ -242,14 +374,32 @@ def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
 
 
 def nearest_airport(conn: sqlite3.Connection, lat: float, lon: float) -> dict | None:
+    """Nearest seeded airport to (lat, lon).
+
+    Pre-filters by a coarse lat/lon bounding box BEFORE doing Python haversine —
+    the airports table now has ~16k US rows (was 10), and scanning all of them
+    per call was the dominant cost of the scan endpoint (enrich_offenders →
+    origin_from_ground_track called this per track-sample, hitting CPU 200%
+    for 30+ seconds). The bbox prefilter cuts to a handful of candidates;
+    expand the search if no rows match the tight box.
+    """
     point = Point(lat, lon)
-    candidates = [row_to_airport(row) for row in conn.execute("SELECT * FROM airports")]
-    if not candidates:
-        return None
-    nearest = min(candidates, key=lambda airport: distance_nm(point, Point(airport.lat, airport.lon)))
-    data = airport_to_dict(nearest)
-    data["distance_nm"] = round(distance_nm(point, Point(nearest.lat, nearest.lon)), 2)
-    return data
+    for box_deg in (0.6, 2.0, 8.0, 180.0):
+        rows = conn.execute(
+            """
+            SELECT * FROM airports
+            WHERE lat BETWEEN ? AND ?
+              AND lon BETWEEN ? AND ?
+            """,
+            (lat - box_deg, lat + box_deg, lon - box_deg, lon + box_deg),
+        ).fetchall()
+        if rows:
+            candidates = [row_to_airport(row) for row in rows]
+            nearest = min(candidates, key=lambda a: distance_nm(point, Point(a.lat, a.lon)))
+            data = airport_to_dict(nearest)
+            data["distance_nm"] = round(distance_nm(point, Point(nearest.lat, nearest.lon)), 2)
+            return data
+    return None
 
 
 def search_airports(conn: sqlite3.Connection, q: str, limit: int = 10) -> list[dict]:
@@ -421,10 +571,24 @@ def record_submission(
         callsign = target["callsign"]
         conn.execute(
             """
-            INSERT INTO submission_aircraft (submission_id, icao24, callsign, registration)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO submission_aircraft
+            (submission_id, icao24, callsign, registration,
+             circles, touch_and_gos, low_approaches, passes_over_user,
+             origin_airport_icao, origin_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (submission_id, icao24, callsign, registration),
+            (
+                submission_id,
+                icao24,
+                callsign,
+                registration,
+                int(target.get("circles") or 0),
+                int(target.get("touch_and_gos") or 0),
+                int(target.get("low_approaches") or 0),
+                int(target.get("passes_over_user") or 0),
+                target.get("origin_airport_icao"),
+                target.get("origin_label"),
+            ),
         )
         conn.execute(
             """
@@ -454,11 +618,41 @@ def top_repeat_offenders(conn: sqlite3.Connection, *, min_reports: int, limit: i
           c.operator,
           r.report_count,
           r.first_reported_at,
-          r.last_reported_at
+          r.last_reported_at,
+          COALESCE(agg.total_circles, 0) AS total_circles,
+          COALESCE(agg.total_touch_and_gos, 0) AS total_touch_and_gos,
+          COALESCE(agg.total_low_approaches, 0) AS total_low_approaches,
+          COALESCE(agg.total_passes_over_user, 0) AS total_passes_over_user,
+          (
+            SELECT sa2.origin_airport_icao
+            FROM submission_aircraft sa2
+            JOIN submission_events se2 ON se2.id = sa2.submission_id
+            WHERE sa2.icao24 = r.icao24 AND sa2.origin_airport_icao IS NOT NULL
+            ORDER BY se2.created_at DESC
+            LIMIT 1
+          ) AS origin_airport_icao,
+          (
+            SELECT sa3.origin_label
+            FROM submission_aircraft sa3
+            JOIN submission_events se3 ON se3.id = sa3.submission_id
+            WHERE sa3.icao24 = r.icao24 AND sa3.origin_label IS NOT NULL
+            ORDER BY se3.created_at DESC
+            LIMIT 1
+          ) AS origin_label
         FROM aircraft_report_counts r
         LEFT JOIN aircraft_cache c ON c.icao24 = r.icao24
+        LEFT JOIN (
+          SELECT
+            icao24,
+            SUM(circles) AS total_circles,
+            SUM(touch_and_gos) AS total_touch_and_gos,
+            SUM(low_approaches) AS total_low_approaches,
+            SUM(passes_over_user) AS total_passes_over_user
+          FROM submission_aircraft
+          GROUP BY icao24
+        ) agg ON agg.icao24 = r.icao24
         WHERE r.report_count >= ?
-        ORDER BY r.report_count DESC, r.last_reported_at DESC
+        ORDER BY total_circles DESC, total_passes_over_user DESC, r.report_count DESC, r.last_reported_at DESC
         LIMIT ?
         """,
         (max(1, int(min_reports)), max(1, int(limit))),
@@ -673,3 +867,340 @@ def backup_database(source_path: str, backup_dir: str) -> str:
         target.close()
         source.close()
     return str(dest)
+
+
+# --- FAA aircraft registry accessors ------------------------------------------------
+
+AIRCRAFT_REGISTRY_COLUMNS = (
+    "n_number", "icao_hex", "serial_number", "manufacturer", "model",
+    "year_manufactured", "type_aircraft_code", "type_aircraft_label",
+    "engine_type_code", "engine_type_label", "category_label",
+    "registrant_name", "registrant_street", "registrant_city",
+    "registrant_state", "registrant_zip", "registrant_country",
+    "registration_status_code", "registration_status_label",
+    "certificate_issue_date", "registration_expiration_date",
+    "owner_type", "owner_type_confidence", "owner_type_reason",
+    "source", "source_updated_at",
+)
+
+
+def upsert_aircraft_registry(conn: sqlite3.Connection, row: dict) -> None:
+    """UPSERT a single FAA registry row keyed on n_number."""
+    columns = list(AIRCRAFT_REGISTRY_COLUMNS)
+    values = [row.get(col) for col in columns]
+    placeholders = ", ".join(["?"] * len(columns))
+    updates = ", ".join(
+        f"{col}=excluded.{col}" for col in columns if col != "n_number"
+    )
+    conn.execute(
+        f"""
+        INSERT INTO aircraft_registry ({', '.join(columns)}, imported_at, updated_at)
+        VALUES ({placeholders}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(n_number) DO UPDATE SET
+          {updates},
+          imported_at = excluded.imported_at,
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        values,
+    )
+
+
+def get_registry_by_n_number(conn: sqlite3.Connection, n_number: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM aircraft_registry WHERE n_number = ? LIMIT 1",
+        (n_number.upper(),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_registry_by_icao_hex(conn: sqlite3.Connection, icao_hex: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT * FROM aircraft_registry
+        WHERE icao_hex = ?
+        ORDER BY imported_at DESC
+        LIMIT 1
+        """,
+        (icao_hex.upper(),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def search_aircraft_registry(
+    conn: sqlite3.Connection, prefix: str, limit: int = 10
+) -> list[dict]:
+    """Search registry by N-number prefix (returns lightweight rows)."""
+    rows = conn.execute(
+        """
+        SELECT n_number, icao_hex, manufacturer, model, year_manufactured,
+               registrant_name, registrant_city, registrant_state, owner_type
+        FROM aircraft_registry
+        WHERE n_number LIKE ?
+        ORDER BY n_number ASC
+        LIMIT ?
+        """,
+        (f"{prefix.upper()}%", limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_observed_identity(
+    conn: sqlite3.Connection,
+    icao_hex: str,
+    callsign: str | None,
+    normalized_n_number: str | None,
+    timestamp: int,
+    confidence: float,
+) -> None:
+    """Record an ADS-B sighting of (icao_hex, callsign) and increment counts."""
+    cs = callsign.strip().upper() if callsign else None
+    conn.execute(
+        """
+        INSERT INTO aircraft_observed_identity (
+          icao_hex, observed_callsign, normalized_n_number,
+          first_seen_at, last_seen_at, observation_count, confidence
+        )
+        VALUES (?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(icao_hex, observed_callsign) DO UPDATE SET
+          normalized_n_number = COALESCE(excluded.normalized_n_number, aircraft_observed_identity.normalized_n_number),
+          last_seen_at = MAX(aircraft_observed_identity.last_seen_at, excluded.last_seen_at),
+          observation_count = aircraft_observed_identity.observation_count + 1,
+          confidence = MAX(aircraft_observed_identity.confidence, excluded.confidence),
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        (icao_hex.upper(), cs, normalized_n_number, timestamp, timestamp, confidence),
+    )
+
+
+def get_observed_identity(conn: sqlite3.Connection, icao_hex: str) -> dict | None:
+    """Latest known mapping for an ICAO hex (newest callsign / highest confidence)."""
+    row = conn.execute(
+        """
+        SELECT * FROM aircraft_observed_identity
+        WHERE icao_hex = ?
+        ORDER BY normalized_n_number IS NULL ASC,
+                 confidence DESC,
+                 last_seen_at DESC
+        LIMIT 1
+        """,
+        (icao_hex.upper(),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def latest_registry_import(conn: sqlite3.Connection) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM aircraft_registry_imports ORDER BY started_at DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def record_import_start(
+    conn: sqlite3.Connection, *, started_at: int, source_url: str | None
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO aircraft_registry_imports (started_at, status, source_url)
+        VALUES (?, 'running', ?)
+        """,
+        (started_at, source_url),
+    )
+    return int(cur.lastrowid)
+
+
+def record_import_finish(
+    conn: sqlite3.Connection,
+    *,
+    import_id: int,
+    finished_at: int,
+    status: str,
+    rows_imported: int,
+    rows_skipped: int,
+    rows_invalid: int,
+    duration_seconds: float,
+    source_date: str | None,
+    error: str | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE aircraft_registry_imports
+        SET finished_at = ?, status = ?, rows_imported = ?,
+            rows_skipped = ?, rows_invalid = ?, duration_seconds = ?,
+            source_date = COALESCE(?, source_date), error = ?
+        WHERE id = ?
+        """,
+        (
+            finished_at, status, rows_imported, rows_skipped, rows_invalid,
+            duration_seconds, source_date, error, import_id,
+        ),
+    )
+
+
+def aircraft_registry_row_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) AS c FROM aircraft_registry").fetchone()
+    return int(row["c"]) if row else 0
+
+
+# --- Track archive (cold tier) ----------------------------------------------
+
+_TRACK_ARCHIVE_COLUMNS = (
+    "icao24", "timestamp", "lat", "lon",
+    "altitude_ft", "baro_altitude_ft", "geo_altitude_ft",
+    "heading_deg", "vertical_rate_fpm",
+    "callsign", "in_window", "source",
+)
+
+
+def archive_track_samples(
+    conn: sqlite3.Connection,
+    icao24: str,
+    samples: list[dict],
+) -> int:
+    """Bulk-INSERT track samples into the cold archive. Returns rows written.
+
+    INSERT OR IGNORE — if (icao24, timestamp) already exists, the existing
+    archived row wins. Safe to call with samples that overlap with previously
+    archived data.
+    """
+    if not samples:
+        return 0
+    icao_lower = icao24.lower()
+    rows = []
+    for sample in samples:
+        ts = sample.get("timestamp")
+        if ts is None:
+            continue
+        rows.append((
+            icao_lower,
+            int(ts),
+            sample.get("lat"),
+            sample.get("lon"),
+            sample.get("altitude_ft"),
+            sample.get("baro_altitude_ft"),
+            sample.get("geo_altitude_ft"),
+            sample.get("heading_deg"),
+            sample.get("vertical_rate_fpm"),
+            sample.get("callsign"),
+            1 if sample.get("in_window", True) else 0,
+            sample.get("source"),
+        ))
+    if not rows:
+        return 0
+    cur = conn.executemany(
+        f"""
+        INSERT OR IGNORE INTO track_archive
+        ({', '.join(_TRACK_ARCHIVE_COLUMNS)}, archived_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
+        """,
+        rows,
+    )
+    return cur.rowcount or 0
+
+
+def read_track_archive(
+    conn: sqlite3.Connection,
+    icao24: str,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    rows = conn.execute(
+        f"""
+        SELECT {', '.join(_TRACK_ARCHIVE_COLUMNS)}
+        FROM track_archive
+        WHERE icao24 = ? AND timestamp BETWEEN ? AND ?
+        ORDER BY timestamp ASC
+        """,
+        (icao24.lower(), int(start_ts), int(end_ts)),
+    ).fetchall()
+    return [_track_archive_row_to_sample(row) for row in rows]
+
+
+def bulk_read_track_archive(
+    conn: sqlite3.Connection,
+    icao24s: list[str],
+    start_ts: int,
+    end_ts: int,
+) -> dict[str, list[dict]]:
+    """Read archived samples for many aircraft at once."""
+    if not icao24s:
+        return {}
+    icao_lower = [i.lower() for i in icao24s]
+    out: dict[str, list[dict]] = {i: [] for i in icao_lower}
+    # SQLite has a 999-parameter limit; chunk.
+    chunk_size = 500
+    for offset in range(0, len(icao_lower), chunk_size):
+        chunk = icao_lower[offset : offset + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT {', '.join(_TRACK_ARCHIVE_COLUMNS)}
+            FROM track_archive
+            WHERE icao24 IN ({placeholders}) AND timestamp BETWEEN ? AND ?
+            ORDER BY icao24 ASC, timestamp ASC
+            """,
+            (*chunk, int(start_ts), int(end_ts)),
+        ).fetchall()
+        for row in rows:
+            sample = _track_archive_row_to_sample(row)
+            out[row["icao24"]].append(sample)
+    return out
+
+
+def prune_track_archive(conn: sqlite3.Connection, older_than_ts: int) -> int:
+    """Delete archived samples older than the cutoff. Returns rows deleted."""
+    cur = conn.execute(
+        "DELETE FROM track_archive WHERE timestamp < ?",
+        (int(older_than_ts),),
+    )
+    return cur.rowcount or 0
+
+
+def list_archive_aircraft(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> list[str]:
+    """Distinct icao24s with archived samples in [start_ts, end_ts]."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT icao24
+        FROM track_archive
+        WHERE timestamp BETWEEN ? AND ?
+        """,
+        (int(start_ts), int(end_ts)),
+    ).fetchall()
+    return [row["icao24"] for row in rows]
+
+
+def track_archive_stats(conn: sqlite3.Connection) -> dict:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS samples,
+               COUNT(DISTINCT icao24) AS aircraft,
+               MIN(timestamp) AS oldest_ts,
+               MAX(timestamp) AS newest_ts
+        FROM track_archive
+        """
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def _track_archive_row_to_sample(row: sqlite3.Row) -> dict:
+    # `icao24` is duplicated into the sample dict (it's the table PK + an
+    # in-sample field) because downstream code (detectors, services) reads
+    # `sample["icao24"]` inline rather than carrying the icao24 alongside.
+    return {
+        "icao24": row["icao24"],
+        "timestamp": int(row["timestamp"]),
+        "lat": row["lat"],
+        "lon": row["lon"],
+        "altitude_ft": row["altitude_ft"],
+        "baro_altitude_ft": row["baro_altitude_ft"],
+        "geo_altitude_ft": row["geo_altitude_ft"],
+        "heading_deg": row["heading_deg"],
+        "vertical_rate_fpm": row["vertical_rate_fpm"],
+        "callsign": row["callsign"],
+        "in_window": bool(row["in_window"]),
+        "source": row["source"],
+    }
+

@@ -13,7 +13,7 @@ import { fromLonLat, toLonLat } from "ol/proj";
 import OSM from "ol/source/OSM";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
-import type { Airport, ScanResponse, TrackSample } from "../lib/api";
+import type { Airport, Offender, ScanResponse, TrackSample } from "../lib/api";
 
 // Aircraft climbing under full power are MUCH louder than the same aircraft
 // in cruise at the same altitude — engine + propeller noise dominates. Maps
@@ -139,6 +139,10 @@ function clamp01(value: number): number {
 }
 
 const AIRCRAFT_DISPLAY_DELAY_SECONDS = 15;
+// Only paint an aircraft marker if we have a sample inside this window. Older
+// tracks come from the ADS-B history / backfill and should NOT show a moving
+// icon — they're just past trails, not live aircraft.
+const LIVE_AIRCRAFT_FRESHNESS_SECONDS = 60;
 const AIRCRAFT_EXTRAPOLATE_SECONDS = 8;
 
 interface AircraftTrack {
@@ -154,36 +158,60 @@ interface AircraftPosition {
   heading: number | null;
 }
 
+// Auto-zoom focuses on the user's home and the nearest airport. Track samples
+// influence the fit only when they fall within FOCUS_RADIUS_NM of the home;
+// long inbound/outbound legs from where planes originated are excluded so the
+// regional sprawl doesn't drag the view out. Rendering is unaffected — those
+// far-away track segments still draw, they just don't expand the auto-zoom.
+const FOCUS_RADIUS_NM = 3;
+const AIRPORT_INCLUDE_RADIUS_NM = 6;
+const NM_TO_DEG_LAT = 1 / 60;
+
 function activityExtent(
   airport?: Airport | null,
   userLocation?: { lat: number; lon: number } | null,
   scanData?: ScanResponse | null
 ) {
+  const focusLat = userLocation?.lat ?? airport?.lat;
+  const focusLon = userLocation?.lon ?? airport?.lon;
+  if (focusLat == null || focusLon == null) return null;
+  const cosFocus = Math.cos((focusLat * Math.PI) / 180) || 1;
+  const focusRadiusDeg = FOCUS_RADIUS_NM * NM_TO_DEG_LAT;
+
   const coords: number[][] = [];
+  coords.push(fromLonLat([focusLon, focusLat]));
+  // Minimum visible window: ±FOCUS_RADIUS_NM around the home so the auto-zoom
+  // never goes tighter than neighborhood scale even when there's no track data.
+  const dLat = focusRadiusDeg;
+  const dLon = focusRadiusDeg / cosFocus;
+  coords.push(fromLonLat([focusLon - dLon, focusLat - dLat]));
+  coords.push(fromLonLat([focusLon + dLon, focusLat + dLat]));
+
   if (airport) {
-    coords.push(fromLonLat([airport.lon, airport.lat]));
-  }
-  if (userLocation) {
-    coords.push(fromLonLat([userLocation.lon, userLocation.lat]));
+    const aDlat = airport.lat - focusLat;
+    const aDlon = (airport.lon - focusLon) * cosFocus;
+    const airportDistDeg = Math.sqrt(aDlat * aDlat + aDlon * aDlon);
+    if (airportDistDeg <= AIRPORT_INCLUDE_RADIUS_NM * NM_TO_DEG_LAT) {
+      coords.push(fromLonLat([airport.lon, airport.lat]));
+    }
   }
 
   for (const track of scanData?.tracks ?? []) {
     const inWindow = track.samples.filter((sample) => sample.in_window);
     const samples = inWindow.length > 0 ? inWindow : track.samples;
     for (const sample of samples) {
-      if (Number.isFinite(sample.lon) && Number.isFinite(sample.lat)) {
-        coords.push(fromLonLat([sample.lon, sample.lat]));
-      }
+      if (!Number.isFinite(sample.lon) || !Number.isFinite(sample.lat)) continue;
+      const sDlat = sample.lat - focusLat;
+      const sDlon = (sample.lon - focusLon) * cosFocus;
+      if (Math.sqrt(sDlat * sDlat + sDlon * sDlon) > focusRadiusDeg) continue;
+      coords.push(fromLonLat([sample.lon, sample.lat]));
     }
   }
 
-  if (coords.length === 0) {
-    return null;
-  }
   const extent = boundingExtent(coords);
   const width = extent[2] - extent[0];
   const height = extent[3] - extent[1];
-  return bufferExtent(extent, Math.max(width, height) * 0.08 || 1400);
+  return bufferExtent(extent, Math.max(width, height) * 0.05 || 800);
 }
 
 function circlePolygon(lat: number, lon: number, radiusNm: number) {
@@ -505,6 +533,36 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     combinedLeq: number;
     baseline: number;
   } | null>(null);
+  const [contextMenu, setContextMenu] = useState<
+    | { x: number; y: number; lat: number; lon: number }
+    | null
+  >(null);
+  const [featureHover, setFeatureHover] = useState<
+    | {
+        kind: "home";
+        x: number;
+        y: number;
+        passes: number;
+        aircraftCount: number;
+        peakDb: number | null;
+        lowestOverheadFt: number | null;
+      }
+    | {
+        kind: "aircraft";
+        x: number;
+        y: number;
+        callsign: string;
+        icao24: string;
+        circles: number;
+        touchAndGos: number;
+        lowApproaches: number;
+        passes: number;
+        origin: string;
+        avgOverheadFt: number | null;
+        minOverheadFt: number | null;
+      }
+    | null
+  >(null);
 
   const windowStart = scanData?.window?.start_ts ?? 0;
   const windowEnd = scanData?.window?.end_ts ?? 0;
@@ -549,6 +607,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
 
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
     if (showHeatmap) return [];
+    const liveCutoff = Date.now() / 1000 - LIVE_AIRCRAFT_FRESHNESS_SECONDS;
     return (scanData?.tracks ?? [])
       .map((track) => ({
         icao24: track.icao24,
@@ -556,7 +615,15 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         selected: selectedIcao24 === track.icao24,
         samples: normalizeTrackSamples(track.samples)
       }))
-      .filter((track) => track.samples.length > 0);
+      .filter((track) => {
+        if (track.samples.length === 0) return false;
+        // Only consider it a live aircraft if its most recent sample is fresh.
+        let latest = 0;
+        for (const sample of track.samples) {
+          if (sample.timestamp > latest) latest = sample.timestamp;
+        }
+        return latest >= liveCutoff;
+      });
   }, [scanData, selectedIcao24, showHeatmap]);
 
   useEffect(() => {
@@ -588,12 +655,47 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         zoom: 10
       })
     });
-    mapRef.current.on("click", (event) => {
-      const [lon, lat] = toLonLat(event.coordinate);
-      onPickLocation(lat, lon);
-    });
     setMapReady(true);
   }, [airport?.lat, airport?.lon, userLocation?.lat, userLocation?.lon, onPickLocation]);
+
+  // Right-click context menu. Registered in its own effect (NOT inside the
+  // map-init effect) because the init effect early-returns on subsequent
+  // renders, which would otherwise destroy this listener every time
+  // userLocation changes.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    const viewport = map.getViewport();
+    const onContextMenu = (domEvent: Event) => {
+      domEvent.preventDefault();
+      const coordinate = map.getEventCoordinate(domEvent as MouseEvent);
+      if (!coordinate) return;
+      const [lon, lat] = toLonLat(coordinate);
+      const mouseEvent = domEvent as MouseEvent;
+      setContextMenu({ x: mouseEvent.clientX, y: mouseEvent.clientY, lat, lon });
+    };
+    viewport.addEventListener("contextmenu", onContextMenu);
+    return () => viewport.removeEventListener("contextmenu", onContextMenu);
+  }, [mapReady]);
+
+  // Close the context menu on outside click, scroll, or Escape. Click inside
+  // the menu wrapper has stopPropagation, so it doesn't reach the window
+  // listener.
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     const source = sourceRef.current;
@@ -893,7 +995,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
 
     const displayTime = Date.now() / 1000 - AIRCRAFT_DISPLAY_DELAY_SECONDS;
     for (const track of aircraftTracks) {
-      const current = positionAt(track.samples, displayTime) ?? positionAt(track.samples, Number.MAX_SAFE_INTEGER);
+      const current = positionAt(track.samples, displayTime);
       if (!current) continue;
       let feature = existing.get(track.icao24);
       if (!feature) {
@@ -903,6 +1005,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       }
       feature.setProperties({
         kind: "aircraft",
+        icao24: track.icao24,
         label: track.callsign,
         selected: track.selected ? 1 : 0,
         heading: current.heading ?? feature.get("heading") ?? 0
@@ -940,14 +1043,119 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     if (!map || !airport || !userLocation) return;
     const extent = activityExtent(airport, userLocation, scanData);
     if (extent && extent.every(Number.isFinite)) {
-      map.getView().fit(extent, { padding: [60, 60, 60, 60], maxZoom: 12, duration: 450 });
+      map.getView().fit(extent, { padding: [40, 40, 40, 40], maxZoom: 14.5, duration: 450 });
     }
   }, [airport, userLocation, scanData, autoZoom]);
+
+  // Hover tooltips for the Home pin and aircraft markers. Looks up the
+  // nearest feature at the cursor and surfaces per-aircraft stats / aggregate
+  // home stats. Coexists with the heatmap dB hover above; this handler only
+  // fires when a relevant feature is directly under the cursor.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    const offendersByIcao = new globalThis.Map<string, Offender>();
+    for (const o of scanData?.offenders ?? []) {
+      offendersByIcao.set(o.icao24, o);
+    }
+    const offenders = scanData?.offenders ?? [];
+    const totalPasses = scanData?.counters.passes ?? offenders.reduce((sum, o) => sum + (o.passes ?? 0), 0);
+
+    const onMove = (event: { pixel?: number[] | null }) => {
+      const pixel = event.pixel;
+      if (!pixel) {
+        setFeatureHover(null);
+        return;
+      }
+      let target: Feature | null = null;
+      map.forEachFeatureAtPixel(
+        pixel,
+        (feat) => {
+          const kind = feat.get("kind");
+          if (kind === "home" || kind === "aircraft") {
+            target = feat as Feature;
+            return true;
+          }
+          return false;
+        },
+        { hitTolerance: 6 }
+      );
+      if (!target) {
+        setFeatureHover(null);
+        return;
+      }
+      const targetFeature = target as Feature;
+      const kind = targetFeature.get("kind") as string;
+      if (kind === "home") {
+        let peakDb: number | null = null;
+        let lowestOverhead: number | null = null;
+        let aircraftWithOverhead = 0;
+        for (const o of offenders) {
+          const overhead = o.min_altitude_over_user_ft_agl ?? o.avg_altitude_over_user_ft_agl ?? null;
+          if (overhead != null && Number.isFinite(overhead)) {
+            const db = dbFromAltAndClimb(overhead, null);
+            if (peakDb == null || db > peakDb) peakDb = db;
+            if (lowestOverhead == null || overhead < lowestOverhead) lowestOverhead = overhead;
+            aircraftWithOverhead += 1;
+          }
+        }
+        setFeatureHover({
+          kind: "home",
+          x: pixel[0],
+          y: pixel[1],
+          passes: totalPasses,
+          aircraftCount: aircraftWithOverhead || offenders.length,
+          peakDb,
+          lowestOverheadFt: lowestOverhead,
+        });
+        return;
+      }
+      const icao24 = (targetFeature.get("icao24") as string | undefined) ?? "";
+      const offender = offendersByIcao.get(icao24);
+      const callsign = (targetFeature.get("label") as string | undefined) ?? offender?.callsign ?? icao24;
+      const origin = offender?.origin_label ?? offender?.origin_airport_icao ?? offender?.origin_city ?? "unknown";
+      setFeatureHover({
+        kind: "aircraft",
+        x: pixel[0],
+        y: pixel[1],
+        callsign,
+        icao24,
+        circles: offender?.circles ?? 0,
+        touchAndGos: offender?.touch_and_gos ?? 0,
+        lowApproaches: offender?.low_approaches ?? 0,
+        passes: offender?.passes ?? 0,
+        origin,
+        avgOverheadFt: offender?.avg_altitude_over_user_ft_agl ?? null,
+        minOverheadFt: offender?.min_altitude_over_user_ft_agl ?? null,
+      });
+    };
+    const onOut = () => setFeatureHover(null);
+    map.on("pointermove", onMove);
+    map.getViewport().addEventListener("mouseleave", onOut);
+    return () => {
+      map.un("pointermove", onMove);
+      map.getViewport().removeEventListener("mouseleave", onOut);
+    };
+  }, [mapReady, scanData]);
+
+  // Overlay only blocks the map until the first scan response. After that —
+  // even if `tracks` is empty — the scan has succeeded and the map should be
+  // usable. (Short windows like 5m legitimately come back empty; gating on
+  // backfill progress would otherwise leave the overlay up indefinitely.)
+  const showLoadingOverlay = !scanData;
 
   return (
     <div className="map-stage">
       <div className="map openlayers-map" ref={containerRef} />
       <canvas className="heatmap-canvas" ref={heatmapCanvasRef} aria-hidden="true" />
+      {showLoadingOverlay && (
+        <div className="map-loading-overlay" role="status" aria-live="polite">
+          <div className="map-loading-card">
+            <div className="map-loading-spinner" aria-hidden="true" />
+            <div className="map-loading-text">Loading a bunch of data, hold tight…</div>
+          </div>
+        </div>
+      )}
       {showHeatmap && hoverDb && (
         <div
           className="db-tooltip"
@@ -972,6 +1180,98 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         </div>
       )}
       {showHeatmap && <DbLegend />}
+      {contextMenu && (
+        <div
+          className="map-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          role="menu"
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="map-context-menu-item"
+            onClick={() => {
+              onPickLocation(contextMenu.lat, contextMenu.lon);
+              setContextMenu(null);
+            }}
+          >
+            Set home location here
+          </button>
+          <div className="map-context-menu-meta">
+            {contextMenu.lat.toFixed(4)}°, {contextMenu.lon.toFixed(4)}°
+          </div>
+        </div>
+      )}
+      {featureHover && (
+        <div
+          className="feature-tooltip"
+          style={{ left: featureHover.x + 14, top: featureHover.y + 14 }}
+          role="status"
+        >
+          {featureHover.kind === "home" ? (
+            <>
+              <div className="feature-tooltip-title">Home</div>
+              <div className="feature-tooltip-row">
+                <span>Passes overhead</span>
+                <strong>{featureHover.passes}</strong>
+              </div>
+              <div className="feature-tooltip-row">
+                <span>Aircraft this window</span>
+                <strong>{featureHover.aircraftCount}</strong>
+              </div>
+              {featureHover.peakDb != null && (
+                <div className="feature-tooltip-row">
+                  <span>Loudest overflight</span>
+                  <strong>~{featureHover.peakDb.toFixed(0)} dB</strong>
+                </div>
+              )}
+              {featureHover.lowestOverheadFt != null && (
+                <div className="feature-tooltip-row">
+                  <span>Lowest over you</span>
+                  <strong>{Math.round(featureHover.lowestOverheadFt)} ft AGL</strong>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="feature-tooltip-title">
+                {featureHover.callsign}
+                <span className="feature-tooltip-sub"> ({featureHover.icao24})</span>
+              </div>
+              <div className="feature-tooltip-row">
+                <span>Origin</span>
+                <strong>{featureHover.origin}</strong>
+              </div>
+              <div className="feature-tooltip-row">
+                <span>Circles</span>
+                <strong>{featureHover.circles}</strong>
+              </div>
+              <div className="feature-tooltip-row">
+                <span>Touch &amp; gos</span>
+                <strong>{featureHover.touchAndGos}</strong>
+              </div>
+              {featureHover.lowApproaches > 0 && (
+                <div className="feature-tooltip-row">
+                  <span>Low approaches</span>
+                  <strong>{featureHover.lowApproaches}</strong>
+                </div>
+              )}
+              <div className="feature-tooltip-row">
+                <span>Passes over you</span>
+                <strong>{featureHover.passes}</strong>
+              </div>
+              {featureHover.minOverheadFt != null && (
+                <div className="feature-tooltip-row">
+                  <span>Lowest over you</span>
+                  <strong>{Math.round(featureHover.minOverheadFt)} ft AGL</strong>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

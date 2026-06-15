@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
+import os
 import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated
+
+# Make sure app-level INFO logs reach the container stdout. Uvicorn's default
+# config only configures its own loggers; without this our `logger.info` calls
+# in services / archive / scan staging would silently drop on production.
+logging.basicConfig(
+    level=os.environ.get("CIRCLEJERK_LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -70,6 +81,12 @@ class SummaryComplaintRequest(BaseModel):
 class ActivityAircraft(BaseModel):
     icao24: str = Field(min_length=1, max_length=16)
     callsign: str | None = Field(default=None, max_length=32)
+    circles: int = Field(default=0, ge=0, le=10000)
+    touch_and_gos: int = Field(default=0, ge=0, le=10000)
+    low_approaches: int = Field(default=0, ge=0, le=10000)
+    passes_over_user: int = Field(default=0, ge=0, le=10000)
+    origin_airport_icao: str | None = Field(default=None, max_length=8)
+    origin_label: str | None = Field(default=None, max_length=120)
 
 
 class ActivityHeartbeatRequest(BaseModel):
@@ -845,6 +862,222 @@ async def geocode(
     }
 
 
+@app.get("/reverse_geocode")
+async def reverse_geocode(
+    lat: Annotated[float, Query(ge=-90.0, le=90.0)],
+    lon: Annotated[float, Query(ge=-180.0, le=180.0)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        response = await client.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 14},
+            headers={"User-Agent": f"circlejerk-prototype/0.1 ({settings.public_base_url})"},
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail="reverse geocoding failed")
+    data = response.json()
+    address = data.get("address") or {}
+    parts = [
+        address.get("neighbourhood") or address.get("suburb") or address.get("hamlet"),
+        address.get("city") or address.get("town") or address.get("village") or address.get("county"),
+        address.get("state"),
+    ]
+    short = ", ".join(part for part in parts if part)
+    return {
+        "display_name": data.get("display_name"),
+        "short_name": short or data.get("display_name"),
+    }
+
+
+# Curated overrides for the Save Our Skies Alliance per-airport pages. Keys
+# are ICAO codes; values are the canonical SOSA URL. Extend as we discover
+# matches that the slug heuristic below can't construct correctly (typically
+# because SOSA's airport name differs from our DB's name).
+SOSA_OVERRIDES: dict[str, str] = {
+    "KLMO": "https://www.saveourskiesalliance.org/vance-brand-municipal-airport--lmo.html",
+}
+SOSA_HOME = "https://www.saveourskiesalliance.org/"
+
+
+def _sosa_slug(name: str) -> str:
+    import re
+
+    s = name.lower()
+    s = re.sub(r"[^a-z0-9\s-]", "", s)
+    s = re.sub(r"\s+", "-", s.strip())
+    s = re.sub(r"-+", "-", s)
+    return s
+
+
+@app.get("/airports/{icao}/sosa_url")
+async def airport_sosa_url(
+    icao: str,
+    store: Annotated[Store, Depends(store_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    icao_up = icao.upper()
+    cache_key = f"sosa_url:{icao_up}"
+    cached = await store.get_cache(cache_key)
+    if isinstance(cached, dict) and isinstance(cached.get("url"), str):
+        return cached
+
+    if icao_up in SOSA_OVERRIDES:
+        result = {"url": SOSA_OVERRIDES[icao_up], "source": "curated"}
+        # Curated overrides effectively never change — cache for a week.
+        await store.set_cache(cache_key, result, 7 * 24 * 3600)
+        return result
+
+    with db_session(settings.database_path) as conn:
+        airport = db.get_airport(conn, icao_up)
+    if not airport:
+        result = {"url": SOSA_HOME, "source": "fallback"}
+        await store.set_cache(cache_key, result, 24 * 3600)
+        return result
+
+    slug = _sosa_slug(airport.name)
+    code = (airport.iata or icao_up).lower()
+    candidate = f"https://www.saveourskiesalliance.org/{slug}--{code}.html" if slug and code else None
+    if candidate:
+        try:
+            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+                response = await client.head(candidate)
+                # SOSA serves 200 for real pages and (typically) a soft 404
+                # page wrapper for missing slugs — so trust only true 200.
+                if response.status_code == 200:
+                    result = {"url": candidate, "source": "verified-heuristic"}
+                    await store.set_cache(cache_key, result, 24 * 3600)
+                    return result
+        except httpx.HTTPError:
+            pass
+
+    result = {"url": SOSA_HOME, "source": "fallback"}
+    # Shorter TTL for negative results so we'll re-probe if SOSA adds the page.
+    await store.set_cache(cache_key, result, 6 * 3600)
+    return result
+
+
+@app.get("/aircraft/profile")
+async def aircraft_profile(
+    settings: Annotated[Settings, Depends(settings_dep)],
+    nNumber: str | None = None,
+    icaoHex: str | None = None,
+    callsign: str | None = None,
+):
+    """Resolve an aircraft profile from any combination of identifiers."""
+    if not any([nNumber, icaoHex, callsign]):
+        raise HTTPException(status_code=422, detail="Provide nNumber, icaoHex, or callsign")
+    from .registry import profile as registry_profile  # local import keeps startup lean
+
+    with db_session(settings.database_path) as conn:
+        return registry_profile.get_aircraft_profile(
+            conn,
+            n_number=nNumber,
+            icao_hex=icaoHex,
+            callsign=callsign,
+        )
+
+
+@app.get("/aircraft/search")
+async def aircraft_search(
+    nNumber: Annotated[str, Query(min_length=2, max_length=12)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    limit: int = 10,
+):
+    from .registry import normalize as registry_norm
+
+    normalized = registry_norm.normalize_n_number(nNumber) or nNumber.upper()
+    with db_session(settings.database_path) as conn:
+        return {"results": db.search_aircraft_registry(conn, normalized, min(50, max(1, limit)))}
+
+
+@app.get("/aircraft/{n_number}/airmen-lookup-link")
+async def aircraft_airmen_lookup(n_number: str):
+    """Return the airmen helper section for a registrant name.
+
+    Strictly a lookup helper: the response repeats the airmen disclaimer and
+    never claims pilot identity. UI must surface the disclaimer prominently.
+    """
+    from urllib.parse import urlencode
+
+    return {
+        "lookupAvailable": False,
+        "lookupUrl": "https://amsrvs.registry.faa.gov/airmeninquiry/",
+        "lookupLabel": "Open FAA Airmen Inquiry",
+        "instructions": (
+            "Use the FAA Airmen Inquiry page to search by the registrant's "
+            "name. Even a successful match does not identify the pilot of "
+            "any specific flight."
+        ),
+        "disclaimer": (
+            "Airmen records are name-based and do not prove who was flying "
+            "this aircraft during this event."
+        ),
+        "queryHelper": urlencode({"hint": n_number}),
+    }
+
+
+@app.post("/admin/aircraft-registry/import")
+async def admin_import_registry(
+    _: Annotated[dict, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    wait: bool = False,
+):
+    """Kick off (or run synchronously) an FAA aircraft registry import."""
+    from .registry import importer as registry_importer
+
+    if wait:
+        result = await registry_importer.import_faa_registry(settings.database_path)
+        return _import_result_to_dict(result)
+
+    asyncio.create_task(registry_importer.import_faa_registry(settings.database_path))
+    return {"status": "started", "wait": False}
+
+
+@app.get("/admin/aircraft-registry/import/status")
+async def admin_import_status(
+    _: Annotated[dict, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        latest = db.latest_registry_import(conn)
+        row_count = db.aircraft_registry_row_count(conn)
+    return {
+        "latest_import": latest,
+        "registry_row_count": row_count,
+    }
+
+
+def _import_result_to_dict(result) -> dict:
+    return {
+        "import_id": result.import_id,
+        "status": result.status,
+        "rows_imported": result.rows_imported,
+        "rows_skipped": result.rows_skipped,
+        "rows_invalid": result.rows_invalid,
+        "duration_seconds": result.duration_seconds,
+        "source_url": result.source_url,
+        "source_date": result.source_date,
+        "error": result.error,
+    }
+
+
+@app.get("/weather/wind")
+async def weather_wind(
+    airport_icao: Annotated[str, Query(min_length=3, max_length=8)],
+    store: Annotated[Store, Depends(store_dep)],
+    hours: Annotated[int, Query(ge=1, le=24)] = 1,
+):
+    """METAR-derived current + window-averaged wind for an airport.
+
+    Source: NOAA AviationWeather (free, key-less). Cached per (airport, hours)
+    for 5 minutes — well above the 20-60 min METAR update cadence.
+    """
+    from . import weather
+
+    return await weather.get_wind_summary(store, airport_icao, hours)
+
+
 @app.get("/airports/nearest")
 async def nearest_airport(
     lat: float,
@@ -865,6 +1098,51 @@ async def airports_search(
 ):
     with db_session(settings.database_path) as conn:
         return {"airports": db.search_airports(conn, q)}
+
+
+@app.get("/backfill_status")
+async def backfill_status(
+    airport_icao: Annotated[str, Query(min_length=3, max_length=8)],
+    store: Annotated[Store, Depends(store_dep)],
+):
+    """On-demand FlightAware backfill status for a single airport.
+
+    The frontend polls this while a freshly-selected airport is filling its
+    archive so it can show an ETA banner and offer the user a "use the
+    1h live window instead" shortcut.
+    """
+    icao = airport_icao.strip().upper()
+    record = await store.get_cache(f"fa_backfill_status:{icao}")
+    now = int(time.time())
+    if not isinstance(record, dict):
+        return {"running": False, "ever_started": False, "airport_icao": icao}
+    started_at = int(record.get("started_at") or 0)
+    estimated_total = int(record.get("estimated_total_seconds") or 60)
+    if record.get("running"):
+        elapsed = max(0, now - started_at)
+        eta = max(0, estimated_total - elapsed)
+        return {
+            "running": True,
+            "ever_started": True,
+            "airport_icao": icao,
+            "started_at": started_at,
+            "elapsed_seconds": elapsed,
+            "estimated_total_seconds": estimated_total,
+            "eta_seconds": eta,
+            "mode": record.get("mode"),
+            "source": record.get("source"),
+        }
+    return {
+        "running": False,
+        "ever_started": True,
+        "airport_icao": icao,
+        "started_at": started_at,
+        "completed_at": int(record.get("completed_at") or 0),
+        "samples_written": int(record.get("samples_written") or 0),
+        "mode": record.get("mode"),
+        "source": record.get("source"),
+        "error": bool(record.get("error", False)),
+    }
 
 
 @app.get("/scan")
