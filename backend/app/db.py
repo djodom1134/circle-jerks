@@ -421,6 +421,27 @@ def operation_from_event(event: dict) -> dict:
     }
 
 
+def upsert_operation(conn: sqlite3.Connection, op: dict) -> None:
+    """Insert an operation row, ignoring rows whose id already exists.
+
+    The event id is a stable sha256 hash of (type, icao24, airport, time-bucket),
+    so DO NOTHING gives cross-restart, cross-monitor idempotency without
+    clobbering enrichment columns (deviation/wind/origin) filled by later phases.
+    """
+    conn.execute(
+        """
+        INSERT INTO operations
+          (id, icao, icao24, callsign, registration, type, timestamp,
+           runway_id, runway_heading_deg, turn_direction, min_altitude_ft_agl)
+        VALUES
+          (:id, :icao, :icao24, :callsign, :registration, :type, :timestamp,
+           :runway_id, :runway_heading_deg, :turn_direction, :min_altitude_ft_agl)
+        ON CONFLICT(id) DO NOTHING
+        """,
+        op,
+    )
+
+
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
     row = conn.execute("SELECT * FROM airports WHERE icao = ?", (icao.upper(),)).fetchone()
     return row_to_airport(row) if row else None

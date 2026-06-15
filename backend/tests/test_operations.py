@@ -111,3 +111,27 @@ def test_operation_from_event_maps_touch_and_go_fields():
     assert op["runway_heading_deg"] == 290
     assert op["min_altitude_ft_agl"] == 35
     assert op["turn_direction"] is None
+
+
+def test_upsert_operation_is_idempotent(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    op = db.operation_from_event({
+        "id": "dup00000000000000001",
+        "type": "circle",
+        "icao24": "a4c1d8",
+        "callsign": "N4052F",
+        "timestamp": 1718464800,
+        "airport_icao": "KBJC",
+        "turn_direction": "left",
+    })
+    db.upsert_operation(conn, op)
+    db.upsert_operation(conn, op)  # second insert of same id must not duplicate
+    conn.commit()
+    rows = conn.execute("SELECT * FROM operations WHERE id = ?", (op["id"],)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["icao"] == "KBJC"
+    assert rows[0]["type"] == "circle"
+    assert rows[0]["turn_direction"] == "left"
+    assert rows[0]["created_at"] is not None
+    # enrichment columns default to NULL until later phases populate them
+    assert rows[0]["deviation_mean_nm"] is None
