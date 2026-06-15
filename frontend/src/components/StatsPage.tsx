@@ -51,14 +51,16 @@ export default function StatsPage() {
 
           <section className="stats-card">
             <h2>Operations over time</h2>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={data.ops_over_time.map((b) => ({ t: new Date(b.bucket * 1000).toLocaleDateString(), count: b.count }))}>
-                <XAxis dataKey="t" fontSize={11} />
-                <YAxis allowDecimals={false} fontSize={11} />
-                <Tooltip />
-                <Bar dataKey="count" fill="#1b3a6b" />
-              </BarChart>
-            </ResponsiveContainer>
+            {data.ops_over_time.length === 0 ? <p className="stats-empty">No operations in this window.</p> : (
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={data.ops_over_time.map((b) => ({ t: new Date(b.bucket * 1000).toLocaleDateString(), count: b.count }))}>
+                  <XAxis dataKey="t" fontSize={11} />
+                  <YAxis allowDecimals={false} fontSize={11} />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#1b3a6b" />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </section>
 
           <section className="stats-card">
@@ -88,8 +90,8 @@ export default function StatsPage() {
                 <table className="stats-table">
                   <thead><tr><th>Worst offenders</th><th>Mean deviation (nm)</th></tr></thead>
                   <tbody>
-                    {data.deviation.worst.map((w) => (
-                      <tr key={w.icao24}><td>{w.callsign ?? w.icao24}</td><td>{w.deviation_mean_nm}</td></tr>
+                    {data.deviation.worst.map((w, i) => (
+                      <tr key={`${w.icao24}-${i}`}><td>{w.callsign ?? w.icao24}</td><td>{w.deviation_mean_nm}</td></tr>
                     ))}
                   </tbody>
                 </table>
