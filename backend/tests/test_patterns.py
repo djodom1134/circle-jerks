@@ -5,7 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db
+from app import db, patterns
 from app.geo import Point, distance_nm, destination_point
 from app.main import app
 from app.settings import get_settings
@@ -50,3 +50,37 @@ def test_runway_patterns_table_and_get_runway(tmp_path):
     assert rwy["heading_deg"] == 120
     assert rwy["length_ft"] == 9000
     assert db.get_runway(conn, "KBJC", "ZZ") is None
+
+
+def test_generate_template_pattern_within_bounds(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    runway = db.get_runway(conn, "KBJC", "12L")
+    geom = patterns.generate_template_pattern(runway, side="left")
+    assert geom["closed"] is True
+    assert geom["spline"] == "catmull-rom"
+    assert len(geom["points"]) == 5
+    center = Point(39.9088, -105.1172)
+    assert all(distance_nm(Point(p["lat"], p["lon"]), center) < 10 for p in geom["points"])
+    # first control point is the runway threshold
+    assert abs(geom["points"][0]["lat"] - runway["lat_threshold"]) < 1e-9
+    assert abs(geom["points"][0]["lon"] - runway["lon_threshold"]) < 1e-9
+
+
+def test_generate_template_rejects_bad_side(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    runway = db.get_runway(conn, "KBJC", "12L")
+    with pytest.raises(ValueError):
+        patterns.generate_template_pattern(runway, side="sideways")
+
+
+def test_validate_pattern_geometry():
+    class _AP:
+        lat = 39.9088
+        lon = -105.1172
+    ap = _AP()
+    assert patterns.validate_pattern_geometry([{"lat": 39.91, "lon": -105.12}], ap) is None
+    assert patterns.validate_pattern_geometry([], ap) is not None
+    too_far = [{"lat": 41.5, "lon": -105.12}]  # ~90 nm north
+    assert patterns.validate_pattern_geometry(too_far, ap) is not None
+    too_many = [{"lat": 39.91, "lon": -105.12}] * 51
+    assert patterns.validate_pattern_geometry(too_many, ap) is not None
