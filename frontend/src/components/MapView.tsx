@@ -13,7 +13,8 @@ import { fromLonLat, toLonLat } from "ol/proj";
 import OSM from "ol/source/OSM";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
-import type { Airport, Offender, ScanResponse, TrackSample } from "../lib/api";
+import { directionArrows, projectedPath } from "../lib/patternGeometry";
+import type { Airport, Offender, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
 import { smoothSegment } from "../lib/spline";
 
 // Aircraft climbing under full power are MUCH louder than the same aircraft
@@ -85,6 +86,7 @@ interface Props {
   autoZoom?: boolean;
   showHeatmap?: boolean;
   onPickLocation: (lat: number, lon: number) => void;
+  patterns?: RunwayPattern[] | null;
 }
 
 // dB → [r, g, b] for additive canvas compositing.
@@ -450,6 +452,23 @@ function styleForFeature(feature: Feature) {
     });
   }
 
+  if (kind === "pattern") {
+    return new Style({
+      stroke: new Stroke({ color: "#1b3a6b", width: 2.5 }),
+    });
+  }
+  if (kind === "pattern_arrow") {
+    return new Style({
+      image: new RegularShape({
+        points: 3,
+        radius: 7,
+        rotation: (feature.get("rotation") as number) ?? 0,
+        fill: new Fill({ color: "#d64b2c" }),
+        stroke: new Stroke({ color: "#ffffff", width: 1 }),
+      }),
+    });
+  }
+
   const colors: Record<string, string> = {
     airport: "#1b3a6b",
     home: "#2ea84c"
@@ -470,11 +489,12 @@ function styleForFeature(feature: Feature) {
   });
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
   const aircraftSourceRef = useRef<VectorSource | null>(null);
+  const patternSourceRef = useRef<VectorSource | null>(null);
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -598,9 +618,15 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     }
     sourceRef.current = new VectorSource();
     aircraftSourceRef.current = new VectorSource();
+    patternSourceRef.current = new VectorSource();
     const vectorLayer = new VectorLayer({
       source: sourceRef.current,
       style: (feature) => styleForFeature(feature as Feature)
+    });
+    const patternLayer = new VectorLayer({
+      source: patternSourceRef.current,
+      style: (feature) => styleForFeature(feature as Feature),
+      zIndex: 5,
     });
     const aircraftLayer = new VectorLayer({
       source: aircraftSourceRef.current,
@@ -614,6 +640,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       layers: [
         new TileLayer({ source: new OSM({ crossOrigin: "anonymous" }) }),
         vectorLayer,
+        patternLayer,
         aircraftLayer
       ],
       view: new View({
@@ -669,6 +696,26 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     source.clear();
     source.addFeatures(features);
   }, [features]);
+
+  useEffect(() => {
+    const source = patternSourceRef.current;
+    if (!mapReady || !source) return;
+    source.clear();
+    for (const pattern of patterns ?? []) {
+      const path = projectedPath(pattern.geometry.points, pattern.geometry.closed);
+      if (path.length < 2) continue;
+      const line = new Feature(new LineString(path));
+      line.set("kind", "pattern");
+      line.set("runwayId", pattern.runway_id);
+      source.addFeature(line);
+      for (const arrow of directionArrows(path, 3)) {
+        const marker = new Feature(new Point(arrow.coord));
+        marker.set("kind", "pattern_arrow");
+        marker.set("rotation", arrow.rotation);
+        source.addFeature(marker);
+      }
+    }
+  }, [patterns, mapReady]);
 
   // Deferred Heatmap layer init: putting HeatmapLayer in the initial
   // new Map({ layers: [...] }) array silently breaks OL 10.9's renderer and
