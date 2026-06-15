@@ -573,6 +573,56 @@ def get_runway(conn: sqlite3.Connection, icao: str, runway_id: str) -> dict | No
     return dict(row) if row else None
 
 
+def save_runway_pattern(
+    conn: sqlite3.Connection,
+    icao: str,
+    runway_id: str,
+    geometry_json: str,
+    name: str | None = None,
+    editor_visitor_id: str | None = None,
+    editor_ip: str | None = None,
+    change_note: str | None = None,
+) -> dict:
+    """Append a new pattern version and make it the current one."""
+    icao = icao.upper()
+    row = conn.execute(
+        "SELECT MAX(version) AS v FROM runway_patterns WHERE icao = ? AND runway_id = ?",
+        (icao, runway_id),
+    ).fetchone()
+    next_version = (row["v"] or 0) + 1
+    conn.execute(
+        "UPDATE runway_patterns SET is_current = 0 WHERE icao = ? AND runway_id = ?",
+        (icao, runway_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO runway_patterns
+          (icao, runway_id, geometry_json, name, version, is_current,
+           editor_visitor_id, editor_ip, change_note)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+        """,
+        (icao, runway_id, geometry_json, name, next_version,
+         editor_visitor_id, editor_ip, change_note),
+    )
+    return get_current_pattern(conn, icao, runway_id)
+
+
+def get_current_pattern(conn: sqlite3.Connection, icao: str, runway_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM runway_patterns WHERE icao = ? AND runway_id = ? AND is_current = 1",
+        (icao.upper(), runway_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def current_patterns_for_airport(conn: sqlite3.Connection, icao: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM runway_patterns WHERE icao = ? AND is_current = 1 ORDER BY runway_id",
+        (icao.upper(),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def complaint_form(conn: sqlite3.Connection, icao: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM complaint_forms WHERE icao = ?",

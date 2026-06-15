@@ -84,3 +84,33 @@ def test_validate_pattern_geometry():
     assert patterns.validate_pattern_geometry(too_far, ap) is not None
     too_many = [{"lat": 39.91, "lon": -105.12}] * 51
     assert patterns.validate_pattern_geometry(too_many, ap) is not None
+
+
+def test_save_and_get_current_pattern_versions(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    g1 = json.dumps({"points": [{"lat": 39.92, "lon": -105.13}], "closed": True, "spline": "catmull-rom"})
+    g2 = json.dumps({"points": [{"lat": 39.93, "lon": -105.14}], "closed": True, "spline": "catmull-rom"})
+
+    saved1 = db.save_runway_pattern(conn, "KBJC", "12L", g1, name="v1", editor_visitor_id="visitor-1", editor_ip="1.2.3.4")
+    assert saved1["version"] == 1
+    assert saved1["is_current"] == 1
+
+    saved2 = db.save_runway_pattern(conn, "KBJC", "12L", g2, name="v2", editor_visitor_id="visitor-1", editor_ip="1.2.3.4")
+    assert saved2["version"] == 2
+
+    current = db.get_current_pattern(conn, "KBJC", "12L")
+    assert current["version"] == 2
+    assert json.loads(current["geometry_json"])["points"][0]["lat"] == 39.93
+
+    # exactly one current row per runway end
+    n_current = conn.execute(
+        "SELECT COUNT(*) AS c FROM runway_patterns WHERE icao='KBJC' AND runway_id='12L' AND is_current=1"
+    ).fetchone()["c"]
+    assert n_current == 1
+
+    # a different runway end is independent
+    assert db.get_current_pattern(conn, "KBJC", "30R") is None
+
+    db.save_runway_pattern(conn, "KBJC", "30R", g1)
+    listed = db.current_patterns_for_airport(conn, "KBJC")
+    assert {p["runway_id"] for p in listed} == {"12L", "30R"}
