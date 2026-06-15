@@ -7,6 +7,7 @@ import OnboardingTour, { shouldShowOnboarding } from "./components/OnboardingTou
 import PatternEditorPanel from "./components/PatternEditorPanel";
 import WindIndicator from "./components/WindIndicator";
 import BackfillBanner from "./components/BackfillBanner";
+import FlowBadge from "./components/FlowBadge";
 import buyMeCoffeeQrUrl from "./assets/buy-me-a-coffee-qr.png";
 import logoUrl from "./assets/circle-jerks-logo.png";
 import {
@@ -498,6 +499,7 @@ export default function App() {
             editSeedKey={editSeedKey}
             onEditingPointsChange={setEditingPoints}
           />
+          <FlowBadge airportIcao={airport?.icao} />
           {patternEditing && airport?.icao && (
             <PatternEditorPanel
               airportIcao={airport.icao}
