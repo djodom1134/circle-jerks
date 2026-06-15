@@ -623,6 +623,61 @@ def current_patterns_for_airport(conn: sqlite3.Connection, icao: str) -> list[di
     return [dict(row) for row in rows]
 
 
+def list_pattern_versions(conn: sqlite3.Connection, icao: str, runway_id: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, version, name, is_current, locked, editor_visitor_id, change_note, created_at
+        FROM runway_patterns
+        WHERE icao = ? AND runway_id = ?
+        ORDER BY version DESC
+        """,
+        (icao.upper(), runway_id),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def revert_pattern(
+    conn: sqlite3.Connection,
+    icao: str,
+    runway_id: str,
+    version: int,
+    editor_visitor_id: str | None = None,
+    editor_ip: str | None = None,
+) -> dict | None:
+    """Clone an earlier version's geometry into a new current version."""
+    src = conn.execute(
+        "SELECT geometry_json, name FROM runway_patterns WHERE icao = ? AND runway_id = ? AND version = ?",
+        (icao.upper(), runway_id, version),
+    ).fetchone()
+    if src is None:
+        return None
+    return save_runway_pattern(
+        conn, icao, runway_id, src["geometry_json"],
+        name=src["name"],
+        editor_visitor_id=editor_visitor_id,
+        editor_ip=editor_ip,
+        change_note=f"revert to v{version}",
+    )
+
+
+def count_recent_pattern_edits(
+    conn: sqlite3.Connection,
+    editor_visitor_id: str | None,
+    editor_ip: str | None,
+    since_ts: int,
+) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM runway_patterns
+        WHERE created_at >= ?
+          AND ((editor_visitor_id IS NOT NULL AND editor_visitor_id = ?)
+               OR (editor_ip IS NOT NULL AND editor_ip = ?))
+        """,
+        (since_ts, editor_visitor_id, editor_ip),
+    ).fetchone()
+    return row["c"]
+
+
 def complaint_form(conn: sqlite3.Connection, icao: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM complaint_forms WHERE icao = ?",

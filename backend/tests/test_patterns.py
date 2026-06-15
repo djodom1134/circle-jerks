@@ -114,3 +114,28 @@ def test_save_and_get_current_pattern_versions(tmp_path):
     db.save_runway_pattern(conn, "KBJC", "30R", g1)
     listed = db.current_patterns_for_airport(conn, "KBJC")
     assert {p["runway_id"] for p in listed} == {"12L", "30R"}
+
+
+def test_pattern_history_revert_and_rate_count(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    g1 = json.dumps({"points": [{"lat": 39.92, "lon": -105.13}], "closed": True, "spline": "catmull-rom"})
+    g2 = json.dumps({"points": [{"lat": 39.93, "lon": -105.14}], "closed": True, "spline": "catmull-rom"})
+    db.save_runway_pattern(conn, "KBJC", "12L", g1, name="v1", editor_visitor_id="visitor-1", editor_ip="1.1.1.1")
+    db.save_runway_pattern(conn, "KBJC", "12L", g2, name="v2", editor_visitor_id="visitor-1", editor_ip="1.1.1.1")
+
+    versions = db.list_pattern_versions(conn, "KBJC", "12L")
+    assert [v["version"] for v in versions] == [2, 1]  # newest first
+
+    reverted = db.revert_pattern(conn, "KBJC", "12L", 1, editor_visitor_id="visitor-2", editor_ip="2.2.2.2")
+    assert reverted["version"] == 3
+    assert json.loads(reverted["geometry_json"])["points"][0]["lat"] == 39.92  # v1 geometry
+    assert "revert to v1" in reverted["change_note"]
+    assert db.revert_pattern(conn, "KBJC", "12L", 99) is None  # missing version
+
+    # rate count: 3 edits by visitor-1/1.1.1.1 so far (v1, v2, and revert used visitor-2)
+    count_v1 = db.count_recent_pattern_edits(conn, "visitor-1", "1.1.1.1", 0)
+    assert count_v1 == 2
+    count_v2 = db.count_recent_pattern_edits(conn, "visitor-2", "2.2.2.2", 0)
+    assert count_v2 == 1
+    # window excludes old edits
+    assert db.count_recent_pattern_edits(conn, "visitor-1", "1.1.1.1", 9_999_999_999) == 0
