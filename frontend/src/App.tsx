@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, BarChart3, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
+import StatsPage from "./components/StatsPage";
 import MapView from "./components/MapView";
 import OnboardingTour, { shouldShowOnboarding } from "./components/OnboardingTour";
 import PatternEditorPanel from "./components/PatternEditorPanel";
@@ -84,6 +85,7 @@ function storedLocation(preferences: StoredPreferences) {
 export default function App() {
   if (window.location.pathname.startsWith("/admin")) return <AdminDashboard />;
   if (window.location.pathname.startsWith("/about")) return <AboutPage />;
+  if (window.location.pathname.startsWith("/stats")) return <StatsPage />;
 
   const [preferences, setPreferences] = useState<StoredPreferences>(() => readPreferences());
   const [config, setConfig] = useState<ConfigResponse | null>(null);
@@ -477,6 +479,14 @@ export default function App() {
               <MapPin size={16} />
             </button>
             <AtcListenButton airportIcao={airport?.icao} />
+            <a
+              className="map-icon-toggle"
+              title="Airport stats"
+              aria-label="Airport stats"
+              href={`/stats?airport=${encodeURIComponent(airport?.icao ?? "KBJC")}`}
+            >
+              <BarChart3 size={16} />
+            </a>
           </div>
           <WindIndicator airportIcao={airport?.icao ?? null} windowCode={windowCode} />
           <BackfillBanner
