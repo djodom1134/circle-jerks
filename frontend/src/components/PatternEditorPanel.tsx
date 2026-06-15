@@ -50,13 +50,17 @@ export default function PatternEditorPanel({
 
   async function handleTemplate() {
     if (!runwayId) return;
-    const r = await getPatternTemplate(airportIcao, runwayId, side);
-    onSeedPoints(r.geometry.points);
-    setStatus("Template loaded — drag points to adjust.");
+    try {
+      const r = await getPatternTemplate(airportIcao, runwayId, side);
+      onSeedPoints(r.geometry.points);
+      setStatus("Template loaded — drag points to adjust.");
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "Failed to load template.");
+    }
   }
 
   async function handleSave() {
-    if (!runwayId || points.length < 1) return;
+    if (!runwayId || points.length < 2) return;
     setStatus("Saving…");
     try {
       await savePattern(airportIcao, runwayId, { points, closed: true, visitor_id: getVisitorId() });
@@ -70,11 +74,15 @@ export default function PatternEditorPanel({
 
   async function handleRevert(version: number) {
     if (!runwayId) return;
-    const r = await revertPattern(airportIcao, runwayId, version, getVisitorId());
-    if (r.pattern) onSeedPoints(r.pattern.geometry.points);
-    setStatus(`Reverted to v${version}.`);
-    refreshHistory();
-    onSaved();
+    try {
+      const r = await revertPattern(airportIcao, runwayId, version, getVisitorId());
+      if (r.pattern) onSeedPoints(r.pattern.geometry.points);
+      setStatus(`Reverted to v${version}.`);
+      refreshHistory();
+      onSaved();
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "Revert failed.");
+    }
   }
 
   return (
@@ -106,7 +114,7 @@ export default function PatternEditorPanel({
       <div className="pattern-editor-meta">{points.length} control point(s). Click the map to add, drag to move.</div>
 
       <div className="pattern-editor-row">
-        <button className="pattern-editor-btn primary" onClick={handleSave} disabled={!runwayId || points.length < 1}>Save pattern</button>
+        <button className="pattern-editor-btn primary" onClick={handleSave} disabled={!runwayId || points.length < 2}>Save pattern</button>
       </div>
 
       {status && <div className="pattern-editor-status">{status}</div>}
