@@ -400,6 +400,27 @@ def row_to_airport(row: sqlite3.Row) -> Airport:
     )
 
 
+def operation_from_event(event: dict) -> dict:
+    """Map a detector event dict to an `operations` row dict.
+
+    Only the core (always-known) columns are populated here. Deviation, wind,
+    and origin columns are filled in by later phases via targeted UPDATEs.
+    """
+    return {
+        "id": event["id"],
+        "icao": event.get("airport_icao"),
+        "icao24": event.get("icao24"),
+        "callsign": event.get("callsign"),
+        "registration": event.get("registration"),
+        "type": event.get("type"),
+        "timestamp": int(event["timestamp"]),
+        "runway_id": event.get("runway_id"),
+        "runway_heading_deg": event.get("runway_heading_deg"),
+        "turn_direction": event.get("turn_direction"),
+        "min_altitude_ft_agl": event.get("min_altitude_ft_agl"),
+    }
+
+
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
     row = conn.execute("SELECT * FROM airports WHERE icao = ?", (icao.upper(),)).fetchone()
     return row_to_airport(row) if row else None

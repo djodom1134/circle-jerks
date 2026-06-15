@@ -68,3 +68,46 @@ def test_operations_table_exists(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(operations)").fetchall()}
     assert {"id", "icao", "icao24", "type", "timestamp", "deviation_mean_nm",
             "wind_from_deg", "origin_airport_icao", "flight_school"} <= cols
+
+
+def test_operation_from_event_maps_circle_fields():
+    event = {
+        "id": "deadbeefcafe00000001",
+        "type": "circle",
+        "icao24": "a4c1d8",
+        "callsign": "N4052F",
+        "timestamp": 1718464800,
+        "airport_icao": "KBJC",
+        "turn_direction": "left",
+    }
+    op = db.operation_from_event(event)
+    assert op["id"] == "deadbeefcafe00000001"
+    assert op["icao"] == "KBJC"
+    assert op["icao24"] == "a4c1d8"
+    assert op["callsign"] == "N4052F"
+    assert op["type"] == "circle"
+    assert op["timestamp"] == 1718464800
+    assert op["turn_direction"] == "left"
+    # runway/altitude absent on this circle event → None
+    assert op["runway_id"] is None
+    assert op["min_altitude_ft_agl"] is None
+
+
+def test_operation_from_event_maps_touch_and_go_fields():
+    event = {
+        "id": "deadbeefcafe00000002",
+        "type": "touch_and_go",
+        "icao24": "a4c1d8",
+        "callsign": "N4052F",
+        "timestamp": 1718464900,
+        "airport_icao": "KLMO",
+        "runway_id": "29",
+        "runway_heading_deg": 290,
+        "min_altitude_ft_agl": 35,
+    }
+    op = db.operation_from_event(event)
+    assert op["type"] == "touch_and_go"
+    assert op["runway_id"] == "29"
+    assert op["runway_heading_deg"] == 290
+    assert op["min_altitude_ft_agl"] == 35
+    assert op["turn_direction"] is None
