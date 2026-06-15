@@ -230,3 +230,16 @@ def test_pattern_revert_is_rate_limited(tmp_path, monkeypatch):
         assert client.put("/runways/KBJC/12L/pattern", json=body).status_code == 200
         revert = client.post("/runways/KBJC/12L/pattern/revert", json={"version": 1, "visitor_id": "visitor-123456"})
         assert revert.status_code == 429
+
+
+def test_airport_runways_endpoint(tmp_path, monkeypatch):
+    with api_client(tmp_path, monkeypatch) as client:
+        resp = client.get("/airports/KBJC/runways")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["airport_icao"] == "KBJC"
+        ids = {r["runway_id"] for r in data["runways"]}
+        assert {"12L", "30R"} <= ids
+        first = next(r for r in data["runways"] if r["runway_id"] == "12L")
+        assert first["heading_deg"] == 120
+        assert client.get("/airports/ZZZZ/runways").json()["runways"] == []

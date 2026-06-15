@@ -1335,6 +1335,16 @@ async def complaint_form(
     }
 
 
+@app.get("/airports/{icao}/runways")
+async def get_airport_runways(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        runways = db.runways_for_airport(conn, icao)
+    return {"airport_icao": icao.upper(), "runways": runways}
+
+
 @app.get("/airports/{icao}/patterns")
 async def get_airport_patterns(
     icao: str,
