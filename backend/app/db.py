@@ -232,6 +232,38 @@ CREATE TABLE IF NOT EXISTS aircraft_registry_imports (
   error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_aircraft_registry_imports_started ON aircraft_registry_imports(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS operations (
+  id TEXT PRIMARY KEY,
+  icao TEXT NOT NULL,
+  icao24 TEXT,
+  callsign TEXT,
+  registration TEXT,
+  type TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  runway_id TEXT,
+  runway_heading_deg REAL,
+  turn_direction TEXT,
+  min_altitude_ft_agl INTEGER,
+  matched_pattern_id INTEGER,
+  deviation_mean_nm REAL,
+  deviation_peak_nm REAL,
+  time_off_pattern_s INTEGER,
+  time_total_s INTEGER,
+  pct_off_pattern REAL,
+  wind_from_deg INTEGER,
+  wind_speed_kt REAL,
+  headwind_kt REAL,
+  origin_airport_icao TEXT,
+  origin_label TEXT,
+  operator TEXT,
+  flight_school TEXT,
+  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+  FOREIGN KEY (icao) REFERENCES airports(icao)
+);
+CREATE INDEX IF NOT EXISTS idx_operations_icao_ts ON operations(icao, timestamp);
+CREATE INDEX IF NOT EXISTS idx_operations_icao24 ON operations(icao24);
+CREATE INDEX IF NOT EXISTS idx_operations_type ON operations(type);
 """
 
 
