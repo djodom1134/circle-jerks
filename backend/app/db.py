@@ -462,6 +462,21 @@ def read_operations(
     return conn.execute(query, args).fetchall()
 
 
+def persist_events(conn: sqlite3.Connection, events) -> int:
+    """Upsert each detector event as an operation row.
+
+    Returns the number of events processed (events missing an id or airport are
+    skipped). Idempotency is enforced by `upsert_operation`'s ON CONFLICT.
+    """
+    processed = 0
+    for event in events:
+        if not event.get("id") or not event.get("airport_icao"):
+            continue
+        upsert_operation(conn, operation_from_event(event))
+        processed += 1
+    return processed
+
+
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
     row = conn.execute("SELECT * FROM airports WHERE icao = ?", (icao.upper(),)).fetchone()
     return row_to_airport(row) if row else None

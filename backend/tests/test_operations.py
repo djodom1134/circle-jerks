@@ -163,3 +163,32 @@ def test_read_operations_filters_by_window_and_type(tmp_path):
     # other airport isolated
     rows = db.read_operations(conn, "KLMO", 0, 10000)
     assert [r["id"] for r in rows] == ["op4"]
+
+
+def test_persist_events_writes_and_dedupes(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    events = [
+        {"id": "e1", "type": "circle", "icao24": "a", "callsign": "N1",
+         "timestamp": 1000, "airport_icao": "KBJC"},
+        {"id": "e2", "type": "touch_and_go", "icao24": "a", "callsign": "N1",
+         "timestamp": 1100, "airport_icao": "KBJC", "runway_id": "12L"},
+        {"id": "e1", "type": "circle", "icao24": "a", "callsign": "N1",
+         "timestamp": 1000, "airport_icao": "KBJC"},  # duplicate id
+    ]
+    processed = db.persist_events(conn, events)
+    conn.commit()
+    assert processed == 3  # all three considered
+    rows = db.read_operations(conn, "KBJC", 0, 10000)
+    assert len(rows) == 2  # but only two distinct rows persisted
+
+
+def test_persist_events_skips_events_without_id_or_airport(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    events = [
+        {"type": "circle", "icao24": "a", "timestamp": 1000, "airport_icao": "KBJC"},  # no id
+        {"id": "x", "type": "circle", "icao24": "a", "timestamp": 1000},               # no airport
+    ]
+    processed = db.persist_events(conn, events)
+    conn.commit()
+    assert processed == 0
+    assert db.read_operations(conn, "KBJC", 0, 10000) == []
