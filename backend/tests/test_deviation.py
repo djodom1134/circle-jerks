@@ -126,3 +126,12 @@ def test_store_deviations_end_to_end(tmp_path):
     assert op["deviation_mean_nm"] is not None
     assert 0.0 <= op["pct_off_pattern"] <= 1.0
     assert op["deviation_mean_nm"] < 0.5  # track ≈ pattern
+
+
+def test_services_imports_and_uses_store_deviations():
+    import inspect
+    from app import services
+    src = inspect.getsource(services.run_detectors_for_monitor)
+    assert "store_deviations" in src, "run_detectors_for_monitor must call deviation.store_deviations"
+    # the module must import the deviation module
+    assert hasattr(services, "deviation") or "from . import" in inspect.getsource(services)

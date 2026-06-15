@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import adsbdb, archive, db
+from . import adsbdb, archive, db, deviation
 from .db import Airport
 from .detectors import closest_over_user_rows, detect_events, detect_events_over_period, event_counts, pass_geometry_key
 from .domain import ScanParams, hour_label, local_time_label, location_hash, monitor_hash
@@ -353,9 +353,11 @@ async def run_detectors_for_monitor(
     # the whole events set on every call, which was O(events²) per scan.
     existing_ids = await store.existing_event_ids(monitor["hash"])
     new_events: list[dict] = []
+    tracks_by_icao24: dict[str, list[dict]] = {}
     for icao24, track in zip(icao24s, tracks):
         if not track_intersects_bbox(track, tuple(monitor["bbox"])):
             continue
+        tracks_by_icao24[icao24] = track
         events = (
             detect_events_over_period(track, airport, runways, params, start_ts, end_ts)
             if start_ts is not None and end_ts is not None
@@ -371,6 +373,9 @@ async def run_detectors_for_monitor(
     # history beyond the ephemeral Redis (~4h) + archive (~24h) windows.
     if new_events:
         db.persist_events(conn, new_events)
+        # Quantify how far each circling aircraft strays from the drawn VNAP
+        # pattern (no-op when this airport has no pattern yet).
+        deviation.store_deviations(conn, airport.icao, new_events, tracks_by_icao24)
     return written
 
 
