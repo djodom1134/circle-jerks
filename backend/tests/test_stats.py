@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from app import db
+
+
+def seeded_conn(path):
+    conn = db.connect(str(path))
+    conn.executescript(db.SCHEMA)
+    db.seed_db(conn)
+    conn.commit()
+    return conn
+
+
+def _op(conn, oid, type_, ts, icao24="a1", headwind=None, dev=None, time_off=None, runway_id=None):
+    db.upsert_operation(conn, db.operation_from_event({
+        "id": oid, "type": type_, "icao24": icao24, "callsign": icao24.upper(),
+        "timestamp": ts, "airport_icao": "KBJC", "runway_id": runway_id,
+    }))
+    if headwind is not None or dev is not None:
+        conn.execute(
+            "UPDATE operations SET headwind_kt=?, deviation_mean_nm=?, time_off_pattern_s=? WHERE id=?",
+            (headwind, dev, time_off, oid),
+        )
+
+
+def test_airport_stats(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    _op(conn, "o1", "circle", 1000, "a1", headwind=5.0, dev=0.4, time_off=60)
+    _op(conn, "o2", "circle", 2000, "a2", headwind=-3.0, dev=1.2, time_off=120)
+    _op(conn, "o3", "touch_and_go", 3000, "a1", runway_id="30R")
+    _op(conn, "o4", "pass_over_user", 4000, "a3")
+    db.insert_runway_change(conn, "KBJC", "12L", "30R", 3000,
+                            {"icao24": "a1", "callsign": "A1", "registration": "A1", "id": "o3"}, 300, 8.0, 1)
+    db.aircraft_report_counts if False else None  # noqa
+    conn.execute(
+        "INSERT INTO aircraft_report_counts (icao24, callsign, registration, report_count, first_reported_at, last_reported_at) "
+        "VALUES ('a1','A1','A1',7,1000,3000)"
+    )
+    conn.commit()
+
+    stats = db.airport_stats(conn, "KBJC", 0, 10_000, bucket_seconds=86400, top=10)
+
+    assert stats["counters"]["circles"] == 2
+    assert stats["counters"]["touch_and_gos"] == 1
+    assert stats["counters"]["passes"] == 1
+    assert stats["counters"]["unique_aircraft"] == 3
+    assert stats["counters"]["runway_changes"] == 1
+
+    assert sum(b["count"] for b in stats["ops_over_time"]) == 4
+
+    assert stats["wind"]["into_headwind_ops"] == 1   # o1 headwind +5
+    assert stats["wind"]["downwind_ops"] == 1        # o2 headwind -3
+    assert stats["wind"]["no_wind_data_ops"] == 2    # o3, o4 NULL
+
+    assert stats["deviation"]["scored_ops"] == 2
+    assert abs(stats["deviation"]["avg_mean_nm"] - 0.8) < 1e-6
+    assert stats["deviation"]["max_nm"] == 1.2
+    assert stats["deviation"]["total_time_off_s"] == 180
+    assert stats["deviation"]["worst"][0]["icao24"] == "a2"
+
+    assert stats["cowboys"][0]["icao24"] == "a1" and stats["cowboys"][0]["changes"] == 1
+    assert stats["repeat_offenders"][0]["icao24"] == "a1"
+    assert isinstance(stats["flight_schools"], list)

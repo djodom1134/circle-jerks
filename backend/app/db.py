@@ -618,6 +618,113 @@ def recent_runway_changes(conn: sqlite3.Connection, icao: str, limit: int = 20) 
     return [dict(row) for row in rows]
 
 
+def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: int,
+                  bucket_seconds: int = 86400, top: int = 10) -> dict:
+    icao = icao.upper()
+    win = (icao, start_ts, end_ts)
+
+    type_counts = {row["type"]: row["n"] for row in conn.execute(
+        "SELECT type, COUNT(*) AS n FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? GROUP BY type",
+        win,
+    ).fetchall()}
+    unique_aircraft = conn.execute(
+        "SELECT COUNT(DISTINCT icao24) AS n FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ?", win,
+    ).fetchone()["n"]
+    change_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM runway_changes WHERE icao=? AND changed_at BETWEEN ? AND ?", win,
+    ).fetchone()["n"]
+
+    counters = {
+        "circles": type_counts.get("circle", 0),
+        "touch_and_gos": type_counts.get("touch_and_go", 0),
+        "low_approaches": type_counts.get("low_approach", 0),
+        "passes": type_counts.get("pass_over_user", 0),
+        "unique_aircraft": unique_aircraft,
+        "runway_changes": change_count,
+    }
+
+    bucket = max(1, int(bucket_seconds))
+    ops_over_time = [
+        {"bucket": row["bucket"], "count": row["n"]}
+        for row in conn.execute(
+            f"SELECT (timestamp/{bucket})*{bucket} AS bucket, COUNT(*) AS n "
+            "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? GROUP BY bucket ORDER BY bucket",
+            win,
+        ).fetchall()
+    ]
+
+    wind_row = conn.execute(
+        "SELECT "
+        "SUM(CASE WHEN headwind_kt > 0 THEN 1 ELSE 0 END) AS into_hw, "
+        "SUM(CASE WHEN headwind_kt <= 0 THEN 1 ELSE 0 END) AS downwind, "
+        "SUM(CASE WHEN headwind_kt IS NULL THEN 1 ELSE 0 END) AS nodata "
+        "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ?", win,
+    ).fetchone()
+    wind = {
+        "into_headwind_ops": wind_row["into_hw"] or 0,
+        "downwind_ops": wind_row["downwind"] or 0,
+        "no_wind_data_ops": wind_row["nodata"] or 0,
+    }
+
+    dev_row = conn.execute(
+        "SELECT AVG(deviation_mean_nm) AS avg_nm, MAX(deviation_mean_nm) AS max_nm, "
+        "SUM(time_off_pattern_s) AS total_off, COUNT(*) AS scored "
+        "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? AND deviation_mean_nm IS NOT NULL", win,
+    ).fetchone()
+    worst = [dict(r) for r in conn.execute(
+        "SELECT icao24, callsign, deviation_mean_nm FROM operations "
+        "WHERE icao=? AND timestamp BETWEEN ? AND ? AND deviation_mean_nm IS NOT NULL "
+        "ORDER BY deviation_mean_nm DESC LIMIT ?", (*win, top),
+    ).fetchall()]
+    deviation = {
+        "scored_ops": dev_row["scored"] or 0,
+        "avg_mean_nm": round(dev_row["avg_nm"], 3) if dev_row["avg_nm"] is not None else None,
+        "max_nm": dev_row["max_nm"],
+        "total_time_off_s": dev_row["total_off"] or 0,
+        "worst": worst,
+    }
+
+    cowboys = [
+        {"icao24": r["cowboy_icao24"], "callsign": r["cowboy_callsign"], "changes": r["n"]}
+        for r in conn.execute(
+            "SELECT cowboy_icao24, cowboy_callsign, COUNT(*) AS n FROM runway_changes "
+            "WHERE icao=? AND changed_at BETWEEN ? AND ? AND cowboy_icao24 IS NOT NULL "
+            "GROUP BY cowboy_icao24 ORDER BY n DESC LIMIT ?", (*win, top),
+        ).fetchall()
+    ]
+    recent_changes = [dict(r) for r in conn.execute(
+        "SELECT * FROM runway_changes WHERE icao=? AND changed_at BETWEEN ? AND ? "
+        "ORDER BY changed_at DESC LIMIT ?", (*win, top),
+    ).fetchall()]
+
+    repeat_offenders = [dict(r) for r in conn.execute(
+        "SELECT icao24, callsign, registration, report_count FROM aircraft_report_counts "
+        "ORDER BY report_count DESC LIMIT ?", (top,),
+    ).fetchall()]
+
+    # Best-effort: link ops to the FAA registry by ICAO hex for an operator/owner breakdown.
+    flight_schools = [
+        {"label": r["label"], "count": r["n"]}
+        for r in conn.execute(
+            "SELECT reg.registrant_name AS label, COUNT(DISTINCT o.icao24) AS n "
+            "FROM operations o JOIN aircraft_registry reg ON lower(reg.icao_hex) = o.icao24 "
+            "WHERE o.icao=? AND o.timestamp BETWEEN ? AND ? AND reg.registrant_name IS NOT NULL "
+            "GROUP BY reg.registrant_name ORDER BY n DESC LIMIT ?", (*win, top),
+        ).fetchall()
+    ]
+
+    return {
+        "counters": counters,
+        "ops_over_time": ops_over_time,
+        "wind": wind,
+        "deviation": deviation,
+        "cowboys": cowboys,
+        "recent_changes": recent_changes,
+        "repeat_offenders": repeat_offenders,
+        "flight_schools": flight_schools,
+    }
+
+
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
     row = conn.execute("SELECT * FROM airports WHERE icao = ?", (icao.upper(),)).fetchone()
     return row_to_airport(row) if row else None
