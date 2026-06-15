@@ -1,0 +1,138 @@
+import { useEffect, useState } from "react";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import { getAirportStats, type AirportStatsResponse, type StatsWindow } from "../lib/api";
+
+const WINDOWS: StatsWindow[] = ["1d", "7d", "30d", "all"];
+
+function airportFromUrl(): string {
+  const params = new URLSearchParams(window.location.search);
+  return (params.get("airport") || "KBJC").toUpperCase();
+}
+
+export default function StatsPage() {
+  const icao = airportFromUrl();
+  const [win, setWin] = useState<StatsWindow>("7d");
+  const [data, setData] = useState<AirportStatsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setData(null);
+    setError(null);
+    getAirportStats(icao, win)
+      .then(setData)
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load stats."));
+  }, [icao, win]);
+
+  return (
+    <div className="stats-page">
+      <header className="stats-head">
+        <a className="stats-back" href="/">← Map</a>
+        <h1>{icao} — airport stats</h1>
+        <div className="stats-windows">
+          {WINDOWS.map((w) => (
+            <button key={w} className={`stats-win${w === win ? " active" : ""}`} onClick={() => setWin(w)}>{w}</button>
+          ))}
+        </div>
+      </header>
+
+      {error && <div className="stats-error">{error}</div>}
+      {!data && !error && <div className="stats-loading">Loading…</div>}
+
+      {data && (
+        <>
+          <section className="stats-tiles">
+            <Tile label="Touch & gos" value={data.counters.touch_and_gos} />
+            <Tile label="Circles" value={data.counters.circles} />
+            <Tile label="Low approaches" value={data.counters.low_approaches} />
+            <Tile label="Passes" value={data.counters.passes} />
+            <Tile label="Aircraft" value={data.counters.unique_aircraft} />
+            <Tile label="Runway changes" value={data.counters.runway_changes} />
+          </section>
+
+          <section className="stats-card">
+            <h2>Operations over time</h2>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={data.ops_over_time.map((b) => ({ t: new Date(b.bucket * 1000).toLocaleDateString(), count: b.count }))}>
+                <XAxis dataKey="t" fontSize={11} />
+                <YAxis allowDecimals={false} fontSize={11} />
+                <Tooltip />
+                <Bar dataKey="count" fill="#1b3a6b" />
+              </BarChart>
+            </ResponsiveContainer>
+          </section>
+
+          <section className="stats-card">
+            <h2>Runway changes &amp; cowboys 🤠</h2>
+            {data.cowboys.length === 0 ? <p className="stats-empty">No runway changes in this window.</p> : (
+              <table className="stats-table">
+                <thead><tr><th>Aircraft</th><th>Changes caused</th></tr></thead>
+                <tbody>
+                  {data.cowboys.map((c) => (
+                    <tr key={c.icao24}><td>{c.callsign ?? c.icao24}</td><td>{c.changes}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+
+          <section className="stats-card">
+            <h2>Wind &amp; rotation</h2>
+            <p>Into headwind: <strong>{data.wind.into_headwind_ops}</strong> ops · Downwind: <strong>{data.wind.downwind_ops}</strong> ops · No data: {data.wind.no_wind_data_ops}</p>
+          </section>
+
+          <section className="stats-card">
+            <h2>Deviation from pattern</h2>
+            {data.deviation.scored_ops === 0 ? <p className="stats-empty">No pattern drawn / no scored ops yet.</p> : (
+              <>
+                <p>Avg <strong>{data.deviation.avg_mean_nm} nm</strong> · max {data.deviation.max_nm} nm · total time off-pattern {Math.round(data.deviation.total_time_off_s / 60)} min ({data.deviation.scored_ops} ops)</p>
+                <table className="stats-table">
+                  <thead><tr><th>Worst offenders</th><th>Mean deviation (nm)</th></tr></thead>
+                  <tbody>
+                    {data.deviation.worst.map((w) => (
+                      <tr key={w.icao24}><td>{w.callsign ?? w.icao24}</td><td>{w.deviation_mean_nm}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </section>
+
+          <section className="stats-card">
+            <h2>Repeat offenders</h2>
+            <table className="stats-table">
+              <thead><tr><th>Aircraft</th><th>Reports</th></tr></thead>
+              <tbody>
+                {data.repeat_offenders.map((o) => (
+                  <tr key={o.icao24}><td>{o.callsign ?? o.icao24}{o.registration ? ` (${o.registration})` : ""}</td><td>{o.report_count}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+
+          <section className="stats-card">
+            <h2>Origin / flight school <span className="stats-besteffort">(best-effort)</span></h2>
+            {data.flight_schools.length === 0 ? <p className="stats-empty">No registry matches in this window.</p> : (
+              <table className="stats-table">
+                <thead><tr><th>Owner / operator</th><th>Aircraft</th></tr></thead>
+                <tbody>
+                  {data.flight_schools.map((f) => (
+                    <tr key={f.label}><td>{f.label}</td><td>{f.count}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Tile({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="stats-tile">
+      <div className="stats-tile-value">{value}</div>
+      <div className="stats-tile-label">{label}</div>
+    </div>
+  );
+}
