@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, BarChart3, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import StatsPage from "./components/StatsPage";
@@ -427,6 +427,7 @@ export default function App() {
           <div className="input-row">
             <input value={airportQuery} onChange={(event) => setAirportQuery(event.target.value)} placeholder="ICAO, IATA, or name" />
             <button className="icon-button" onClick={handleAirportSearch} title="Search airports"><Search size={18} /></button>
+            <a className="icon-button" href={`/stats?airport=${encodeURIComponent(airport?.icao ?? "KBJC")}`} title="Airport history & stats" aria-label="Airport history & stats"><History size={18} /></a>
           </div>
           {airportResults.length > 0 && (
             <div className="result-menu">
@@ -479,14 +480,6 @@ export default function App() {
               <MapPin size={16} />
             </button>
             <AtcListenButton airportIcao={airport?.icao} />
-            <a
-              className="map-icon-toggle"
-              title="Airport stats"
-              aria-label="Airport stats"
-              href={`/stats?airport=${encodeURIComponent(airport?.icao ?? "KBJC")}`}
-            >
-              <BarChart3 size={16} />
-            </a>
           </div>
           <WindIndicator airportIcao={airport?.icao ?? null} windowCode={windowCode} />
           <BackfillBanner
@@ -509,7 +502,6 @@ export default function App() {
             editSeedKey={editSeedKey}
             onEditingPointsChange={setEditingPoints}
           />
-          <FlowBadge airportIcao={airport?.icao} />
           {patternEditing && airport?.icao && (
             <PatternEditorPanel
               airportIcao={airport.icao}
@@ -561,7 +553,7 @@ export default function App() {
               Prepare complaint
             </button>
           </div>
-          <Counters data={scanData} status={status} onRefresh={refreshScan} />
+          <Counters data={scanData} status={status} onRefresh={refreshScan} airportIcao={airport?.icao} />
           <OffenderTable
             offenders={scanData?.offenders ?? []}
             selected={selected}
@@ -914,10 +906,12 @@ function Counters({
   data,
   status,
   onRefresh,
+  airportIcao,
 }: {
   data: ScanResponse | null;
   status: string;
   onRefresh: () => Promise<void> | void;
+  airportIcao?: string | null;
 }) {
   const counters = data?.counters;
   const [refreshing, setRefreshing] = useState(false);
@@ -953,6 +947,7 @@ function Counters({
         <div><strong>{counters?.offenders_active_now ?? 0}</strong><span>circling now</span></div>
         <div><strong>{data?.tracks.length ?? 0}</strong><span>tracked paths {counters?.label ?? ""}</span></div>
       </div>
+      <FlowBadge airportIcao={airportIcao} />
     </div>
   );
 }
