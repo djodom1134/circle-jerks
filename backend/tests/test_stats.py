@@ -29,8 +29,9 @@ def test_airport_stats(tmp_path):
     _op(conn, "o2", "circle", 2000, "a2", headwind=-3.0, dev=1.2, time_off=120)
     _op(conn, "o3", "touch_and_go", 3000, "a1", runway_id="30R")
     _op(conn, "o4", "pass_over_user", 4000, "a3")
+    # wind_favored_new=0 → a genuine against-wind change, i.e. a real cowboy.
     db.insert_runway_change(conn, "KBJC", "12L", "30R", 3000,
-                            {"icao24": "a1", "callsign": "A1", "registration": "A1", "id": "o3"}, 300, 8.0, 1)
+                            {"icao24": "a1", "callsign": "A1", "registration": "A1", "id": "o3"}, 300, 8.0, 0)
     db.aircraft_report_counts if False else None  # noqa
     conn.execute(
         "INSERT INTO aircraft_report_counts (icao24, callsign, registration, report_count, first_reported_at, last_reported_at) "
@@ -107,6 +108,23 @@ def test_airport_stats_runway_usage_by_wind(tmp_path):
     assert usage["29"]["downwind"] == 1
     assert usage["29"]["crosswind"] == 1
     assert usage["29"]["no_wind_data"] == 1
+
+
+def test_cowboys_excludes_wind_favored_changes(tmp_path):
+    # Only changes the wind did NOT favor count as cowboys. A wind-driven change
+    # (wind_favored_new=1) is legitimate and must not appear in the leaderboard.
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    db.insert_runway_change(conn, "KBJC", "29", "11", 1000,
+                            {"icao24": "favored", "callsign": "GOOD", "registration": "GOOD", "id": "c1"}, 60, 4.0, 1)
+    db.insert_runway_change(conn, "KBJC", "11", "29", 2000,
+                            {"icao24": "against", "callsign": "BADCOW", "registration": "BADCOW", "id": "c2"}, 110, 6.0, 0)
+    conn.commit()
+    stats = db.airport_stats(conn, "KBJC", 0, 10_000)
+    ids = {c["icao24"] for c in stats["cowboys"]}
+    assert "against" in ids        # against-wind change → cowboy
+    assert "favored" not in ids    # wind-favored change → not a cowboy
+    # the total runway-change counter still counts both
+    assert stats["counters"]["runway_changes"] == 2
 
 
 def test_stats_endpoint(tmp_path, monkeypatch):

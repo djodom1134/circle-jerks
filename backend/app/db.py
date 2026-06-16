@@ -687,8 +687,11 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
     cowboys = [
         {"icao24": r["cowboy_icao24"], "callsign": r["cowboy_callsign"], "changes": r["n"]}
         for r in conn.execute(
+            # A cowboy only counts when the wind did NOT favor the new runway
+            # (wind_favored_new = 0). Wind-driven changes are legitimate airmanship.
             "SELECT cowboy_icao24, cowboy_callsign, COUNT(*) AS n FROM runway_changes "
             "WHERE icao=? AND changed_at BETWEEN ? AND ? AND cowboy_icao24 IS NOT NULL "
+            "AND wind_favored_new = 0 "
             "GROUP BY cowboy_icao24 ORDER BY n DESC LIMIT ?", (*win, top),
         ).fetchall()
     ]

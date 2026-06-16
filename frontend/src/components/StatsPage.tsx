@@ -70,9 +70,10 @@ export default function StatsPage() {
 
           <section className="stats-card">
             <h2>Runway changes &amp; cowboys 🤠</h2>
-            {data.cowboys.length === 0 ? <p className="stats-empty">No runway changes in this window.</p> : (
+            <p className="stats-besteffort">A cowboy switched the active runway to a direction the wind did <em>not</em> favor ({data.counters.runway_changes} total runway change{data.counters.runway_changes === 1 ? "" : "s"} this window).</p>
+            {data.cowboys.length === 0 ? <p className="stats-empty">No cowboys — every runway change followed the wind.</p> : (
               <table className="stats-table">
-                <thead><tr><th>Aircraft</th><th>Changes caused</th></tr></thead>
+                <thead><tr><th>Aircraft</th><th>Cowboy changes</th></tr></thead>
                 <tbody>
                   {data.cowboys.map((c) => (
                     <tr key={c.icao24}><td>{c.callsign ?? c.icao24}</td><td>{c.changes}</td></tr>

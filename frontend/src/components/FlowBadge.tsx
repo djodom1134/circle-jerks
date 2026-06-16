@@ -23,13 +23,17 @@ export default function FlowBadge({ airportIcao }: { airportIcao?: string | null
 
   if (!flow?.active) return null;
   const change = flow.recent_changes[0];
+  // Only a change the wind did NOT favor is a "cowboy" move. Wind-driven changes
+  // are legitimate airmanship, so drop the 🤠 for them.
+  const isCowboy = change != null && change.wind_favored_new === 0;
   return (
     <div className="flow-badge" title="Active runway in use">
       <span className="flow-badge-rwy">RWY {flow.active.active_runway_id}</span>
       {change && (
         <span className="flow-badge-change">
           changed {minutesAgo(change.changed_at)} by{" "}
-          {change.cowboy_callsign ?? change.cowboy_icao24 ?? "unknown"} 🤠
+          {change.cowboy_callsign ?? change.cowboy_icao24 ?? "unknown"}
+          {isCowboy ? " 🤠" : ""}
         </span>
       )}
     </div>
