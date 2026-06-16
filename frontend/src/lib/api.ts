@@ -842,6 +842,7 @@ export interface AirportStatsResponse {
   recent_changes: RunwayChange[];
   repeat_offenders: { icao24: string; callsign: string | null; registration: string | null; report_count: number }[];
   flight_schools: { label: string; count: number }[];
+  runway_usage: { runway_id: string; total: number; upwind: number; crosswind: number; downwind: number; no_wind_data: number }[];
 }
 
 export function getAirportStats(icao: string, window: StatsWindow = "7d") {

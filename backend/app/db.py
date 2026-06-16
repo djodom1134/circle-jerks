@@ -719,6 +719,33 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
         ).fetchall()
     ]
 
+    # Runway-use breakdown by wind direction. For each runway op, the smallest
+    # angle between the runway heading and the wind's "from" bearing classifies
+    # it: <=45deg = into wind (favorable), >=135deg = downwind/tailwind, else
+    # crosswind. ABS(((heading - wind_from + 540) % 360) - 180) is that angle.
+    runway_usage = []
+    for r in conn.execute(
+        "SELECT runway_id, COUNT(*) AS total, "
+        "SUM(CASE WHEN wind_from_deg IS NOT NULL AND runway_heading_deg IS NOT NULL "
+        "     AND abs(((runway_heading_deg - wind_from_deg + 540) % 360) - 180) <= 45 THEN 1 ELSE 0 END) AS upwind, "
+        "SUM(CASE WHEN wind_from_deg IS NOT NULL AND runway_heading_deg IS NOT NULL "
+        "     AND abs(((runway_heading_deg - wind_from_deg + 540) % 360) - 180) >= 135 THEN 1 ELSE 0 END) AS downwind, "
+        "SUM(CASE WHEN wind_from_deg IS NOT NULL AND runway_heading_deg IS NOT NULL "
+        "     AND abs(((runway_heading_deg - wind_from_deg + 540) % 360) - 180) > 45 "
+        "     AND abs(((runway_heading_deg - wind_from_deg + 540) % 360) - 180) < 135 THEN 1 ELSE 0 END) AS crosswind "
+        "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? AND runway_id IS NOT NULL "
+        "GROUP BY runway_id ORDER BY total DESC", win,
+    ).fetchall():
+        classified = r["upwind"] + r["crosswind"] + r["downwind"]
+        runway_usage.append({
+            "runway_id": r["runway_id"],
+            "total": r["total"],
+            "upwind": r["upwind"],
+            "crosswind": r["crosswind"],
+            "downwind": r["downwind"],
+            "no_wind_data": r["total"] - classified,
+        })
+
     return {
         "counters": counters,
         "ops_over_time": ops_over_time,
@@ -728,6 +755,7 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
         "recent_changes": recent_changes,
         "repeat_offenders": repeat_offenders,
         "flight_schools": flight_schools,
+        "runway_usage": runway_usage,
     }
 
 

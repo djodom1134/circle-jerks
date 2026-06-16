@@ -81,6 +81,34 @@ def test_airport_stats_flight_schools_match(tmp_path):
     assert labels.get("Test Flight School") == 1
 
 
+def test_airport_stats_runway_usage_by_wind(tmp_path):
+    # Classify each runway op by the wind's angle to the runway heading:
+    # into-wind (<=45deg), crosswind (45-135), downwind/tailwind (>=135).
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+
+    def rwop(oid, ts, wind_from):
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": oid, "type": "touch_and_go", "icao24": "a", "callsign": "N1",
+            "timestamp": ts, "airport_icao": "KBJC", "runway_id": "29", "runway_heading_deg": 290,
+        }))
+        if wind_from is not None:
+            db.update_operation_wind(conn, oid, wind_from, 10.0, 0.0)
+
+    rwop("r1", 1000, 290)   # wind from 290, runway 290 → into wind (upwind)
+    rwop("r2", 1100, 110)   # wind from 110 (behind) → downwind / tailwind
+    rwop("r3", 1200, 200)   # wind from 200 (~90deg) → crosswind
+    rwop("r4", 1300, None)  # no wind data
+    conn.commit()
+
+    stats = db.airport_stats(conn, "KBJC", 0, 10_000)
+    usage = {u["runway_id"]: u for u in stats["runway_usage"]}
+    assert usage["29"]["total"] == 4
+    assert usage["29"]["upwind"] == 1
+    assert usage["29"]["downwind"] == 1
+    assert usage["29"]["crosswind"] == 1
+    assert usage["29"]["no_wind_data"] == 1
+
+
 def test_stats_endpoint(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app

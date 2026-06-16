@@ -53,8 +53,13 @@ export default function StatsPage() {
             <h2>Operations over time</h2>
             {data.ops_over_time.length === 0 ? <p className="stats-empty">No operations in this window.</p> : (
               <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={data.ops_over_time.map((b) => ({ t: new Date(b.bucket * 1000).toLocaleDateString(), count: b.count }))}>
-                  <XAxis dataKey="t" fontSize={11} />
+                <BarChart data={data.ops_over_time.map((b) => ({
+                  t: data.window.bucket_seconds < 86400
+                    ? new Date(b.bucket * 1000).toLocaleString([], { weekday: "short", hour: "numeric" })
+                    : new Date(b.bucket * 1000).toLocaleDateString([], { month: "numeric", day: "numeric" }),
+                  count: b.count,
+                }))}>
+                  <XAxis dataKey="t" fontSize={11} interval="preserveStartEnd" minTickGap={24} />
                   <YAxis allowDecimals={false} fontSize={11} />
                   <Tooltip />
                   <Bar dataKey="count" fill="#1b3a6b" />
@@ -80,6 +85,27 @@ export default function StatsPage() {
           <section className="stats-card">
             <h2>Wind &amp; rotation</h2>
             <p>Into headwind: <strong>{data.wind.into_headwind_ops}</strong> ops · Downwind: <strong>{data.wind.downwind_ops}</strong> ops · No data: {data.wind.no_wind_data_ops}</p>
+          </section>
+
+          <section className="stats-card">
+            <h2>Runway use &amp; wind</h2>
+            {(data.runway_usage ?? []).length === 0 ? <p className="stats-empty">No runway-tagged operations in this window.</p> : (
+              <table className="stats-table">
+                <thead><tr><th>Runway</th><th>Ops</th><th>Into wind</th><th>Crosswind</th><th>Downwind (tailwind)</th><th>No wind data</th></tr></thead>
+                <tbody>
+                  {(data.runway_usage ?? []).map((u) => (
+                    <tr key={u.runway_id}>
+                      <td><strong>{u.runway_id}</strong></td>
+                      <td>{u.total}</td>
+                      <td>{u.upwind}</td>
+                      <td>{u.crosswind}</td>
+                      <td>{u.downwind}</td>
+                      <td>{u.no_wind_data}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </section>
 
           <section className="stats-card">
