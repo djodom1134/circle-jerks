@@ -702,13 +702,19 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
         "ORDER BY report_count DESC LIMIT ?", (top,),
     ).fetchall()]
 
-    # Best-effort: link ops to the FAA registry by ICAO hex for an operator/owner breakdown.
+    # Best-effort: link ops to the FAA registry by ICAO hex for an operator/owner
+    # breakdown. icao_hex is stored UPPERCASE and indexed; comparing it to
+    # upper(o.icao24) (the small, windowed, de-duped side) lets SQLite use
+    # idx_aircraft_registry_icao_hex instead of full-scanning the ~312k-row
+    # registry once per op (which previously hung the endpoint for busy airports).
     flight_schools = [
         {"label": r["label"], "count": r["n"]}
         for r in conn.execute(
-            "SELECT reg.registrant_name AS label, COUNT(DISTINCT o.icao24) AS n "
-            "FROM operations o JOIN aircraft_registry reg ON lower(reg.icao_hex) = o.icao24 "
-            "WHERE o.icao=? AND o.timestamp BETWEEN ? AND ? AND reg.registrant_name IS NOT NULL "
+            "SELECT reg.registrant_name AS label, COUNT(*) AS n "
+            "FROM (SELECT DISTINCT icao24 FROM operations "
+            "      WHERE icao=? AND timestamp BETWEEN ? AND ?) o "
+            "JOIN aircraft_registry reg ON reg.icao_hex = upper(o.icao24) "
+            "WHERE reg.registrant_name IS NOT NULL "
             "GROUP BY reg.registrant_name ORDER BY n DESC LIMIT ?", (*win, top),
         ).fetchall()
     ]

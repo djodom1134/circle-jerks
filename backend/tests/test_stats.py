@@ -63,6 +63,24 @@ def test_airport_stats(tmp_path):
     assert isinstance(stats["flight_schools"], list)
 
 
+def test_airport_stats_flight_schools_match(tmp_path):
+    # Registry stores icao_hex UPPERCASE; operations store icao24 lowercase. The
+    # join must match across that case difference (and use the icao_hex index).
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    conn.execute(
+        "INSERT INTO aircraft_registry (n_number, icao_hex, registrant_name) VALUES (?,?,?)",
+        ("N111AB", "A4C1D8", "Test Flight School"),
+    )
+    db.upsert_operation(conn, db.operation_from_event({
+        "id": "fs1", "type": "touch_and_go", "icao24": "a4c1d8", "callsign": "N111AB",
+        "timestamp": 1000, "airport_icao": "KBJC",
+    }))
+    conn.commit()
+    stats = db.airport_stats(conn, "KBJC", 0, 10_000)
+    labels = {f["label"]: f["count"] for f in stats["flight_schools"]}
+    assert labels.get("Test Flight School") == 1
+
+
 def test_stats_endpoint(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app
