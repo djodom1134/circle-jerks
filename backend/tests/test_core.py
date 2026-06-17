@@ -425,7 +425,7 @@ def test_airport_label_for_unknown_opensky_departure(tmp_path):
 
 
 async def test_summary_description_combines_multiple_aircraft(tmp_path, monkeypatch):
-    async def no_groq(*args):
+    async def no_groq(*args, **kwargs):
         return None
 
     monkeypatch.setattr("app.services.generate_with_groq", no_groq)

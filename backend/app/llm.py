@@ -274,7 +274,27 @@ def deterministic_aggregate_description(context: AggregateComplaintContext) -> s
     return " ".join(parts)
 
 
-async def generate_with_groq(api_key: str | None, model: str, prompt: str) -> str | None:
+DEFAULT_SYSTEM_PROMPT = "You produce factual, civil aviation noise complaint descriptions. Use 12-hour AM/PM time, never military time."
+
+
+def runway_change_note(changes: list[dict]) -> str:
+    """One-line prompt context about runway changes the wind did NOT favor
+    (cowboy moves). `changes` are runway_changes rows (wind_favored_new=0), newest first."""
+    if not changes:
+        return "runway_changes_against_the_wind: none recorded in this window"
+    recent = changes[0]
+    who = recent.get("cowboy_callsign") or recent.get("cowboy_icao24") or "an aircraft"
+    to_rwy = recent.get("to_runway_id") or "?"
+    return (
+        f"runway_changes_against_the_wind: {len(changes)} "
+        f"(the active runway was changed to a direction the wind did NOT favor; "
+        f"most recently to runway {to_rwy} by {who})"
+    )
+
+
+async def generate_with_groq(
+    api_key: str | None, model: str, prompt: str, system_prompt: str | None = None
+) -> str | None:
     if not api_key:
         return None
     # Tight timeout so the API endpoint falls through to the deterministic
@@ -286,7 +306,7 @@ async def generate_with_groq(api_key: str | None, model: str, prompt: str) -> st
             json={
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "You produce factual, civil aviation noise complaint descriptions. Use 12-hour AM/PM time, never military time."},
+                    {"role": "system", "content": (system_prompt or DEFAULT_SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.35,

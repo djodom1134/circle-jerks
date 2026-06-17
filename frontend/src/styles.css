@@ -2020,6 +2020,30 @@ input[type="range"] {
 .flow-badge-rwy { font-weight: 800; color: var(--ink); }
 .flow-badge-change { color: var(--muted); }
 
+.grok-prompt { margin: 8px 0 4px; font-size: 13px; }
+.grok-prompt summary { cursor: pointer; font-weight: 700; color: var(--ink); }
+.grok-prompt-hint { color: var(--muted); font-size: 12px; margin: 6px 0; }
+.grok-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+.grok-prompt-reset {
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--red);
+}
+
 .wind-overlay {
   position: absolute;
   bottom: 16px;

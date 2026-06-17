@@ -588,7 +588,8 @@ export function aircraftDetail(
   params: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
   sliders: ToneSliders,
   message: MessagePreferences,
-  reportCount = 0
+  reportCount = 0,
+  systemPrompt?: string | null
 ) {
   const query = new URLSearchParams({
     airport_icao: params.airport_icao,
@@ -607,6 +608,7 @@ export function aircraftDetail(
     include_db_at_home: String(message.include_db_at_home),
     previous_report_count: String(reportCount)
   });
+  if (systemPrompt) query.set("system_prompt", systemPrompt);
   return getJson<ComplaintResponse>(`/aircraft/${icao24}/detail?${query.toString()}`, COMPLAINT_TIMEOUT_MS);
 }
 
@@ -615,7 +617,8 @@ export function complaintSummary(
   params: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
   sliders: ToneSliders,
   message: MessagePreferences,
-  reportCounts: Record<string, number>
+  reportCounts: Record<string, number>,
+  systemPrompt?: string | null
 ) {
   return postJson<ComplaintResponse & { icao24s: string[] }>(
     "/complaint/summary",
@@ -627,7 +630,8 @@ export function complaintSummary(
       icao24s,
       sliders,
       message_preferences: message,
-      report_counts: reportCounts
+      report_counts: reportCounts,
+      system_prompt: systemPrompt ?? null
     },
     COMPLAINT_TIMEOUT_MS,
   );

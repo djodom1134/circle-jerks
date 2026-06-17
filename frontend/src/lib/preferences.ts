@@ -21,6 +21,8 @@ export interface StoredPreferences {
   message: MessagePreferences;
   sliders: ToneSliders;
   report_counts: Record<string, number>;
+  /** Optional per-user override for the AI complaint system prompt (stored client-side only). */
+  system_prompt?: string;
 }
 
 const COOKIE_NAME = "circlejerks_preferences";

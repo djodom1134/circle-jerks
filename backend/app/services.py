@@ -23,6 +23,7 @@ from .llm import (
     deterministic_aggregate_description,
     deterministic_description,
     generate_with_groq,
+    runway_change_note,
 )
 from .flightaware import FlightAwareClient
 from .opensky import OpenSkyClient, OpenSkyRateLimited
@@ -1697,6 +1698,7 @@ async def build_description(
     sliders: ToneSliders,
     message_preferences: MessagePreferences | None = None,
     previous_report_count: int = 0,
+    system_prompt: str | None = None,
 ) -> dict:
     p = await params_with_user_elevation(store, settings, params)
     window = resolve_window(p.window, settings.timezone)
@@ -1727,6 +1729,14 @@ async def build_description(
         previous_report_count,
         origin_info,
     )
+    against_wind = [
+        dict(r) for r in conn.execute(
+            "SELECT to_runway_id, cowboy_callsign, cowboy_icao24, changed_at FROM runway_changes "
+            "WHERE icao = ? AND changed_at BETWEEN ? AND ? AND wind_favored_new = 0 ORDER BY changed_at DESC",
+            (airport.icao, window.start_ts, window.end_ts),
+        ).fetchall()
+    ]
+    rwy_note = runway_change_note(against_wind)
     cache_key = ":".join([
         icao24.lower(),
         airport.icao,
@@ -1741,14 +1751,16 @@ async def build_description(
         origin_info.get("origin_label") or "unknown",
         origin_info.get("origin_source") or "unknown",
         str(max(0, previous_report_count)),
+        str(len(against_wind)),
+        (system_prompt or "default")[:120],
     ])
     cached = await store.get_description(cache_key)
     if cached:
         source = "cache"
         text = cached
     else:
-        prompt = build_prompt(context, sliders)
-        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt)
+        prompt = build_prompt(context, sliders) + "\n" + rwy_note + "\n"
+        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt)
         source = "groq"
         if not text:
             text = deterministic_description(context)
@@ -1784,6 +1796,7 @@ async def build_summary_description(
     sliders: ToneSliders,
     message_preferences: MessagePreferences | None = None,
     report_counts: dict[str, int] | None = None,
+    system_prompt: str | None = None,
 ) -> dict:
     p = await params_with_user_elevation(store, settings, params)
     window = resolve_window(p.window, settings.timezone)
@@ -1865,6 +1878,14 @@ async def build_summary_description(
         audible_seconds_at_home=total_audible if audible_pairs else 0,
         message_preferences=prefs,
     )
+    against_wind = [
+        dict(r) for r in conn.execute(
+            "SELECT to_runway_id, cowboy_callsign, cowboy_icao24, changed_at FROM runway_changes "
+            "WHERE icao = ? AND changed_at BETWEEN ? AND ? AND wind_favored_new = 0 ORDER BY changed_at DESC",
+            (airport.icao, window.start_ts, window.end_ts),
+        ).fetchall()
+    ]
+    rwy_note = runway_change_note(against_wind)
     cache_key = ":".join([
         "summary",
         airport.icao,
@@ -1879,14 +1900,16 @@ async def build_summary_description(
         "housealt" if prefs.include_altitude_over_house else "nohousealt",
         "dbhome" if prefs.include_db_at_home else "nodbhome",
         str(aggregate.previous_report_total),
+        str(len(against_wind)),
+        (system_prompt or "default")[:120],
     ])
     cached = await store.get_description(cache_key)
     if cached:
         source = "cache"
         text = cached
     else:
-        prompt = build_aggregate_prompt(aggregate, sliders)
-        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt)
+        prompt = build_aggregate_prompt(aggregate, sliders) + "\n" + rwy_note + "\n"
+        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt)
         source = "groq"
         if not text:
             text = deterministic_aggregate_description(aggregate)

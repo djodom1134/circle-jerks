@@ -1550,6 +1550,7 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
   const messagePrefs = preferences.message;
   const complaintMode = preferences.complaint_mode;
   const reportCounts = preferences.report_counts;
+  const systemPrompt = preferences.system_prompt;
   const [complaint, setComplaint] = useState<GeneratedComplaint | null>(null);
   const [detailStatus, setDetailStatus] = useState("Select an offender");
   const [shareOpen, setShareOpen] = useState(false);
@@ -1580,7 +1581,8 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
           scanParams,
           sliders,
           messagePrefs,
-          reportCounts
+          reportCounts,
+          systemPrompt
         )
           .then((result) => {
             if (cancelled) return;
@@ -1602,7 +1604,8 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
         scanParams,
         sliders,
         messagePrefs,
-        reportCounts[target.icao24] ?? 0
+        reportCounts[target.icao24] ?? 0,
+        systemPrompt
       )))
         .then((results: ComplaintResponse[]) => {
           if (cancelled) return;
@@ -1737,6 +1740,21 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
           All offenders
         </button>
       </div>
+
+      <details className="grok-prompt">
+        <summary>AI system prompt (advanced)</summary>
+        <p className="grok-prompt-hint">Tune how the AI writes your complaints. Saved in your browser only. Leave blank for the default. Click Regenerate to apply.</p>
+        <textarea
+          className="grok-prompt-input"
+          rows={3}
+          value={preferences.system_prompt ?? ""}
+          placeholder="You produce factual, civil aviation noise complaint descriptions. Use 12-hour AM/PM time, never military time."
+          onChange={(event) => onPreferencesChange((current) => ({ ...current, system_prompt: event.target.value || undefined }))}
+        />
+        {preferences.system_prompt ? (
+          <button className="grok-prompt-reset" onClick={() => onPreferencesChange((current) => ({ ...current, system_prompt: undefined }))}>Reset to default</button>
+        ) : null}
+      </details>
 
       <div className="detail-grid">
         <div className="slider-panel">

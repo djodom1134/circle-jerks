@@ -76,6 +76,7 @@ class SummaryComplaintRequest(BaseModel):
     sliders: dict[str, int] = Field(default_factory=dict)
     message_preferences: MessagePreferencesRequest = Field(default_factory=MessagePreferencesRequest)
     report_counts: dict[str, int] = Field(default_factory=dict)
+    system_prompt: str | None = Field(default=None, max_length=4000)
 
 
 class ActivityAircraft(BaseModel):
@@ -1232,6 +1233,7 @@ async def aircraft_detail(
     include_altitude_over_house: bool = True,
     include_db_at_home: bool = True,
     previous_report_count: int = 0,
+    system_prompt: str | None = None,
 ):
     try:
         validate_window(window)
@@ -1259,6 +1261,7 @@ async def aircraft_detail(
                 sliders,
                 message_preferences,
                 max(0, previous_report_count),
+                system_prompt=system_prompt,
             )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1305,6 +1308,7 @@ async def complaint_summary(
                 sliders,
                 prefs,
                 payload.report_counts,
+                system_prompt=payload.system_prompt,
             )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
