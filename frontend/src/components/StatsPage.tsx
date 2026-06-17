@@ -115,10 +115,10 @@ export default function StatsPage() {
               <>
                 <p>Avg <strong>{data.deviation.avg_mean_nm} nm</strong> · max {data.deviation.max_nm} nm · total time off-pattern {Math.round(data.deviation.total_time_off_s / 60)} min ({data.deviation.scored_ops} ops)</p>
                 <table className="stats-table">
-                  <thead><tr><th>Worst offenders</th><th>Mean deviation (nm)</th></tr></thead>
+                  <thead><tr><th>Worst offenders</th><th>Avg deviation (nm)</th><th>Circles</th></tr></thead>
                   <tbody>
-                    {data.deviation.worst.map((w, i) => (
-                      <tr key={`${w.icao24}-${i}`}><td>{w.callsign ?? w.icao24}</td><td>{w.deviation_mean_nm}</td></tr>
+                    {data.deviation.worst.map((w) => (
+                      <tr key={w.icao24}><td>{w.callsign ?? w.icao24}</td><td>{w.deviation_mean_nm}</td><td>{w.circles}</td></tr>
                     ))}
                   </tbody>
                 </table>

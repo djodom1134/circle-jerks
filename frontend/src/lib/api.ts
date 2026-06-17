@@ -836,7 +836,7 @@ export interface AirportStatsResponse {
   wind: { into_headwind_ops: number; downwind_ops: number; no_wind_data_ops: number };
   deviation: {
     scored_ops: number; avg_mean_nm: number | null; max_nm: number | null;
-    total_time_off_s: number; worst: { icao24: string; callsign: string | null; deviation_mean_nm: number }[];
+    total_time_off_s: number; worst: { icao24: string; callsign: string | null; deviation_mean_nm: number; circles: number }[];
   };
   cowboys: { icao24: string; callsign: string | null; changes: number }[];
   recent_changes: RunwayChange[];

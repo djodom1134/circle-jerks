@@ -127,6 +127,23 @@ def test_cowboys_excludes_wind_favored_changes(tmp_path):
     assert stats["counters"]["runway_changes"] == 2
 
 
+def test_deviation_worst_dedups_by_tail(tmp_path):
+    # One aircraft flies many circles → one row per tail, averaged (not repeated).
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for oid, dev in [("d1", 4.0), ("d2", 2.0)]:  # same tail "dup", avg 3.0
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": oid, "type": "circle", "icao24": "dup", "callsign": "NDUP",
+            "timestamp": 1000 + int(oid[1]), "airport_icao": "KBJC",
+        }))
+        conn.execute("UPDATE operations SET deviation_mean_nm=? WHERE id=?", (dev, oid))
+    conn.commit()
+    stats = db.airport_stats(conn, "KBJC", 0, 10_000)
+    rows = [w for w in stats["deviation"]["worst"] if w["icao24"] == "dup"]
+    assert len(rows) == 1                                   # one entry per tail
+    assert abs(rows[0]["deviation_mean_nm"] - 3.0) < 1e-6   # averaged
+    assert rows[0]["circles"] == 2
+
+
 def test_stats_endpoint(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app

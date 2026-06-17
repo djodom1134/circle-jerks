@@ -671,10 +671,13 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
         "SUM(time_off_pattern_s) AS total_off, COUNT(*) AS scored "
         "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? AND deviation_mean_nm IS NOT NULL", win,
     ).fetchone()
+    # One row per tail: average its circle deviations over the window (an
+    # aircraft flies many circles, so we don't repeat the tail per op).
     worst = [dict(r) for r in conn.execute(
-        "SELECT icao24, callsign, deviation_mean_nm FROM operations "
-        "WHERE icao=? AND timestamp BETWEEN ? AND ? AND deviation_mean_nm IS NOT NULL "
-        "ORDER BY deviation_mean_nm DESC LIMIT ?", (*win, top),
+        "SELECT icao24, MAX(callsign) AS callsign, "
+        "ROUND(AVG(deviation_mean_nm), 3) AS deviation_mean_nm, COUNT(*) AS circles "
+        "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? AND deviation_mean_nm IS NOT NULL "
+        "GROUP BY icao24 ORDER BY AVG(deviation_mean_nm) DESC LIMIT ?", (*win, top),
     ).fetchall()]
     deviation = {
         "scored_ops": dev_row["scored"] or 0,
