@@ -43,6 +43,10 @@ export interface Offender {
   origin_label?: string | null;
   origin_source?: string | null;
   report_count?: number;
+  /** Average deviation from the matched VNAP circle pattern (nm), if a pattern exists. */
+  deviation_mean_nm?: number | null;
+  /** True if this aircraft caused an against-the-wind runway change in the window. */
+  is_cowboy?: boolean;
   /** Breakdown of T&Gs / low approaches by runway_id, e.g. {"11": 3, "29": 7}. */
   runway_breakdown?: Record<string, number>;
 }

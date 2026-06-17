@@ -987,6 +987,27 @@ async def enrich_offenders(
         ).fetchall()
         report_counts = {r["icao24"]: int(r["report_count"]) for r in rows}
 
+    # Deviation-from-pattern (avg over the window) + cowboy flag, batched upfront
+    # (same perf rule as above: one query each, never per-offender).
+    deviation_by_icao: dict[str, float] = {}
+    cowboy_set: set[str] = set()
+    if icao24s:
+        placeholders = ",".join("?" * len(icao24s))
+        dev_rows = conn.execute(
+            f"SELECT icao24, ROUND(AVG(deviation_mean_nm), 2) AS dev FROM operations "
+            f"WHERE icao = ? AND timestamp BETWEEN ? AND ? AND deviation_mean_nm IS NOT NULL "
+            f"AND icao24 IN ({placeholders}) GROUP BY icao24",
+            (airport.icao, window.start_ts, window.end_ts, *icao24s),
+        ).fetchall()
+        deviation_by_icao = {r["icao24"]: r["dev"] for r in dev_rows}
+        cowboy_rows = conn.execute(
+            f"SELECT DISTINCT cowboy_icao24 FROM runway_changes "
+            f"WHERE icao = ? AND changed_at BETWEEN ? AND ? AND wind_favored_new = 0 "
+            f"AND cowboy_icao24 IN ({placeholders})",
+            (airport.icao, window.start_ts, window.end_ts, *icao24s),
+        ).fetchall()
+        cowboy_set = {r["cowboy_icao24"] for r in cowboy_rows}
+
     sem = asyncio.Semaphore(8)
 
     async def enrich_one(offender: dict, with_origin: bool) -> dict:
@@ -1008,6 +1029,8 @@ async def enrich_offenders(
             return {
                 **offender,
                 "report_count": report_counts.get(offender["icao24"], 0),
+                "deviation_mean_nm": deviation_by_icao.get(offender["icao24"]),
+                "is_cowboy": offender["icao24"] in cowboy_set,
                 **altitude_over_user_summary(track, airport, params, window),
                 **origin,
             }

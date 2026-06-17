@@ -980,7 +980,7 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
       <div className="section-title">Worst Offenders</div>
       <div className="table">
         <div className="table-row header">
-          <span>Callsign</span><span>Origin</span><span>Score</span><span>Cir</span><span>TG</span><span>Pass</span><span>Avg over you</span>
+          <span>Callsign</span><span>Origin</span><span>Score</span><span>Cir</span><span>TG</span><span>Dev</span><span>Pass</span><span>Avg over you</span>
         </div>
         {offenders.length === 0 && <div className="empty-row">No events in this window yet.</div>}
         {offenders.slice(0, 10).map((row) => (
@@ -990,7 +990,7 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
             onClick={() => onSelect(row)}
           >
             <span>
-              <strong>{row.callsign}</strong>
+              <strong>{row.callsign}{row.is_cowboy ? " 🤠" : ""}</strong>
               <small>{row.icao24}{reportCounts[row.icao24] ? ` | reported ${reportCounts[row.icao24]}x` : ""}</small>
             </span>
             <span>{originDisplay(row).label}<small>{originDisplay(row).detail}</small></span>
@@ -1002,6 +1002,7 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
                 <small>{runwayBreakdownLabel(row.runway_breakdown)}</small>
               )}
             </span>
+            <span>{row.deviation_mean_nm != null ? `${row.deviation_mean_nm} nm` : "—"}</span>
             <span>{row.passes}</span>
             <span>{numberOrDash(row.avg_altitude_over_user_ft_agl, " ft")}</span>
           </button>
