@@ -73,7 +73,7 @@ def main() -> int:
 
     conn = db.connect(str(db_path))
     try:
-        stats = backfill_landings(conn, args.icao, now=args.now or int(time.time()))
+        stats = backfill_landings(conn, args.icao, now=args.now if args.now is not None else int(time.time()))
     finally:
         conn.close()
 

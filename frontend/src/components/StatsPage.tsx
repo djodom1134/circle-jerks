@@ -61,7 +61,7 @@ export default function StatsPage() {
                   <span className="stats-hero-label">did not stop</span>
                 </p>
                 <p className="stats-besteffort">
-                  {data.stop_classification.did_not_stop} fly-throughs (circles + touch-and-gos) vs{" "}
+                  {data.stop_classification.did_not_stop} fly-through{data.stop_classification.did_not_stop === 1 ? "" : "s"} (circles + touch-and-gos + low approaches) vs{" "}
                   {data.stop_classification.landed} landing{data.stop_classification.landed === 1 ? "" : "s"} · this window.
                   A “landing” means the aircraft reached the runway and did not climb back out within 5 min (≈ stayed ≥5 min).
                 </p>
