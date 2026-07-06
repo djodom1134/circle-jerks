@@ -2549,6 +2549,12 @@ input[type="range"] {
   pointer-events: none;
   z-index: 4;
 }
+.history-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
 .map-loading-overlay {
   position: absolute;
   inset: 0;
@@ -2696,6 +2702,16 @@ input[type="range"] {
   height: 8px;
   border-radius: 4px;
   background: linear-gradient(to right, #1d4ed8 0%, #06b6d4 25%, #22c55e 50%, #facc15 70%, #f97316 85%, #ef4444 100%);
+}
+.history-density-bar {
+  background: linear-gradient(
+    to right,
+    rgb(37, 99, 235),
+    rgb(6, 182, 212),
+    rgb(34, 197, 94),
+    rgb(250, 204, 21),
+    rgb(239, 68, 68)
+  );
 }
 .db-legend-scale {
   display: flex;

@@ -128,6 +128,35 @@ function rgbFromDb(db: number): [number, number, number] {
   return STOPS[STOPS.length - 1][1];
 }
 
+// Traffic-density color ramp (distinct flights per cell): cool blue for
+// lightly used cells → warm red for heavily overflown corridors. Independent
+// of the dB ramp — this is geometric density, not loudness.
+function rgbFromDensity(t: number): [number, number, number] {
+  const STOPS: Array<[number, [number, number, number]]> = [
+    [0, [37, 99, 235]],    // blue-600
+    [0.35, [6, 182, 212]], // cyan-500
+    [0.6, [34, 197, 94]],  // green-500
+    [0.8, [250, 204, 21]], // yellow-400
+    [1, [239, 68, 68]],    // red-500
+  ];
+  const v = clamp01(t);
+  if (v <= STOPS[0][0]) return STOPS[0][1];
+  if (v >= STOPS[STOPS.length - 1][0]) return STOPS[STOPS.length - 1][1];
+  for (let i = 1; i < STOPS.length; i += 1) {
+    if (v <= STOPS[i][0]) {
+      const [loT, lo] = STOPS[i - 1];
+      const [hiT, hi] = STOPS[i];
+      const f = (v - loT) / (hiT - loT);
+      return [
+        Math.round(lo[0] + (hi[0] - lo[0]) * f),
+        Math.round(lo[1] + (hi[1] - lo[1]) * f),
+        Math.round(lo[2] + (hi[2] - lo[2]) * f),
+      ];
+    }
+  }
+  return STOPS[STOPS.length - 1][1];
+}
+
 // Ambient L_den baseline used as the noise FLOOR before aircraft contribution
 // is added. 40 dB is the EU-WHO "quiet residential" reference. Future work:
 // replace this constant with a per-cell value from a long-term noise map
@@ -544,6 +573,8 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const heatmapOffscreenRef = useRef<HTMLCanvasElement | null>(null);
+  const historyCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const historyOffscreenRef = useRef<HTMLCanvasElement | null>(null);
   const heatmapAccumulatorRef = useRef<{
     sumPower: Float32Array;
     peakDb: Float32Array;
@@ -1088,6 +1119,125 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     };
   }, [showHeatmap, scanData, groundElevFt, mapReady]);
 
+  // Traffic-density canvas. Each simplified flight deposits a Gaussian halo
+  // along its interpolated sub-points, but counts DISTINCT flights per cell
+  // (a per-cell "last flight index" stamp) so a corridor flown by 50 planes
+  // reads hotter than one plane looping 50 times in place.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    const canvas = historyCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    if (!historyOffscreenRef.current) {
+      historyOffscreenRef.current = document.createElement("canvas");
+    }
+    const off = historyOffscreenRef.current;
+    const densityActive = historyActive && historyMode === "density" && !!historyTracks;
+
+    const draw = () => {
+      const size = map.getSize();
+      if (!size) return;
+      const dpr = window.devicePixelRatio || 1;
+      const widthCss = size[0];
+      const heightCss = size[1];
+      if (canvas.width !== widthCss * dpr || canvas.height !== heightCss * dpr) {
+        canvas.width = widthCss * dpr;
+        canvas.height = heightCss * dpr;
+        canvas.style.width = `${widthCss}px`;
+        canvas.style.height = `${heightCss}px`;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, widthCss, heightCss);
+      if (!densityActive || !historyTracks) return;
+
+      const accScale = 4;
+      const accW = Math.max(8, Math.floor(widthCss / accScale));
+      const accH = Math.max(8, Math.floor(heightCss / accScale));
+      const count = new Float32Array(accW * accH);
+      const stamp = new Int32Array(accW * accH).fill(-1);
+      const radiusPx = 3;
+      const radiusInt = 3;
+      const inv2Sigma2 = 1.0 / (radiusPx * radiusPx);
+
+      for (let ti = 0; ti < historyTracks.length; ti += 1) {
+        const samples = historyTracks[ti].samples;
+        if (samples.length < 2) continue;
+        for (let si = 0; si + 1 < samples.length; si += 1) {
+          const a = samples[si];
+          const b = samples[si + 1];
+          const pa = map.getPixelFromCoordinate(fromLonLat([a.lon, a.lat]));
+          const pb = map.getPixelFromCoordinate(fromLonLat([b.lon, b.lat]));
+          if (!pa || !pb) continue;
+          const segPx = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+          const steps = Math.max(1, Math.min(40, Math.ceil(segPx / accScale)));
+          for (let k = 0; k <= steps; k += 1) {
+            const f = k / steps;
+            const px = (pa[0] + (pb[0] - pa[0]) * f) / accScale;
+            const py = (pa[1] + (pb[1] - pa[1]) * f) / accScale;
+            if (px < -radiusInt || px >= accW + radiusInt) continue;
+            if (py < -radiusInt || py >= accH + radiusInt) continue;
+            const cx0 = Math.max(0, Math.floor(px - radiusInt));
+            const cx1 = Math.min(accW, Math.ceil(px + radiusInt));
+            const cy0 = Math.max(0, Math.floor(py - radiusInt));
+            const cy1 = Math.min(accH, Math.ceil(py + radiusInt));
+            for (let y = cy0; y < cy1; y += 1) {
+              const dy = y - py;
+              const dy2 = dy * dy;
+              for (let x = cx0; x < cx1; x += 1) {
+                const dx = x - px;
+                const d2 = dx * dx + dy2;
+                if (d2 > radiusInt * radiusInt) continue;
+                const idx = y * accW + x;
+                // Count each flight at most once per cell.
+                if (stamp[idx] === ti) continue;
+                stamp[idx] = ti;
+                count[idx] += Math.exp(-d2 * inv2Sigma2);
+              }
+            }
+          }
+        }
+      }
+
+      let maxCount = 1;
+      for (let i = 0; i < count.length; i += 1) if (count[i] > maxCount) maxCount = count[i];
+      // Log scale so a few very hot corridors don't wash out the rest.
+      const denom = Math.log1p(maxCount);
+      const acc = ctx.createImageData(accW, accH);
+      for (let i = 0; i < count.length; i += 1) {
+        const c = count[i];
+        if (c <= 0) continue;
+        const t = denom > 0 ? Math.log1p(c) / denom : 0;
+        const [r, g, b] = rgbFromDensity(t);
+        const alpha = Math.round((0.15 + 0.6 * clamp01(t)) * 255);
+        const o = i * 4;
+        acc.data[o] = r;
+        acc.data[o + 1] = g;
+        acc.data[o + 2] = b;
+        acc.data[o + 3] = alpha;
+      }
+
+      off.width = accW;
+      off.height = accH;
+      const offCtx = off.getContext("2d");
+      if (!offCtx) return;
+      offCtx.putImageData(acc, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(off, 0, 0, widthCss, heightCss);
+    };
+
+    draw();
+    map.on("postrender", draw);
+    const onResize = () => draw();
+    window.addEventListener("resize", onResize);
+    return () => {
+      map.un("postrender", draw);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [mapReady, historyActive, historyMode, historyTracks]);
+
   // Mouse-over dB readout. Sample the accumulator at the cursor position
   // and surface the weighted-average dB in a floating tooltip.
   useEffect(() => {
@@ -1307,6 +1457,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     <div className="map-stage">
       <div className="map openlayers-map" ref={containerRef} />
       <canvas className="heatmap-canvas" ref={heatmapCanvasRef} aria-hidden="true" />
+      <canvas className="history-canvas" ref={historyCanvasRef} aria-hidden="true" />
       {showLoadingOverlay && (
         <div className="map-loading-overlay" role="status" aria-live="polite">
           <div className="map-loading-card">
@@ -1339,6 +1490,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         </div>
       )}
       {showHeatmap && <DbLegend />}
+      {historyActive && historyMode === "density" && <HistoryDensityLegend />}
       {contextMenu && (
         <div
           className="map-context-menu"
@@ -1451,6 +1603,22 @@ function DbLegend() {
       <div className="db-legend-note">
         Aircraft L_eq energetically summed with a 40 dB residential ambient
         floor. Future: per-cell baseline from an OSM road-noise raster.
+      </div>
+    </div>
+  );
+}
+
+function HistoryDensityLegend() {
+  return (
+    <div className="db-legend history-density-legend" role="figure" aria-label="Traffic density legend">
+      <div className="db-legend-title">Flights over each spot</div>
+      <div className="db-legend-bar history-density-bar" />
+      <div className="db-legend-scale">
+        <span>fewer</span>
+        <span>more</span>
+      </div>
+      <div className="db-legend-note">
+        Distinct flights crossing each area over the selected days. Log-scaled.
       </div>
     </div>
   );
