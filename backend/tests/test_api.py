@@ -141,3 +141,58 @@ def test_track_history_rejects_out_of_range_days(tmp_path, monkeypatch):
         assert client.get("/airports/KBJC/track-history?days=0").status_code == 422
         assert client.get("/airports/KBJC/track-history?days=8").status_code == 422
     get_settings.cache_clear()
+
+
+def test_pattern_circuits_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    from app import db
+    settings = get_settings()
+    db.init_db(settings.database_path)
+    now = 2000000000
+
+    def _op(op_id, icao24, ts, op_type, runway):
+        return {
+            "id": op_id, "icao": "KTST", "icao24": icao24, "callsign": "N1",
+            "registration": None, "type": op_type, "timestamp": ts,
+            "runway_id": runway, "runway_heading_deg": None,
+            "turn_direction": None, "min_altitude_ft_agl": None,
+        }
+
+    with db.db_session(settings.database_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO airports (icao, iata, name, city, country, lat, lon, elevation_ft, is_towered) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("KTST", "TST", "Test Field", "Testville", "US", 40.1, -105.1, 5000, 0),
+        )
+        db.upsert_operation(conn, _op("op1", "AAA111", now - 3600, "touch_and_go", "29"))
+        db.upsert_operation(conn, _op("op2", "BBB222", now - 3000, "circle", None))
+        # archived tracks (lowercased icao24 in the table via archive_track_samples)
+        db.archive_track_samples(conn, "AAA111", [
+            {"timestamp": now - 3600 + 10 * i, "lat": 40.10 + 0.001 * i, "lon": -105.10 + 0.001 * i}
+            for i in range(-4, 5)
+        ])
+        db.archive_track_samples(conn, "BBB222", [
+            {"timestamp": now - 3000 + 10 * i, "lat": 40.12 + 0.001 * i, "lon": -105.12 + 0.001 * i}
+            for i in range(-4, 5)
+        ])
+        conn.commit()
+
+    with TestClient(app) as client:
+        resp = client.get("/airports/KTST/pattern-circuits?days=7&_now=2000000000")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["airport"]["icao"] == "KTST"
+        assert body["total_circuits"] == 2
+        assert body["truncated"] is False
+        classes = sorted(c["class"] for c in body["circuits"])
+        assert classes == ["29", "area"]
+        assert body["counts_by_class"] == {"29": 1, "area": 1}
+
+    with TestClient(app) as client:
+        assert client.get("/airports/ZZZZ/pattern-circuits").status_code == 404
+        assert client.get("/airports/KTST/pattern-circuits?days=0").status_code == 422
+        assert client.get("/airports/KTST/pattern-circuits?days=8").status_code == 422
+    get_settings.cache_clear()

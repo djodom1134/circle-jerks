@@ -26,7 +26,7 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import db, patterns, track_history
+from . import db, patterns, track_history, pattern_circuits
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -1404,6 +1404,47 @@ async def get_airport_track_history(
         "tracks": tracks,
         "total_tracks": total_tracks,
         "truncated": total_tracks > len(tracks),
+    }
+
+
+@app.get("/airports/{icao}/pattern-circuits")
+async def get_airport_pattern_circuits(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    days: Annotated[int, Query(ge=pattern_circuits.MIN_DAYS, le=pattern_circuits.MAX_DAYS)] = 7,
+    _now: Annotated[int | None, Query()] = None,
+):
+    """Pattern circuits (touch-and-go / low-approach / circle) over the last
+    `days` days, each classified by runway (or 'area') and sliced to a short
+    window of archived track around the operation. Feeds the Average overlay."""
+    now = int(_now) if _now is not None else int(time.time())
+    start_ts = now - days * 86400
+    window = pattern_circuits.CIRCUIT_WINDOW_S
+    with db_session(settings.database_path) as conn:
+        airport = db.get_airport(conn, icao)
+        if airport is None:
+            raise HTTPException(status_code=404, detail="airport not found")
+        ops = [dict(row) for row in db.read_operations(
+            conn, airport.icao, start_ts, now, types=list(pattern_circuits.CIRCUIT_TYPES)
+        )]
+        icao24s = sorted({str(o["icao24"]).lower() for o in ops if o.get("icao24")})
+        tracks_by_icao = db.bulk_read_track_archive(
+            conn, icao24s, start_ts - window, now + window,
+        ) if icao24s else {}
+    circuits, counts_by_class, total = pattern_circuits.build_circuits(ops, tracks_by_icao)
+    return {
+        "airport": {
+            "icao": airport.icao,
+            "lat": airport.lat,
+            "lon": airport.lon,
+            "elevation_ft": airport.elevation_ft,
+        },
+        "days": days,
+        "window": {"start_ts": start_ts, "end_ts": now},
+        "circuits": circuits,
+        "counts_by_class": counts_by_class,
+        "total_circuits": total,
+        "truncated": total > len(circuits),
     }
 
 
