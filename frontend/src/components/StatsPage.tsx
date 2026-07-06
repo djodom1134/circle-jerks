@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import { getAirportStats, type AirportStatsResponse, type StatsWindow } from "../lib/api";
 
 const WINDOWS: StatsWindow[] = ["1d", "7d", "30d", "all"];
@@ -44,9 +44,45 @@ export default function StatsPage() {
             <Tile label="Touch & gos" value={data.counters.touch_and_gos} />
             <Tile label="Circles" value={data.counters.circles} />
             <Tile label="Low approaches" value={data.counters.low_approaches} />
+            <Tile label="Landings" value={data.counters.landings} />
             <Tile label="Passes" value={data.counters.passes} />
             <Tile label="Aircraft" value={data.counters.unique_aircraft} />
             <Tile label="Runway changes" value={data.counters.runway_changes} />
+          </section>
+
+          <section className="stats-card">
+            <h2>Do they actually stop?</h2>
+            {data.stop_classification.total === 0 ? (
+              <p className="stats-empty">No runway operations in this window.</p>
+            ) : (
+              <>
+                <p className="stats-hero">
+                  <span className="stats-hero-pct">{data.stop_classification.did_not_stop_pct}%</span>
+                  <span className="stats-hero-label">did not stop</span>
+                </p>
+                <p className="stats-besteffort">
+                  {data.stop_classification.did_not_stop} fly-throughs (circles + touch-and-gos) vs{" "}
+                  {data.stop_classification.landed} landing{data.stop_classification.landed === 1 ? "" : "s"} · this window.
+                  A “landing” means the aircraft reached the runway and did not climb back out within 5 min (≈ stayed ≥5 min).
+                </p>
+                {data.stop_over_time.length > 0 && (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={data.stop_over_time.map((d) => ({
+                      t: new Date(d.day * 1000).toLocaleDateString([], { month: "numeric", day: "numeric" }),
+                      "Did not stop": d.did_not_stop,
+                      "Landed": d.landed,
+                    }))}>
+                      <XAxis dataKey="t" fontSize={11} interval="preserveStartEnd" minTickGap={24} />
+                      <YAxis allowDecimals={false} fontSize={11} />
+                      <Tooltip />
+                      <Legend />
+                      <Bar dataKey="Did not stop" stackId="a" fill="#b3231f" />
+                      <Bar dataKey="Landed" stackId="a" fill="#1b3a6b" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </>
+            )}
           </section>
 
           <section className="stats-card">

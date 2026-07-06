@@ -838,9 +838,12 @@ export interface AirportStatsResponse {
   window: { code: StatsWindow; start_ts: number; end_ts: number; bucket_seconds: number };
   counters: {
     circles: number; touch_and_gos: number; low_approaches: number;
+    landings: number;
     passes: number; unique_aircraft: number; runway_changes: number;
   };
   ops_over_time: { bucket: number; count: number }[];
+  stop_classification: { total: number; did_not_stop: number; landed: number; did_not_stop_pct: number | null };
+  stop_over_time: { day: number; did_not_stop: number; landed: number; total: number; pct: number | null }[];
   wind: { into_headwind_ops: number; downwind_ops: number; no_wind_data_ops: number };
   deviation: {
     scored_ops: number; avg_mean_nm: number | null; max_nm: number | null;
