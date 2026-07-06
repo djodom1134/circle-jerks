@@ -129,3 +129,15 @@ def test_track_history_endpoint(tmp_path, monkeypatch):
     with TestClient(app) as client:
         assert client.get("/airports/ZZZZ/track-history").status_code == 404
     get_settings.cache_clear()
+
+
+def test_track_history_rejects_out_of_range_days(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    with TestClient(app) as client:
+        # days is bounded [1,7]; FastAPI rejects out-of-range query params with 422.
+        assert client.get("/airports/KBJC/track-history?days=0").status_code == 422
+        assert client.get("/airports/KBJC/track-history?days=8").status_code == 422
+    get_settings.cache_clear()

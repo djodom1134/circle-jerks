@@ -56,6 +56,7 @@ import {
   type StoredPreferences
 } from "./lib/preferences";
 import { getVisitorId } from "./lib/visitor";
+import { averagePaths } from "./lib/averagePath";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
 const APP_TITLE = "Automated Noise Complaint Generator";
@@ -365,6 +366,19 @@ export default function App() {
     return () => { cancelled = true; };
   }, [mapOverlay, airport?.icao, historyDays]);
 
+  // Count of averaged representative paths, for the Average-mode caption. Uses
+  // the SAME default opts as MapView's averagePaths() call so the count matches
+  // what the map actually draws — keep them in sync. 0 groups with >0 tracks
+  // means no direction bucket reached the minimum, so the map is intentionally
+  // blank and the caption must say so rather than claim a flight count.
+  const averageGroupCount = useMemo(() => {
+    if (mapOverlay !== "history" || historyMode !== "average" || !historyData || !airport) return null;
+    return averagePaths(
+      historyData.tracks.map((t) => ({ samples: t.samples })),
+      { lat: airport.lat, lon: airport.lon }
+    ).length;
+  }, [mapOverlay, historyMode, historyData, airport]);
+
   useEffect(() => {
     if (!scanParams) return;
     const sendHeartbeat = () => {
@@ -548,11 +562,13 @@ export default function App() {
               <div className="history-controls-caption">
                 {historyError
                   ? "Couldn't load history"
-                  : historyData
-                    ? historyData.truncated
-                      ? `Showing ${historyData.tracks.length.toLocaleString()} of ${historyData.total_tracks.toLocaleString()} flights`
-                      : `${historyData.tracks.length.toLocaleString()} flights`
-                    : "Loading history…"}
+                  : !historyData
+                    ? "Loading history…"
+                    : historyMode === "average" && averageGroupCount === 0
+                      ? `Not enough repeated tracks to average yet (${historyData.tracks.length.toLocaleString()} flights)`
+                      : historyData.truncated
+                        ? `Showing ${historyData.tracks.length.toLocaleString()} of ${historyData.total_tracks.toLocaleString()} flights`
+                        : `${historyData.tracks.length.toLocaleString()} flights`}
               </div>
             </div>
           )}

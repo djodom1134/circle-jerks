@@ -41,12 +41,18 @@ def test_build_tracks_groups_splits_and_simplifies():
     assert aaa["samples"][-1]["timestamp"] == 1060
 
 
-def test_build_tracks_caps_and_reports_total():
+def test_build_tracks_caps_by_recency_and_reports_total():
     rows = []
+    # 10 aircraft, each one 2-point flight, with DISTINCT last-sample timestamps
+    # so the "keep most recent N" cap is actually pinned (not a tie).
     for i in range(10):
         icao = f"a{i:05d}"
-        rows.append(_s(1000, icao=icao))
-        rows.append(_s(1030, icao=icao))
+        base = 1000 + i * 100
+        rows.append(_s(base, icao=icao))
+        rows.append(_s(base + 30, icao=icao))
     tracks, total = th.build_tracks(rows, track_cap=4)
     assert total == 10
     assert len(tracks) == 4
+    # The survivors must be the 4 aircraft with the latest last-sample timestamps.
+    kept = {t["icao24"] for t in tracks}
+    assert kept == {"a00006", "a00007", "a00008", "a00009"}
