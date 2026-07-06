@@ -169,6 +169,9 @@ def test_pattern_circuits_endpoint(tmp_path, monkeypatch):
         )
         db.upsert_operation(conn, _op("op1", "AAA111", now - 3600, "touch_and_go", "29"))
         db.upsert_operation(conn, _op("op2", "BBB222", now - 3000, "circle", None))
+        # CCC333: two consecutive runway-29 ops 300s apart -> one closed lap.
+        db.upsert_operation(conn, _op("op3", "CCC333", now - 2000, "touch_and_go", "29"))
+        db.upsert_operation(conn, _op("op4", "CCC333", now - 1700, "touch_and_go", "29"))
         # archived tracks (lowercased icao24 in the table via archive_track_samples)
         db.archive_track_samples(conn, "AAA111", [
             {"timestamp": now - 3600 + 10 * i, "lat": 40.10 + 0.001 * i, "lon": -105.10 + 0.001 * i}
@@ -178,6 +181,12 @@ def test_pattern_circuits_endpoint(tmp_path, monkeypatch):
             {"timestamp": now - 3000 + 10 * i, "lat": 40.12 + 0.001 * i, "lon": -105.12 + 0.001 * i}
             for i in range(-4, 5)
         ])
+        # square-cycling track spanning the CCC333 lap window so RDP keeps >=4 pts
+        _corners = [(40.10, -105.10), (40.12, -105.10), (40.12, -105.12), (40.10, -105.12)]
+        db.archive_track_samples(conn, "CCC333", [
+            {"timestamp": now - 2100 + 5 * i, "lat": _corners[i % 4][0], "lon": _corners[i % 4][1]}
+            for i in range(0, 100)
+        ])
         conn.commit()
 
     with TestClient(app) as client:
@@ -185,11 +194,14 @@ def test_pattern_circuits_endpoint(tmp_path, monkeypatch):
         assert resp.status_code == 200
         body = resp.json()
         assert body["airport"]["icao"] == "KTST"
-        assert body["total_circuits"] == 2
+        assert all("is_loop" in c for c in body["circuits"])
+        # one lap (CCC333, rwy 29) + two context slices (AAA111 lone tg, BBB222 circle)
+        assert body["total_circuits"] == 3
         assert body["truncated"] is False
-        classes = sorted(c["class"] for c in body["circuits"])
-        assert classes == ["29", "area"]
-        assert body["counts_by_class"] == {"29": 1, "area": 1}
+        assert body["counts_by_class"] == {"29": 1}
+        assert body["context_count"] == 2
+        laps = [c for c in body["circuits"] if c["is_loop"]]
+        assert len(laps) == 1 and laps[0]["class"] == "29"
 
     with TestClient(app) as client:
         assert client.get("/airports/ZZZZ/pattern-circuits").status_code == 404

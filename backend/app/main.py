@@ -1431,7 +1431,7 @@ async def get_airport_pattern_circuits(
         tracks_by_icao = db.bulk_read_track_archive(
             conn, icao24s, start_ts - window, now + window,
         ) if icao24s else {}
-    circuits, counts_by_class, total = pattern_circuits.build_circuits(ops, tracks_by_icao)
+    circuits, counts_by_class, total, context_count = pattern_circuits.build_circuits(ops, tracks_by_icao)
     return {
         "airport": {
             "icao": airport.icao,
@@ -1443,6 +1443,7 @@ async def get_airport_pattern_circuits(
         "window": {"start_ts": start_ts, "end_ts": now},
         "circuits": circuits,
         "counts_by_class": counts_by_class,
+        "context_count": context_count,
         "total_circuits": total,
         "truncated": total > len(circuits),
     }
