@@ -92,6 +92,48 @@ def test_archive_bulk_read(temp_db_path):
     assert "missing" in bulk and bulk["missing"] == []
 
 
+def test_read_track_archive_bbox_filters_area_time_and_ceiling(temp_db_path):
+    with db.db_session(temp_db_path) as conn:
+        db.archive_track_samples(conn, "AAA111", [
+            {"timestamp": 1000, "lat": 40.10, "lon": -105.10, "altitude_ft": 4000},
+            {"timestamp": 1030, "lat": 40.11, "lon": -105.11, "altitude_ft": 4200},
+        ])
+        # Outside bbox (lon far west):
+        db.archive_track_samples(conn, "BBB222", [
+            {"timestamp": 1000, "lat": 40.10, "lon": -108.00, "altitude_ft": 4000},
+        ])
+        # Above ceiling:
+        db.archive_track_samples(conn, "CCC333", [
+            {"timestamp": 1000, "lat": 40.10, "lon": -105.10, "altitude_ft": 35000},
+        ])
+        # Unknown altitude — should be kept:
+        db.archive_track_samples(conn, "DDD444", [
+            {"timestamp": 1000, "lat": 40.10, "lon": -105.10, "altitude_ft": None},
+        ])
+        conn.commit()
+        rows = db.read_track_archive_bbox(
+            conn,
+            min_lat=40.0, max_lat=40.2, min_lon=-105.3, max_lon=-105.0,
+            start_ts=900, end_ts=1100, ceiling_ft_msl=6000,
+        )
+    icaos = {r["icao24"] for r in rows}
+    assert icaos == {"aaa111", "ddd444"}
+    assert [r["timestamp"] for r in rows if r["icao24"] == "aaa111"] == [1000, 1030]
+
+
+def test_read_track_archive_bbox_row_cap(temp_db_path):
+    with db.db_session(temp_db_path) as conn:
+        db.archive_track_samples(conn, "AAA111", [
+            {"timestamp": 1000 + i, "lat": 40.1, "lon": -105.1, "altitude_ft": 3000}
+            for i in range(10)
+        ])
+        conn.commit()
+        rows = db.read_track_archive_bbox(
+            conn, 40.0, 40.2, -105.3, -105.0, 900, 2000, row_cap=4,
+        )
+    assert len(rows) == 4
+
+
 def test_prune_removes_old_samples(temp_db_path):
     with db.db_session(temp_db_path) as conn:
         db.archive_track_samples(conn, "A1B2C3", [

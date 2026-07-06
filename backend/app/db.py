@@ -1656,6 +1656,49 @@ def bulk_read_track_archive(
     return out
 
 
+def read_track_archive_bbox(
+    conn: sqlite3.Connection,
+    min_lat: float,
+    max_lat: float,
+    min_lon: float,
+    max_lon: float,
+    start_ts: int,
+    end_ts: int,
+    ceiling_ft_msl: float | None = None,
+    row_cap: int = 200_000,
+) -> list[dict]:
+    """All archived samples inside a bbox + time range, across every aircraft.
+
+    Ordered by (icao24, timestamp) so callers can group consecutive rows into
+    per-aircraft tracks. Samples above `ceiling_ft_msl` are dropped; samples
+    with NULL altitude are kept (unknown altitude shouldn't hide a track).
+    `row_cap` is a hard LIMIT so a runaway range can't wedge the process.
+    """
+    ceiling_clause = ""
+    params: list = [
+        float(min_lat), float(max_lat), float(min_lon), float(max_lon),
+        int(start_ts), int(end_ts),
+    ]
+    if ceiling_ft_msl is not None:
+        ceiling_clause = " AND (altitude_ft IS NULL OR altitude_ft <= ?)"
+        params.append(float(ceiling_ft_msl))
+    params.append(int(row_cap))
+    rows = conn.execute(
+        f"""
+        SELECT {', '.join(_TRACK_ARCHIVE_COLUMNS)}
+        FROM track_archive
+        WHERE lat BETWEEN ? AND ?
+          AND lon BETWEEN ? AND ?
+          AND timestamp BETWEEN ? AND ?
+          {ceiling_clause}
+        ORDER BY icao24 ASC, timestamp ASC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [_track_archive_row_to_sample(row) for row in rows]
+
+
 def prune_track_archive(conn: sqlite3.Connection, older_than_ts: int) -> int:
     """Delete archived samples older than the cutoff. Returns rows deleted."""
     cur = conn.execute(
