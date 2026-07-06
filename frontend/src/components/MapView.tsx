@@ -16,9 +16,9 @@ import OSM from "ol/source/OSM";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
 import { directionArrows, projectedPath } from "../lib/patternGeometry";
-import type { Airport, HistoricalTrack, Offender, PatternCircuit, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
+import type { Airport, HistoricalTrack, Offender, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
 import { smoothSegment } from "../lib/spline";
-import { meanAndBand } from "../lib/averagePath";
+import type { LoopResult } from "../lib/patternLoops";
 
 // Aircraft climbing under full power are MUCH louder than the same aircraft
 // in cruise at the same altitude — engine + propeller noise dominates. Maps
@@ -114,7 +114,7 @@ interface Props {
   historyTracks?: HistoricalTrack[] | null;
   historyMode?: "lines" | "density" | "average" | null;
   historyLineAlpha?: number;
-  historyCircuits?: PatternCircuit[] | null;
+  historyAverage?: LoopResult | null;
   historySigmaK?: number;
 }
 
@@ -608,7 +608,7 @@ function styleForHistoryFeature(feature: Feature, lineAlpha: number) {
   return styleForFeature(feature);
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2, historyCircuits = null, historySigmaK = 1 }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2, historyAverage = null, historySigmaK = 1 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
@@ -679,7 +679,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const windowStart = scanData?.window?.start_ts ?? 0;
   const windowEnd = scanData?.window?.end_ts ?? 0;
   const groundElevFt = airport?.elevation_ft ?? 0;
-  const historyActive = historyMode != null && (historyTracks != null || historyCircuits != null);
+  const historyActive = historyMode != null && (historyTracks != null || historyAverage != null);
   const historyLineAlphaRef = useRef(0.2);
   historyLineAlphaRef.current = historyLineAlpha;
 
@@ -887,44 +887,56 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         }));
       }
     } else if (historyMode === "average") {
-      if (!historyCircuits) return;
-      const loops = historyCircuits.filter((c) => c.is_loop);
-      const context = historyCircuits.filter((c) => !c.is_loop);
+      if (!historyAverage) return;
+      const kx = Math.cos(((airport?.lat ?? 40) * Math.PI) / 180);
 
-      // Faint context tracks (circling / unpaired ops) beneath the ovals.
-      for (const c of context) {
-        if (c.samples.length < 2) continue;
+      // Faint individual laps beneath the ovals.
+      for (const lap of historyAverage.laps) {
+        if (lap.length < 2) continue;
         source.addFeature(lineFeature(
-          smoothSegment(c.samples.map((s) => fromLonLat([s.lon, s.lat]))),
+          smoothSegment(lap.map(([lon, lat]) => fromLonLat([lon, lat]))),
           { kind: "history_context" }
         ));
       }
 
-      const classes = meanAndBand(
-        loops.map((c) => ({ class: c.class, samples: c.samples })),
-        { sigmaK: historySigmaK }
-      );
-      // Deterministic color order: runway classes sorted numerically, area last.
-      const order = classes
+      // Offset the mean loop by ±k·σ along its local (wrap-around) normal; σ is
+      // per-point in nm, so the sigma control scales the band with no recompute.
+      const offsetRing = (mean: [number, number][], sigma: number[], side: number) => {
+        const M = mean.length;
+        const ring: number[][] = [];
+        for (let i = 0; i < M; i += 1) {
+          const a = mean[(i - 1 + M) % M];
+          const b = mean[(i + 1) % M];
+          const tx = (b[0] - a[0]) * kx;
+          const ty = b[1] - a[1];
+          const L = Math.hypot(tx, ty) || 1;
+          const nx = -ty / L;
+          const ny = tx / L;
+          const d = side * historySigmaK * sigma[i];
+          ring.push(fromLonLat([mean[i][0] + (nx * d) / (kx * 60), mean[i][1] + (ny * d) / 60]));
+        }
+        return ring;
+      };
+
+      const order = historyAverage.classes
         .map((c) => c.class)
-        .sort((a, b) => (a === "area" ? 1 : b === "area" ? -1 : Number(a.replace(/[^0-9]/g, "")) - Number(b.replace(/[^0-9]/g, ""))));
-      for (const cls of classes) {
+        .sort((a, b) => Number(a.replace(/[^0-9]/g, "")) - Number(b.replace(/[^0-9]/g, "")));
+      for (const cls of historyAverage.classes) {
         const color = classColor(cls.class, order.indexOf(cls.class));
-        const outer = cls.outer.map(([lon, lat]) => fromLonLat([lon, lat]));
-        const inner = cls.inner.map(([lon, lat]) => fromLonLat([lon, lat]));
-        if (outer.length >= 3 && inner.length >= 3) {
-          source.addFeature(ringPolygonFeature(outer, inner, { kind: "history_band", color }));
+        if (cls.mean.length >= 3) {
+          source.addFeature(ringPolygonFeature(
+            offsetRing(cls.mean, cls.sigma, 1),
+            offsetRing(cls.mean, cls.sigma, -1),
+            { kind: "history_band", color }
+          ));
         }
         // Close the mean into a continuous oval before smoothing.
         const meanProj = cls.mean.map(([lon, lat]) => fromLonLat([lon, lat]));
         if (meanProj.length >= 2) meanProj.push(meanProj[0]);
-        source.addFeature(lineFeature(
-          smoothSegment(meanProj),
-          { kind: "history_avg", color }
-        ));
+        source.addFeature(lineFeature(smoothSegment(meanProj), { kind: "history_avg", color }));
       }
     }
-  }, [mapReady, historyActive, historyMode, historyTracks, historyCircuits, historySigmaK, airport, groundElevFt]);
+  }, [mapReady, historyActive, historyMode, historyTracks, historyAverage, historySigmaK, airport, groundElevFt]);
 
   // Restyle history lines when the opacity slider moves — re-runs the layer's
   // style function against the live alpha ref without rebuilding features.

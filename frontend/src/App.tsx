@@ -21,9 +21,9 @@ import {
   getAirportPatterns,
   getAirportSosaUrl,
   getAtcFeeds,
+  getAirportRunways,
   getConfig,
   getLiveStatus,
-  getPatternCircuits,
   getRepeatOffenders,
   getSponsors,
   getTrackHistory,
@@ -39,9 +39,9 @@ import {
   type LiveStatusResponse,
   type MessagePreferences,
   type Offender,
-  type PatternCircuitsResponse,
   type PatternPoint,
   type RepeatOffender,
+  type RunwayInfo,
   type RunwayPattern,
   type ScanParams,
   type ScanResponse,
@@ -50,6 +50,7 @@ import {
   type TrackHistoryResponse,
   type WindowCode
 } from "./lib/api";
+import { averagePatternLoops, type LoopResult } from "./lib/patternLoops";
 import { formatLocalTime, numberOrDash, titleize } from "./lib/format";
 import {
   readPreferences,
@@ -60,9 +61,6 @@ import {
 import { getVisitorId } from "./lib/visitor";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
-// A runway/area class is only averaged+drawn when it has at least this many
-// circuits — must match meanAndBand's minCount default in lib/averagePath.ts.
-const AVERAGE_MIN_PER_CLASS = 3;
 const APP_TITLE = "Automated Noise Complaint Generator";
 const APP_TAGLINE = "Small engines, big egos. The 0.0001% who control the sky and cause 80% of the noise pollution.";
 const FAA_ANCIR_URL = "https://ancir.faa.gov/ancir?id=ancir_sc_cat_item&sys_id=6149ade187a1f550b0d987b9cebb357e";
@@ -114,8 +112,7 @@ export default function App() {
   const [historyMode, setHistoryMode] = useState<"lines" | "density" | "average">("lines");
   const [historyLineAlpha, setHistoryLineAlpha] = useState(0.2);
   const [historySigmaK, setHistorySigmaK] = useState(1);
-  const [historyCircuits, setHistoryCircuits] = useState<PatternCircuitsResponse | null>(null);
-  const [historyCircuitsError, setHistoryCircuitsError] = useState(false);
+  const [historyRunways, setHistoryRunways] = useState<RunwayInfo[] | null>(null);
   const [historyData, setHistoryData] = useState<TrackHistoryResponse | null>(null);
   const [historyError, setHistoryError] = useState(false);
   const showHeatmap = mapOverlay === "noise";
@@ -374,20 +371,28 @@ export default function App() {
     return () => { cancelled = true; };
   }, [mapOverlay, airport?.icao, historyDays]);
 
+  // Runways (heading + threshold) power Average mode's lap classification.
+  // Fetched once per airport when the history overlay is open.
   useEffect(() => {
-    if (mapOverlay !== "history" || historyMode !== "average" || !airport?.icao) {
-      setHistoryCircuits(null);
-      setHistoryCircuitsError(false);
+    if (mapOverlay !== "history" || !airport?.icao) {
+      setHistoryRunways(null);
       return;
     }
     let cancelled = false;
-    setHistoryCircuits(null);
-    setHistoryCircuitsError(false);
-    getPatternCircuits(airport.icao, historyDays)
-      .then((data) => { if (!cancelled) setHistoryCircuits(data); })
-      .catch(() => { if (!cancelled) setHistoryCircuitsError(true); });
+    getAirportRunways(airport.icao)
+      .then((r) => { if (!cancelled) setHistoryRunways(r.runways); })
+      .catch(() => { if (!cancelled) setHistoryRunways([]); });
     return () => { cancelled = true; };
-  }, [mapOverlay, historyMode, airport?.icao, historyDays]);
+  }, [mapOverlay, airport?.icao]);
+
+  // Average mode: reconstruct closed pattern ovals from the full ADS-B tracks
+  // (the same data Lines mode already fetched) — no extra request. Recomputed
+  // only when the tracks/runways change; the sigma control scales the band at
+  // render, so it needs no recompute here.
+  const historyAverage = useMemo<LoopResult | null>(() => {
+    if (historyMode !== "average" || !historyData || !airport || !historyRunways?.length) return null;
+    return averagePatternLoops(historyData.tracks, { lat: airport.lat, lon: airport.lon }, historyRunways);
+  }, [historyMode, historyData, airport, historyRunways]);
 
   useEffect(() => {
     if (!scanParams) return;
@@ -428,10 +433,11 @@ export default function App() {
     setAirport(nearest);
   }
 
-  // True when at least one class has enough circuits to actually average+draw.
-  const averageDrawable = historyCircuits
-    ? Object.values(historyCircuits.counts_by_class).some((n) => n >= AVERAGE_MIN_PER_CLASS)
-    : false;
+  // True once at least one runway has enough laps to draw an averaged oval.
+  const averageDrawable = !!historyAverage && historyAverage.classes.length > 0;
+  const averageLapTotal = historyAverage
+    ? historyAverage.classes.reduce((a, c) => a + c.count, 0)
+    : 0;
   const activeNow = scanData?.counters.offenders_active_now ?? 0;
 
   return (
@@ -589,21 +595,20 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  {historyCircuits && averageDrawable && (
+                  {historyAverage && averageDrawable && (
                     <div className="history-key">
-                      {Object.entries(historyCircuits.counts_by_class)
-                        .filter(([, n]) => n >= AVERAGE_MIN_PER_CLASS)
-                        .sort((a, b) => (a[0] === "area" ? 1 : b[0] === "area" ? -1 : Number(a[0].replace(/[^0-9]/g, "")) - Number(b[0].replace(/[^0-9]/g, ""))))
-                        .map(([cls, n]) => (
-                          <span key={cls} className="history-key-item">
-                            <i className={`history-key-dot cls-${cls === "area" ? "area" : "rwy"}`} />
-                            {cls === "area" ? "Area" : `Rwy ${cls}`} ({n})
+                      {[...historyAverage.classes]
+                        .sort((a, b) => Number(a.class.replace(/[^0-9]/g, "")) - Number(b.class.replace(/[^0-9]/g, "")))
+                        .map((c) => (
+                          <span key={c.class} className="history-key-item">
+                            <i className="history-key-dot cls-rwy" />
+                            Rwy {c.class} ({c.count})
                           </span>
                         ))}
-                      {historyCircuits.context_count > 0 && (
+                      {historyAverage.laps.length > averageLapTotal && (
                         <span className="history-key-item history-key-context">
                           <i className="history-key-dot cls-context" />
-                          Area (context)
+                          Other laps ({historyAverage.laps.length - averageLapTotal})
                         </span>
                       )}
                     </div>
@@ -631,15 +636,11 @@ export default function App() {
                 {historyError
                   ? "Couldn't load history"
                   : historyMode === "average"
-                    ? historyCircuitsError
-                      ? "Couldn't load circuits"
-                      : !historyCircuits
-                        ? "Loading circuits…"
-                        : historyCircuits.total_circuits === 0
-                          ? "No classified circuits yet"
-                          : !averageDrawable
-                            ? `Not enough repeated circuits to average yet (${historyCircuits.total_circuits.toLocaleString()} circuits)`
-                            : `${Object.values(historyCircuits.counts_by_class).reduce((a, b) => a + b, 0).toLocaleString()} laps · ${historyCircuits.context_count.toLocaleString()} context${historyCircuits.truncated ? " (capped)" : ""}`
+                    ? (!historyData || !historyRunways)
+                      ? "Loading tracks…"
+                      : !averageDrawable
+                        ? "Not enough repeated laps to average yet"
+                        : `${averageLapTotal.toLocaleString()} laps · ${[...historyAverage!.classes].sort((a, b) => Number(a.class.replace(/[^0-9]/g, "")) - Number(b.class.replace(/[^0-9]/g, ""))).map((c) => `Rwy ${c.class}`).join(", ")}`
                     : !historyData
                       ? "Loading history…"
                       : historyData.truncated
@@ -664,7 +665,7 @@ export default function App() {
             historyTracks={mapOverlay === "history" ? historyData?.tracks ?? null : null}
             historyMode={mapOverlay === "history" ? historyMode : null}
             historyLineAlpha={historyLineAlpha}
-            historyCircuits={mapOverlay === "history" && historyMode === "average" ? historyCircuits?.circuits ?? null : null}
+            historyAverage={mapOverlay === "history" && historyMode === "average" ? historyAverage : null}
             historySigmaK={historySigmaK}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
             patterns={patterns}
