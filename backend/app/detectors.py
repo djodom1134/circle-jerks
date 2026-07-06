@@ -573,7 +573,7 @@ def _runway_low_episodes(
     """
     recent = [
         sample for sample in sorted(track, key=lambda row: row["timestamp"])
-        if start_ts - 120 <= sample["timestamp"] <= end_ts + CLIMB_OUT_LOOKAHEAD_SECONDS
+        if start_ts - APPROACH_LOOKBACK_SECONDS <= sample["timestamp"] <= end_ts + CLIMB_OUT_LOOKAHEAD_SECONDS
     ]
     if len(recent) < 4:
         return recent, []
@@ -585,7 +585,7 @@ def _runway_low_episodes(
         agl = altitude_agl(sample, airport)
         runway, runway_dist = _nearest_runway(sample, runways)
         speed = sample.get("velocity_kt")
-        if agl is not None and runway_dist <= 1.5:
+        if agl is not None and agl <= 200 and runway_dist <= 1.5:
             low_by_bucket[int(sample["timestamp"] // 180)].append((sample, agl, runway, speed))
 
     low_buckets = set(low_by_bucket.keys())
@@ -630,6 +630,31 @@ def _approached_from_altitude(recent: list[dict], lt: int, airport: Airport) -> 
     return False
 
 
+def _build_runway_event(event_type: str, ep: dict, airport: Airport, runways: list[dict]) -> dict:
+    """Build a runway-contact event dict shared by touch-and-go and landing.
+
+    Touch-and-go and landing are complements over the same episodes, so their
+    event shape MUST stay identical (same 10 keys, same values) — the only
+    per-detector variation is `event_type` (which also seeds the `_event_id`).
+    """
+    lowest_sample = ep["lowest_sample"]
+    directional = _runway_for_direction(lowest_sample, runways)
+    used_runway = directional or ep["runway"]
+    runway_heading = used_runway.get("heading_deg") if used_runway else None
+    return {
+        "id": _event_id(event_type, lowest_sample["icao24"], airport.icao, ep["bucket"]),
+        "type": event_type,
+        "icao24": lowest_sample["icao24"],
+        "callsign": lowest_sample.get("callsign") or lowest_sample["icao24"].upper(),
+        "timestamp": int(lowest_sample["timestamp"]),
+        "airport_icao": airport.icao,
+        "runway_id": used_runway["runway_id"] if used_runway else None,
+        "runway_heading_deg": int(runway_heading) if runway_heading is not None else None,
+        "runway_used": used_runway["runway_id"] if used_runway else None,
+        "min_altitude_ft_agl": int(ep["lowest_agl"]),
+    }
+
+
 def detect_touch_and_gos_over_period(
     track: list[dict],
     airport: Airport,
@@ -654,22 +679,7 @@ def detect_touch_and_gos_over_period(
                 and on_ground_seconds <= 60):
             continue
         event_type = "touch_and_go" if lowest_agl <= 50 else "low_approach"
-
-        directional = _runway_for_direction(lowest_sample, runways)
-        used_runway = directional or ep["runway"]
-        runway_heading = used_runway.get("heading_deg") if used_runway else None
-        events.append({
-            "id": _event_id(event_type, lowest_sample["icao24"], airport.icao, ep["bucket"]),
-            "type": event_type,
-            "icao24": lowest_sample["icao24"],
-            "callsign": lowest_sample.get("callsign") or lowest_sample["icao24"].upper(),
-            "timestamp": int(lowest_sample["timestamp"]),
-            "airport_icao": airport.icao,
-            "runway_id": used_runway["runway_id"] if used_runway else None,
-            "runway_heading_deg": int(runway_heading) if runway_heading is not None else None,
-            "runway_used": used_runway["runway_id"] if used_runway else None,
-            "min_altitude_ft_agl": int(lowest_agl),
-        })
+        events.append(_build_runway_event(event_type, ep, airport, runways))
     return events
 
 
@@ -705,21 +715,7 @@ def detect_landings_over_period(
         if not _approached_from_altitude(recent, lt, airport):
             continue  # never descended in (parked/taxiing) -> not a landing
 
-        directional = _runway_for_direction(lowest_sample, runways)
-        used_runway = directional or ep["runway"]
-        runway_heading = used_runway.get("heading_deg") if used_runway else None
-        events.append({
-            "id": _event_id("landing", lowest_sample["icao24"], airport.icao, ep["bucket"]),
-            "type": "landing",
-            "icao24": lowest_sample["icao24"],
-            "callsign": lowest_sample.get("callsign") or lowest_sample["icao24"].upper(),
-            "timestamp": lt,
-            "airport_icao": airport.icao,
-            "runway_id": used_runway["runway_id"] if used_runway else None,
-            "runway_heading_deg": int(runway_heading) if runway_heading is not None else None,
-            "runway_used": used_runway["runway_id"] if used_runway else None,
-            "min_altitude_ft_agl": int(lowest_agl),
-        })
+        events.append(_build_runway_event("landing", ep, airport, runways))
     return events
 
 

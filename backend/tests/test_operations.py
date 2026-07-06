@@ -114,6 +114,13 @@ def long_ground_presence_track(t0=18000, icao24="long01"):
     return rows
 
 
+def taxiing_no_approach_track(t0=18000, icao24="taxi01"):
+    # Appears already low near the runway (never descended in from altitude),
+    # never climbs out. Must be rejected ONLY by the approach-from-altitude guard.
+    rows = [(0, 40), (30, 25), (60, 15), (90, 10)]
+    return [_rwy_sample(t0 + dt, agl, icao24, on_ground=True) for dt, agl in rows]
+
+
 def test_operations_table_exists(tmp_path):
     conn = seeded_conn(tmp_path / "t.sqlite3")
     row = conn.execute(
@@ -333,6 +340,13 @@ def test_touch_and_go_still_detected_after_refactor():
     events = detect_touch_and_gos_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
     assert any(e["type"] == "touch_and_go" for e in events)
     assert all(e["type"] != "landing" for e in events)
+
+
+def test_taxiing_without_approach_is_not_a_landing():
+    ap = airport_kbjc()
+    track = taxiing_no_approach_track(t0=18000)
+    events = detect_landings_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
+    assert [e for e in events if e["type"] == "landing"] == []
 
 
 def test_period_circle_detection_includes_closed_lap():
