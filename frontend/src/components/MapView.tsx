@@ -16,9 +16,9 @@ import OSM from "ol/source/OSM";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
 import { directionArrows, projectedPath } from "../lib/patternGeometry";
-import type { Airport, HistoricalTrack, Offender, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
+import type { Airport, HistoricalTrack, Offender, PatternCircuit, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
 import { smoothSegment } from "../lib/spline";
-import { averagePaths } from "../lib/averagePath";
+import { meanAndBand } from "../lib/averagePath";
 
 // Aircraft climbing under full power are MUCH louder than the same aircraft
 // in cruise at the same altitude — engine + propeller noise dominates. Maps
@@ -81,6 +81,22 @@ function colorFromAltitudeAgl(altitudeAgl: number | null | undefined): [number, 
   return STOPS[STOPS.length - 1][1];
 }
 
+// Stable color per circuit class. Runway classes take saturated hues in a
+// fixed order; "area" is neutral gray.
+const CLASS_PALETTE = ["#2563eb", "#dc2626", "#059669", "#7c3aed", "#d97706", "#0891b2"];
+function classColor(cls: string, index: number): string {
+  if (cls === "area") return "#6b7185";
+  return CLASS_PALETTE[index % CLASS_PALETTE.length];
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 interface Props {
   airport?: Airport | null;
   userLocation: { lat: number; lon: number } | null;
@@ -98,6 +114,8 @@ interface Props {
   historyTracks?: HistoricalTrack[] | null;
   historyMode?: "lines" | "density" | "average" | null;
   historyLineAlpha?: number;
+  historyCircuits?: PatternCircuit[] | null;
+  historySigmaK?: number;
 }
 
 // dB → [r, g, b] for additive canvas compositing.
@@ -486,12 +504,6 @@ function styleForFeature(feature: Feature) {
       stroke: new Stroke({ color: `rgba(${r}, ${g}, ${b}, 0.14)`, width: 1 }),
     });
   }
-  if (kind === "history_avg") {
-    return new Style({
-      stroke: new Stroke({ color: "rgba(27, 58, 107, 0.9)", width: 4 }),
-    });
-  }
-
   if (kind === "aircraft") {
     const heading = Number(feature.get("heading") ?? 0);
     return new Style({
@@ -563,19 +575,29 @@ function styleForFeature(feature: Feature) {
 
 // The history layer styles its Lines with a live, slider-controlled alpha, so
 // it can't use the static styleForFeature. history_line here reads the current
-// alpha; everything else (history_avg) defers to styleForFeature.
+// alpha; history_band/history_avg use the feature's own per-class color;
+// everything else defers to styleForFeature.
 function styleForHistoryFeature(feature: Feature, lineAlpha: number) {
-  if (feature.get("kind") === "history_line") {
+  const kind = feature.get("kind");
+  if (kind === "history_line") {
     const altAgl = feature.get("alt_agl_ft");
     const [r, g, b] = colorFromAltitudeAgl(typeof altAgl === "number" ? altAgl : null);
     return new Style({
       stroke: new Stroke({ color: `rgba(${r}, ${g}, ${b}, ${lineAlpha})`, width: 1 }),
     });
   }
+  if (kind === "history_band") {
+    const color = String(feature.get("color") ?? "#6b7185");
+    return new Style({ fill: new Fill({ color: hexToRgba(color, 0.16) }) });
+  }
+  if (kind === "history_avg") {
+    const color = String(feature.get("color") ?? "#1b3a6b");
+    return new Style({ stroke: new Stroke({ color, width: 3.5 }) });
+  }
   return styleForFeature(feature);
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2 }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2, historyCircuits = null, historySigmaK = 1 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
@@ -646,7 +668,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const windowStart = scanData?.window?.start_ts ?? 0;
   const windowEnd = scanData?.window?.end_ts ?? 0;
   const groundElevFt = airport?.elevation_ft ?? 0;
-  const historyActive = historyMode != null && historyTracks != null;
+  const historyActive = historyMode != null && (historyTracks != null || historyCircuits != null);
   const historyLineAlphaRef = useRef(0.2);
   historyLineAlphaRef.current = historyLineAlpha;
 
@@ -853,17 +875,30 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         }));
       }
     } else if (historyMode === "average") {
-      if (!airport) return;
-      const averaged = averagePaths(
-        historyTracks.map((t) => ({ samples: t.samples })),
-        { lat: airport.lat, lon: airport.lon },
+      if (!historyCircuits) return;
+      const classes = meanAndBand(
+        historyCircuits.map((c) => ({ class: c.class, samples: c.samples })),
+        { sigmaK: historySigmaK }
       );
-      for (const path of averaged) {
-        const coords = path.points.map(([lon, lat]) => fromLonLat([lon, lat]));
-        source.addFeature(lineFeature(smoothSegment(coords), { kind: "history_avg" }));
+      // Deterministic color order: runway classes sorted numerically, area last.
+      const order = classes
+        .map((c) => c.class)
+        .sort((a, b) => (a === "area" ? 1 : b === "area" ? -1 : Number(a) - Number(b)));
+      for (const cls of classes) {
+        const color = classColor(cls.class, order.indexOf(cls.class));
+        if (cls.band.length >= 4) {
+          source.addFeature(polygonFeature(
+            cls.band.map(([lon, lat]) => fromLonLat([lon, lat])),
+            { kind: "history_band", color }
+          ));
+        }
+        source.addFeature(lineFeature(
+          smoothSegment(cls.mean.map(([lon, lat]) => fromLonLat([lon, lat]))),
+          { kind: "history_avg", color }
+        ));
       }
     }
-  }, [mapReady, historyActive, historyMode, historyTracks, airport, groundElevFt]);
+  }, [mapReady, historyActive, historyMode, historyTracks, historyCircuits, historySigmaK, airport, groundElevFt]);
 
   // Restyle history lines when the opacity slider moves — re-runs the layer's
   // style function against the live alpha ref without rebuilding features.
