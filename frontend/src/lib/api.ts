@@ -856,3 +856,32 @@ export interface AirportStatsResponse {
 export function getAirportStats(icao: string, window: StatsWindow = "7d") {
   return getJson<AirportStatsResponse>(`/airports/${encodeURIComponent(icao)}/stats?window=${window}`);
 }
+
+export interface HistoricalTrackSample {
+  lat: number;
+  lon: number;
+  altitude_ft: number | null;
+  timestamp: number;
+}
+
+export interface HistoricalTrack {
+  icao24: string;
+  callsign: string | null;
+  samples: HistoricalTrackSample[];
+}
+
+export interface TrackHistoryResponse {
+  airport: { icao: string; lat: number; lon: number; elevation_ft: number };
+  days: number;
+  ceiling_ft: number;
+  window: { start_ts: number; end_ts: number };
+  tracks: HistoricalTrack[];
+  total_tracks: number;
+  truncated: boolean;
+}
+
+export function getTrackHistory(icao: string, days: number, ceilingFt = 5000) {
+  return getJson<TrackHistoryResponse>(
+    `/airports/${encodeURIComponent(icao)}/track-history?days=${days}&ceiling_ft=${ceilingFt}`
+  );
+}
