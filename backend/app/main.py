@@ -26,10 +26,11 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import db, patterns
+from . import db, patterns, track_history
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
+from .geo import bbox_for_radius
 from .llm import MessagePreferences
 from .services import build_description, build_scan_response, build_summary_description
 from .settings import Settings, get_settings
@@ -1357,6 +1358,52 @@ async def get_airport_stats(
         "airport_icao": icao.upper(),
         "window": {"code": window, "start_ts": start_ts, "end_ts": now, "bucket_seconds": bucket},
         **stats,
+    }
+
+
+# Radius (nm) of the area we pull historical tracks for — matches the scan ring.
+_TRACK_HISTORY_RING_NM = 8.0
+
+
+@app.get("/airports/{icao}/track-history")
+async def get_airport_track_history(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    days: Annotated[int, Query(ge=track_history.MIN_DAYS, le=track_history.MAX_DAYS)] = 7,
+    ceiling_ft: Annotated[int, Query(ge=0, le=60000)] = track_history.DEFAULT_CEILING_FT_AGL,
+    _now: Annotated[int | None, Query()] = None,
+):
+    """Simplified per-flight polylines for all traffic in the airport ring over
+    the last `days` days, below `ceiling_ft` AGL. Feeds the historical
+    track-density map overlay."""
+    now = int(_now) if _now is not None else int(time.time())
+    start_ts = now - days * 86400
+    with db_session(settings.database_path) as conn:
+        airport = db.get_airport(conn, icao)
+        if airport is None:
+            raise HTTPException(status_code=404, detail="airport not found")
+        min_lat, min_lon, max_lat, max_lon = bbox_for_radius(
+            airport.lat, airport.lon, _TRACK_HISTORY_RING_NM
+        )
+        ceiling_msl = airport.elevation_ft + ceiling_ft
+        rows = db.read_track_archive_bbox(
+            conn, min_lat, max_lat, min_lon, max_lon, start_ts, now,
+            ceiling_ft_msl=ceiling_msl,
+        )
+    tracks, total_tracks = track_history.build_tracks(rows)
+    return {
+        "airport": {
+            "icao": airport.icao,
+            "lat": airport.lat,
+            "lon": airport.lon,
+            "elevation_ft": airport.elevation_ft,
+        },
+        "days": days,
+        "ceiling_ft": ceiling_ft,
+        "window": {"start_ts": start_ts, "end_ts": now},
+        "tracks": tracks,
+        "total_tracks": total_tracks,
+        "truncated": total_tracks > len(tracks),
     }
 
 
