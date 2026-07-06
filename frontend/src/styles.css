@@ -1994,6 +1994,8 @@ input[type="range"] {
 }
 .history-key-dot.cls-rwy { background: #2563eb; }
 .history-key-dot.cls-area { background: #6b7185; }
+.history-key-dot.cls-context { background: rgba(120, 127, 140, 0.35); }
+.history-key-context { opacity: 0.7; }
 .history-controls-caption {
   color: #6b7185;
   font-weight: 600;

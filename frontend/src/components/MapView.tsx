@@ -380,6 +380,14 @@ function polygonFeature(coords: number[][], properties: Record<string, unknown>)
   return feature;
 }
 
+// A ring with a hole (annulus): outer exterior, inner interior — used for the
+// closed-loop sigma corridor around a mean pattern oval.
+function ringPolygonFeature(outer: number[][], inner: number[][], properties: Record<string, unknown>) {
+  const feature = new Feature(new Polygon([outer, inner]));
+  feature.setProperties(properties);
+  return feature;
+}
+
 function normalizeTrackSamples(samples: TrackSample[]) {
   return samples
     .filter((sample) => Number.isFinite(sample.lat) && Number.isFinite(sample.lon) && Number.isFinite(sample.timestamp))
@@ -593,6 +601,9 @@ function styleForHistoryFeature(feature: Feature, lineAlpha: number) {
   if (kind === "history_avg") {
     const color = String(feature.get("color") ?? "#1b3a6b");
     return new Style({ stroke: new Stroke({ color, width: 3.5 }) });
+  }
+  if (kind === "history_context") {
+    return new Style({ stroke: new Stroke({ color: "rgba(120, 127, 140, 0.16)", width: 1 }) });
   }
   return styleForFeature(feature);
 }
@@ -877,14 +888,21 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       }
     } else if (historyMode === "average") {
       if (!historyCircuits) return;
+      const loops = historyCircuits.filter((c) => c.is_loop);
+      const context = historyCircuits.filter((c) => !c.is_loop);
+
+      // Faint context tracks (circling / unpaired ops) beneath the ovals.
+      for (const c of context) {
+        if (c.samples.length < 2) continue;
+        source.addFeature(lineFeature(
+          smoothSegment(c.samples.map((s) => fromLonLat([s.lon, s.lat]))),
+          { kind: "history_context" }
+        ));
+      }
+
       const classes = meanAndBand(
-        historyCircuits.map((c) => ({ class: c.class, samples: c.samples })),
-        {
-          sigmaK: historySigmaK,
-          // Orient each circuit relative to the field so same-class arrivals,
-          // departures, and circles align before averaging into a mean loop.
-          origin: airport ? [airport.lon, airport.lat] : undefined,
-        }
+        loops.map((c) => ({ class: c.class, samples: c.samples })),
+        { sigmaK: historySigmaK }
       );
       // Deterministic color order: runway classes sorted numerically, area last.
       const order = classes
@@ -892,14 +910,16 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         .sort((a, b) => (a === "area" ? 1 : b === "area" ? -1 : Number(a.replace(/[^0-9]/g, "")) - Number(b.replace(/[^0-9]/g, ""))));
       for (const cls of classes) {
         const color = classColor(cls.class, order.indexOf(cls.class));
-        if (cls.band.length >= 4) {
-          source.addFeature(polygonFeature(
-            cls.band.map(([lon, lat]) => fromLonLat([lon, lat])),
-            { kind: "history_band", color }
-          ));
+        const outer = cls.outer.map(([lon, lat]) => fromLonLat([lon, lat]));
+        const inner = cls.inner.map(([lon, lat]) => fromLonLat([lon, lat]));
+        if (outer.length >= 3 && inner.length >= 3) {
+          source.addFeature(ringPolygonFeature(outer, inner, { kind: "history_band", color }));
         }
+        // Close the mean into a continuous oval before smoothing.
+        const meanProj = cls.mean.map(([lon, lat]) => fromLonLat([lon, lat]));
+        if (meanProj.length >= 2) meanProj.push(meanProj[0]);
         source.addFeature(lineFeature(
-          smoothSegment(cls.mean.map(([lon, lat]) => fromLonLat([lon, lat]))),
+          smoothSegment(meanProj),
           { kind: "history_avg", color }
         ));
       }

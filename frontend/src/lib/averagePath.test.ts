@@ -18,28 +18,37 @@ describe("resamplePath", () => {
 });
 
 describe("meanAndBand", () => {
-  // Three horizontal circuits at lat 1.0, 1.1, 1.2 -> mean lat 1.1.
-  const circuits = [1.0, 1.1, 1.2].map((lat) => ({
-    class: "29",
-    samples: [{ lon: 0, lat }, { lon: 1, lat }, { lon: 2, lat }],
-  }));
+  // A closed unit-square lap (returns to its start), three identical members.
+  const square = [
+    { lon: 0, lat: 0 }, { lon: 1, lat: 0 }, { lon: 1, lat: 1 }, { lon: 0, lat: 1 }, { lon: 0, lat: 0 },
+  ];
+  const circuits = [0, 0, 0].map(() => ({ class: "29", samples: square }));
 
-  it("averages same-class circuits into a mean between them", () => {
-    const out = meanAndBand(circuits, { resampleN: 3, minCount: 3, sigmaK: 1 });
-    expect(out).toHaveLength(1);
-    expect(out[0].class).toBe("29");
-    expect(out[0].count).toBe(3);
-    out[0].mean.forEach((p) => expect(p[1]).toBeCloseTo(1.1, 6));
+  it("produces a closed mean whose first and last points coincide", () => {
+    const [avg] = meanAndBand(circuits, { resampleN: 16, minCount: 3, sigmaK: 1 });
+    expect(avg.class).toBe("29");
+    expect(avg.count).toBe(3);
+    const first = avg.mean[0];
+    const last = avg.mean[avg.mean.length - 1];
+    expect(Math.hypot(first[0] - last[0], first[1] - last[1])).toBeLessThan(0.05);
   });
 
-  it("band half-width scales with sigmaK", () => {
+  it("has zero-width band when all members are identical", () => {
+    const [avg] = meanAndBand(circuits, { resampleN: 16, minCount: 3, sigmaK: 2 });
+    for (let i = 0; i < avg.mean.length; i += 1) {
+      const w = Math.hypot(avg.outer[i][0] - avg.inner[i][0], avg.outer[i][1] - avg.inner[i][1]);
+      expect(w).toBeCloseTo(0, 4);
+    }
+  });
+
+  it("band half-width scales with sigmaK when members spread", () => {
+    const spread = [-0.02, 0, 0.02].map((d) => ({
+      class: "29",
+      samples: square.map((p) => ({ lon: p.lon, lat: p.lat + d })),
+    }));
     const width = (k: number) => {
-      const [avg] = meanAndBand(circuits, { resampleN: 3, minCount: 3, sigmaK: k });
-      // band ring = forward offsets then reversed backward offsets; sample the
-      // vertical spread at the first mean point vs its mirrored ring point.
-      const top = avg.band[0][1];
-      const bottom = avg.band[avg.band.length - 1][1];
-      return Math.abs(top - bottom);
+      const [a] = meanAndBand(spread, { resampleN: 16, minCount: 3, sigmaK: k });
+      return Math.hypot(a.outer[0][0] - a.inner[0][0], a.outer[0][1] - a.inner[0][1]);
     };
     const w1 = width(1);
     const w2 = width(2);
@@ -48,37 +57,7 @@ describe("meanAndBand", () => {
   });
 
   it("omits a class below minCount", () => {
-    const one = [{ class: "11", samples: [{ lon: 0, lat: 0 }, { lon: 1, lat: 0 }] }];
+    const one = [{ class: "11", samples: square }];
     expect(meanAndBand(one, { minCount: 3 })).toHaveLength(0);
-  });
-
-  it("orients reversed circuits so the mean keeps the loop shape", () => {
-    // Same L-shaped arc, but the sample order is reversed for some circuits —
-    // as happens when arrivals/departures or circles are captured at opposite
-    // phase. Without orientation, point-index averaging collapses the mean
-    // toward the centroid. With farthest-from-origin-first orientation, every
-    // circuit is aligned before averaging so the mean reproduces the arc.
-    const arc = [
-      { lon: 1, lat: 1 },
-      { lon: 0, lat: 1 },
-      { lon: 0, lat: 0 },
-    ];
-    const rev = arc.slice().reverse();
-    const circuits = [
-      { class: "29", samples: arc },
-      { class: "29", samples: rev },
-      { class: "29", samples: arc },
-    ];
-    const [avg] = meanAndBand(circuits, {
-      resampleN: 3,
-      minCount: 3,
-      sigmaK: 1,
-      origin: [0, 0],
-    });
-    // Index 0 = farthest endpoint from origin (1,1); index 2 = nearest (0,0).
-    expect(avg.mean[0][0]).toBeCloseTo(1, 6);
-    expect(avg.mean[0][1]).toBeCloseTo(1, 6);
-    expect(avg.mean[2][0]).toBeCloseTo(0, 6);
-    expect(avg.mean[2][1]).toBeCloseTo(0, 6);
   });
 });

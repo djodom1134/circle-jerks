@@ -600,6 +600,12 @@ export default function App() {
                             {cls === "area" ? "Area" : `Rwy ${cls}`} ({n})
                           </span>
                         ))}
+                      {historyCircuits.context_count > 0 && (
+                        <span className="history-key-item history-key-context">
+                          <i className="history-key-dot cls-context" />
+                          Area (context)
+                        </span>
+                      )}
                     </div>
                   )}
                 </>
@@ -633,7 +639,7 @@ export default function App() {
                           ? "No classified circuits yet"
                           : !averageDrawable
                             ? `Not enough repeated circuits to average yet (${historyCircuits.total_circuits.toLocaleString()} circuits)`
-                            : `${historyCircuits.total_circuits.toLocaleString()} circuits${historyCircuits.truncated ? " (capped)" : ""}`
+                            : `${Object.values(historyCircuits.counts_by_class).reduce((a, b) => a + b, 0).toLocaleString()} laps · ${historyCircuits.context_count.toLocaleString()} context${historyCircuits.truncated ? " (capped)" : ""}`
                     : !historyData
                       ? "Loading history…"
                       : historyData.truncated

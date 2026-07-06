@@ -899,6 +899,7 @@ export interface PatternCircuit {
   class: string;
   runway_id: string | null;
   icao24: string;
+  is_loop: boolean;
   samples: PatternCircuitSample[];
 }
 
@@ -908,6 +909,7 @@ export interface PatternCircuitsResponse {
   window: { start_ts: number; end_ts: number };
   circuits: PatternCircuit[];
   counts_by_class: Record<string, number>;
+  context_count: number;
   total_circuits: number;
   truncated: boolean;
 }
