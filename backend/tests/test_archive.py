@@ -38,6 +38,22 @@ def settings(temp_db_path):
     )
 
 
+# --- horizon_seconds ---------------------------------------------------------
+
+
+def test_horizon_seconds_defaults_to_seven_days():
+    from app.settings import Settings
+    s = Settings(database_path=":memory:")
+    assert s.track_archive_horizon_days == 7
+    assert archive.horizon_seconds(s) == 7 * 86400
+
+
+def test_horizon_seconds_honors_override():
+    from app.settings import Settings
+    s = Settings(database_path=":memory:", track_archive_horizon_days=3)
+    assert archive.horizon_seconds(s) == 3 * 86400
+
+
 # --- db accessors -----------------------------------------------------------
 
 

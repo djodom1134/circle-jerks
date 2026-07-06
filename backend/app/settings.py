@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # "today" window is still served by triggering a historical backfill on
     # demand from OpenSky when track samples have aged out.
     track_ttl_seconds: int = 14_400
+    # Cold-tier (SQLite track_archive) retention. The historical track-density
+    # view reads up to this many days back; prune deletes older. Bounded by
+    # disk, not Redis memory — safe to keep a week of a single field's traffic.
+    track_archive_horizon_days: int = 7
     event_ttl_seconds: int = 14_400
     description_ttl_seconds: int = 600
     # Master switch for FlightAware AeroAPI. Set FLIGHTAWARE_ENABLED=false in

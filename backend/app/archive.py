@@ -39,6 +39,13 @@ DEFAULT_ARCHIVE_INTERVAL_SECONDS = 5 * 60  # archive every 5 minutes
 DEFAULT_ARCHIVE_HORIZON_SECONDS = 24 * 3600  # keep 24h in cold storage
 DEFAULT_PRUNE_INTERVAL_SECONDS = 60 * 60  # prune once an hour
 
+
+def horizon_seconds(settings: Settings) -> int:
+    """Cold-archive retention horizon in seconds, from the configurable
+    day count. Used for both the archive tail-window and the prune cutoff."""
+    return int(settings.track_archive_horizon_days) * 86400
+
+
 # Gap-filler defaults. Walks the past 24h in 1-minute steps for each active
 # monitor's bbox and asks OpenSky for any snapshot whose minute-bucket isn't
 # already represented in the archive.

@@ -100,7 +100,13 @@ async def run_forever() -> None:
     # tier so the "today" / 24h scan window survives Redis TTL expiry.
     from . import archive as track_archive
 
-    archive_task = asyncio.create_task(track_archive.archive_loop(store, settings))
+    archive_task = asyncio.create_task(
+        track_archive.archive_loop(
+            store,
+            settings,
+            archive_horizon_seconds=track_archive.horizon_seconds(settings),
+        )
+    )
     try:
         while True:
             try:
