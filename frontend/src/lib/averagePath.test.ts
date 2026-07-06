@@ -51,4 +51,34 @@ describe("meanAndBand", () => {
     const one = [{ class: "11", samples: [{ lon: 0, lat: 0 }, { lon: 1, lat: 0 }] }];
     expect(meanAndBand(one, { minCount: 3 })).toHaveLength(0);
   });
+
+  it("orients reversed circuits so the mean keeps the loop shape", () => {
+    // Same L-shaped arc, but the sample order is reversed for some circuits —
+    // as happens when arrivals/departures or circles are captured at opposite
+    // phase. Without orientation, point-index averaging collapses the mean
+    // toward the centroid. With farthest-from-origin-first orientation, every
+    // circuit is aligned before averaging so the mean reproduces the arc.
+    const arc = [
+      { lon: 1, lat: 1 },
+      { lon: 0, lat: 1 },
+      { lon: 0, lat: 0 },
+    ];
+    const rev = arc.slice().reverse();
+    const circuits = [
+      { class: "29", samples: arc },
+      { class: "29", samples: rev },
+      { class: "29", samples: arc },
+    ];
+    const [avg] = meanAndBand(circuits, {
+      resampleN: 3,
+      minCount: 3,
+      sigmaK: 1,
+      origin: [0, 0],
+    });
+    // Index 0 = farthest endpoint from origin (1,1); index 2 = nearest (0,0).
+    expect(avg.mean[0][0]).toBeCloseTo(1, 6);
+    expect(avg.mean[0][1]).toBeCloseTo(1, 6);
+    expect(avg.mean[2][0]).toBeCloseTo(0, 6);
+    expect(avg.mean[2][1]).toBeCloseTo(0, 6);
+  });
 });

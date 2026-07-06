@@ -879,7 +879,12 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       if (!historyCircuits) return;
       const classes = meanAndBand(
         historyCircuits.map((c) => ({ class: c.class, samples: c.samples })),
-        { sigmaK: historySigmaK }
+        {
+          sigmaK: historySigmaK,
+          // Orient each circuit relative to the field so same-class arrivals,
+          // departures, and circles align before averaging into a mean loop.
+          origin: airport ? [airport.lon, airport.lat] : undefined,
+        }
       );
       // Deterministic color order: runway classes sorted numerically, area last.
       const order = classes

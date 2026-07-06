@@ -44,6 +44,33 @@ export interface ClassAverage {
   band: LonLat[];
 }
 
+// Orient a resampled circuit so index 0 is the endpoint farther from `origin`.
+// Circuits of one class are averaged point-by-point, so they must share a start
+// phase and traversal direction first; otherwise a circuit captured in the
+// opposite order (an arrival vs a departure, or a circle caught at the far
+// phase) averages against its peers and collapses the mean toward the centroid.
+function orientFarthestFirst(path: LonLat[], origin: LonLat): LonLat[] {
+  const d2 = (p: LonLat) =>
+    (p[0] - origin[0]) * (p[0] - origin[0]) + (p[1] - origin[1]) * (p[1] - origin[1]);
+  return d2(path[0]) >= d2(path[path.length - 1]) ? path : path.slice().reverse();
+}
+
+// Centroid of every point across a class's resampled circuits — the fallback
+// orientation anchor when the caller doesn't supply one (e.g. the airport).
+function centroidOf(members: LonLat[][]): LonLat {
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  for (const m of members) {
+    for (const p of m) {
+      sx += p[0];
+      sy += p[1];
+      n += 1;
+    }
+  }
+  return n === 0 ? [0, 0] : [sx / n, sy / n];
+}
+
 // Unit normal (left-hand) to the local tangent at index i of a polyline.
 function normalAt(points: LonLat[], i: number): LonLat {
   const a = points[Math.max(0, i - 1)];
@@ -57,7 +84,7 @@ function normalAt(points: LonLat[], i: number): LonLat {
 
 export function meanAndBand(
   circuits: Array<{ class: string; samples: Array<{ lon: number; lat: number }> }>,
-  opts?: { resampleN?: number; minCount?: number; sigmaK?: number }
+  opts?: { resampleN?: number; minCount?: number; sigmaK?: number; origin?: LonLat }
 ): ClassAverage[] {
   const resampleN = opts?.resampleN ?? 48;
   const minCount = opts?.minCount ?? 3;
@@ -76,8 +103,13 @@ export function meanAndBand(
   }
 
   const out: ClassAverage[] = [];
-  for (const [cls, members] of groups) {
-    if (members.length < minCount) continue;
+  for (const [cls, rawMembers] of groups) {
+    if (rawMembers.length < minCount) continue;
+    // Align every circuit to a common start/direction before point-wise
+    // averaging (see orientFarthestFirst). Anchor on the caller's origin (the
+    // airport) when given, else the class centroid.
+    const origin = opts?.origin ?? centroidOf(rawMembers);
+    const members = rawMembers.map((m) => orientFarthestFirst(m, origin));
     const mean: LonLat[] = [];
     for (let i = 0; i < resampleN; i += 1) {
       let sx = 0;
