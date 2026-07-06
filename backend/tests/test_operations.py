@@ -4,7 +4,12 @@ import pytest
 
 from app import db
 from app.db import Airport
-from app.detectors import detect_circles, detect_events
+from app.detectors import (
+    detect_circles,
+    detect_events,
+    detect_landings_over_period,
+    detect_touch_and_gos_over_period,
+)
 from app.domain import ScanParams
 
 
@@ -57,6 +62,56 @@ def closed_loop_track() -> list[dict]:
         (39.9238, -105.1172),
     ]
     return [sample(1000 + i * 30, lat, lon) for i, (lat, lon) in enumerate(points)]
+
+
+KBJC_RUNWAYS = [
+    {"runway_id": "12L", "lat_threshold": 39.9215, "lon_threshold": -105.1321, "heading_deg": 120, "length_ft": 9000},
+    {"runway_id": "30R", "lat_threshold": 39.8962, "lon_threshold": -105.1013, "heading_deg": 300, "length_ft": 9000},
+]
+
+
+def _rwy_sample(ts, agl, icao24="land01", vr=0, on_ground=False):
+    # All samples sit on the 12L threshold so _nearest_runway distance ~= 0.
+    return {
+        "icao24": icao24,
+        "callsign": "N9LAND",
+        "timestamp": ts,
+        "lat": 39.9215,
+        "lon": -105.1321,
+        "geo_altitude_ft": 5673 + agl,
+        "heading_deg": 120,
+        "vertical_rate_fpm": vr,
+        "velocity_kt": 70,
+        "on_ground": on_ground,
+    }
+
+
+def landing_then_silence_track(t0=18000, icao24="land01"):
+    # Descend into the field, touch down, then the track ends (went to the ramp).
+    rows = [(0, 1500), (30, 1000), (60, 600), (90, 30)]
+    return [_rwy_sample(t0 + dt, agl, icao24, vr=-500 if agl > 0 else 0) for dt, agl in rows]
+
+
+def touch_and_go_track(t0=18000, icao24="tag01"):
+    # Descend, touch ≤50 AGL, climb straight back out.
+    rows = [(0, 1200, -500), (30, 600, -500), (60, 200, -400), (90, 20, 0),
+            (120, 200, 600), (150, 600, 700), (180, 1000, 700)]
+    return [_rwy_sample(t0 + dt, agl, icao24, vr=vr) for dt, agl, vr in rows]
+
+
+def departure_track(t0=18000, icao24="dep01"):
+    # Starts on the runway, climbs away — never approached from altitude.
+    rows = [(0, 0, 0), (30, 50, 500), (60, 300, 800), (90, 800, 900), (120, 1500, 900)]
+    return [_rwy_sample(t0 + dt, agl, icao24, vr=vr, on_ground=(agl == 0)) for dt, agl, vr in rows]
+
+
+def long_ground_presence_track(t0=18000, icao24="long01"):
+    # Land, then keep transmitting 0 AGL for ~8 min. Must yield exactly ONE landing.
+    approach = [(0, 1500), (30, 1000), (60, 600), (90, 30)]
+    rows = [_rwy_sample(t0 + dt, agl, icao24, vr=-500 if agl > 0 else 0) for dt, agl in approach]
+    for dt in range(120, 540, 30):
+        rows.append(_rwy_sample(t0 + dt, 0, icao24, on_ground=True))
+    return rows
 
 
 def test_operations_table_exists(tmp_path):
@@ -230,6 +285,54 @@ def test_closed_lap_circle_event_has_lap_time_bounds():
     assert "start_timestamp" in lap and "end_timestamp" in lap
     assert lap["start_timestamp"] <= lap["end_timestamp"] <= lap["timestamp"] + 1
     assert lap["end_timestamp"] - lap["start_timestamp"] >= 120  # the lap spans real time
+
+
+def test_landing_detected_when_no_climb_out():
+    ap = airport_kbjc()
+    track = landing_then_silence_track(t0=18000)
+    # end_ts well past touchdown so the 5-min settle window is satisfied.
+    events = detect_landings_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
+    landings = [e for e in events if e["type"] == "landing"]
+    assert len(landings) == 1
+    assert landings[0]["runway_id"] == "12L"
+    assert landings[0]["min_altitude_ft_agl"] <= 50
+
+
+def test_touch_and_go_is_not_a_landing():
+    ap = airport_kbjc()
+    track = touch_and_go_track(t0=18000)
+    events = detect_landings_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
+    assert [e for e in events if e["type"] == "landing"] == []
+
+
+def test_departure_is_not_a_landing():
+    ap = airport_kbjc()
+    track = departure_track(t0=18000)
+    events = detect_landings_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
+    assert [e for e in events if e["type"] == "landing"] == []
+
+
+def test_no_landing_before_settle_window():
+    ap = airport_kbjc()
+    track = landing_then_silence_track(t0=18000)
+    # Only ~100s observed past the touchdown at 18090 -> not settled yet.
+    events = detect_landings_over_period(track, ap, KBJC_RUNWAYS, 18000, 18190)
+    assert [e for e in events if e["type"] == "landing"] == []
+
+
+def test_long_ground_presence_yields_single_landing():
+    ap = airport_kbjc()
+    track = long_ground_presence_track(t0=18000)
+    events = detect_landings_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
+    assert len([e for e in events if e["type"] == "landing"]) == 1
+
+
+def test_touch_and_go_still_detected_after_refactor():
+    ap = airport_kbjc()
+    track = touch_and_go_track(t0=18000)
+    events = detect_touch_and_gos_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
+    assert any(e["type"] == "touch_and_go" for e in events)
+    assert all(e["type"] != "landing" for e in events)
 
 
 def test_period_circle_detection_includes_closed_lap():

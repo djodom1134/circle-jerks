@@ -28,6 +28,20 @@ MAX_CIRCLE_CLOSURE_NM = 0.5
 TIGHT_CLOSURE_BONUS_NM = 0.5
 MAX_CIRCLE_ALTITUDE_FT_AGL = 2000
 
+# --- Runway-contact / landing classification ---
+# Look this far past a touchdown to decide touch-and-go vs. landing. Widened
+# from the old 120s so touch-and-go and landing are exact complements over the
+# same 5-minute window.
+CLIMB_OUT_LOOKAHEAD_SECONDS = 300
+# A landing is only *decided* once we've observed this long past the touchdown
+# with no climb-out — prevents emitting a "landing" a later scan would find was
+# a touch-and-go.
+LANDING_SETTLE_SECONDS = 300
+# The aircraft must have descended INTO the field: at least one sample this far
+# before touchdown was at/above this AGL. Rejects parked/taxiing transponders.
+APPROACH_LOOKBACK_SECONDS = 300
+APPROACH_MIN_AGL_FT = 500
+
 
 def pass_geometry_key(params: ScanParams) -> str:
     # 3-decimal precision (~111 m) so small lat/lon drifts from GPS jitter or
@@ -542,6 +556,80 @@ def detect_touch_and_gos(track: list[dict], airport: Airport, runways: list[dict
     )
 
 
+def _runway_low_episodes(
+    track: list[dict],
+    airport: Airport,
+    runways: list[dict],
+    start_ts: int,
+    end_ts: int,
+) -> tuple[list[dict], list[dict]]:
+    """Find each runway-contact episode (≤200 ft AGL within 1.5 nm of a runway).
+
+    Shared by the touch-and-go and landing detectors so they classify the exact
+    same episodes and can never disagree. Returns (recent, episodes). Each
+    episode is the lowest sample in a 180 s bucket, tagged `is_first_low` when
+    the previous 180 s window held no runway-low sample for this aircraft (i.e.
+    this bucket is an arrival, not a continuation of an on-ground presence).
+    """
+    recent = [
+        sample for sample in sorted(track, key=lambda row: row["timestamp"])
+        if start_ts - 120 <= sample["timestamp"] <= end_ts + CLIMB_OUT_LOOKAHEAD_SECONDS
+    ]
+    if len(recent) < 4:
+        return recent, []
+
+    low_by_bucket: dict[int, list[tuple[dict, float, dict | None, float | None]]] = defaultdict(list)
+    for sample in recent:
+        if sample["timestamp"] < start_ts or sample["timestamp"] > end_ts:
+            continue
+        agl = altitude_agl(sample, airport)
+        runway, runway_dist = _nearest_runway(sample, runways)
+        speed = sample.get("velocity_kt")
+        if agl is not None and runway_dist <= 1.5:
+            low_by_bucket[int(sample["timestamp"] // 180)].append((sample, agl, runway, speed))
+
+    low_buckets = set(low_by_bucket.keys())
+    episodes = []
+    for bucket, low_samples in sorted(low_by_bucket.items()):
+        if not low_samples:
+            continue
+        lowest_sample, lowest_agl, runway, speed = min(low_samples, key=lambda row: row[1])
+        episodes.append({
+            "bucket": bucket,
+            "lowest_sample": lowest_sample,
+            "lowest_agl": lowest_agl,
+            "runway": runway,
+            "speed": speed,
+            "is_first_low": (bucket - 1) not in low_buckets,
+        })
+    return recent, episodes
+
+
+def _after_samples(recent: list[dict], lowest_sample: dict, seconds: int) -> list[dict]:
+    lt = lowest_sample["timestamp"]
+    return [s for s in recent if lt < s["timestamp"] <= lt + seconds]
+
+
+def _climbed_out(after: list[dict], lowest_agl: float, airport: Airport) -> bool:
+    if not after:
+        return False
+    latest_agl = altitude_agl(after[-1], airport)
+    climbed = latest_agl is not None and latest_agl - lowest_agl >= 150
+    vertical_up = any((s.get("vertical_rate_fpm") or 0) > 250 for s in after)
+    return climbed or vertical_up
+
+
+def _approached_from_altitude(recent: list[dict], lt: int, airport: Airport) -> bool:
+    for sample in recent:
+        ts = sample["timestamp"]
+        if ts >= lt or ts < lt - APPROACH_LOOKBACK_SECONDS:
+            continue
+        agl = altitude_agl(sample, airport)
+        if agl is not None and agl >= APPROACH_MIN_AGL_FT:
+            return True
+    return False
+
+
 def detect_touch_and_gos_over_period(
     track: list[dict],
     airport: Airport,
@@ -549,59 +637,29 @@ def detect_touch_and_gos_over_period(
     start_ts: int,
     end_ts: int,
 ) -> list[dict]:
-    recent = [
-        sample for sample in sorted(track, key=lambda row: row["timestamp"])
-        if start_ts - 120 <= sample["timestamp"] <= end_ts + 120
-    ]
-    if len(recent) < 4:
-        return []
-
-    low_by_bucket: dict[int, list[tuple[dict, float, dict | None, float, float | None]]] = defaultdict(list)
-    for sample in recent:
-        if sample["timestamp"] < start_ts or sample["timestamp"] > end_ts:
-            continue
-        agl = altitude_agl(sample, airport)
-        runway, runway_dist = _nearest_runway(sample, runways)
-        # velocity_kt is optional — archive samples don't preserve it. We use
-        # it only as a tightening filter when available.
-        speed = sample.get("velocity_kt")
-        if agl is not None and runway_dist <= 1.5:
-            low_by_bucket[int(sample["timestamp"] // 180)].append((sample, agl, runway, runway_dist, speed))
-
+    recent, episodes = _runway_low_episodes(track, airport, runways, start_ts, end_ts)
     events = []
-    for bucket, low_samples in sorted(low_by_bucket.items()):
-        if not low_samples:
-            continue
-
-        lowest_sample, lowest_agl, runway, _, speed = min(low_samples, key=lambda row: row[1])
-        after = [
-            sample for sample in recent
-            if lowest_sample["timestamp"] < sample["timestamp"] <= lowest_sample["timestamp"] + 120
-        ]
+    for ep in episodes:
+        lowest_sample = ep["lowest_sample"]
+        lowest_agl = ep["lowest_agl"]
+        speed = ep["speed"]
+        after = _after_samples(recent, lowest_sample, CLIMB_OUT_LOOKAHEAD_SECONDS)
         if not after:
             continue
-
-        latest_agl = altitude_agl(after[-1], airport)
-        climbed = latest_agl is not None and latest_agl - lowest_agl >= 150
-        vertical_up = any((sample.get("vertical_rate_fpm") or 0) > 250 for sample in after)
         on_ground_seconds = sum(1 for sample in after if sample.get("on_ground")) * 30
-        # Speed filter is best-effort: if we have it, require ≤90kt; if we
-        # don't (archive samples), trust the altitude + climb-back-up signature.
+        # Speed filter is best-effort: archive samples have no velocity, so trust
+        # the altitude + climb-back-up signature when speed is absent.
         speed_ok = speed is None or speed <= 90
-        event_type = None
-        if lowest_agl <= 200 and speed_ok and (climbed or vertical_up) and on_ground_seconds <= 60:
-            event_type = "touch_and_go" if lowest_agl <= 50 else "low_approach"
-        if not event_type:
+        if not (lowest_agl <= 200 and speed_ok and _climbed_out(after, lowest_agl, airport)
+                and on_ground_seconds <= 60):
             continue
+        event_type = "touch_and_go" if lowest_agl <= 50 else "low_approach"
 
-        # Pick the *directional* runway (e.g. 11 vs 29) from the aircraft's
-        # heading at touchdown. Falls back to the positional nearest runway
-        # if the heading-based match fails (no heading recorded, etc.).
         directional = _runway_for_direction(lowest_sample, runways)
-        used_runway = directional or runway
+        used_runway = directional or ep["runway"]
         runway_heading = used_runway.get("heading_deg") if used_runway else None
         events.append({
-            "id": _event_id(event_type, lowest_sample["icao24"], airport.icao, bucket),
+            "id": _event_id(event_type, lowest_sample["icao24"], airport.icao, ep["bucket"]),
             "type": event_type,
             "icao24": lowest_sample["icao24"],
             "callsign": lowest_sample.get("callsign") or lowest_sample["icao24"].upper(),
@@ -609,7 +667,56 @@ def detect_touch_and_gos_over_period(
             "airport_icao": airport.icao,
             "runway_id": used_runway["runway_id"] if used_runway else None,
             "runway_heading_deg": int(runway_heading) if runway_heading is not None else None,
-            # Kept for back-compat with older clients reading `runway_used`.
+            "runway_used": used_runway["runway_id"] if used_runway else None,
+            "min_altitude_ft_agl": int(lowest_agl),
+        })
+    return events
+
+
+def detect_landings_over_period(
+    track: list[dict],
+    airport: Airport,
+    runways: list[dict],
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    """A landing = reached the runway low and did NOT climb back out within 5 min.
+
+    The complement of a touch-and-go over the same runway-low episodes. Guards:
+    only the first low bucket of an arrival (`is_first_low`), the aircraft
+    descended in from ≥500 ft AGL, and we've observed ≥5 min past touchdown
+    (settle) so we won't retract it as a touch-and-go on a later scan.
+    """
+    recent, episodes = _runway_low_episodes(track, airport, runways, start_ts, end_ts)
+    events = []
+    for ep in episodes:
+        if not ep["is_first_low"]:
+            continue
+        lowest_sample = ep["lowest_sample"]
+        lowest_agl = ep["lowest_agl"]
+        lt = int(lowest_sample["timestamp"])
+        if lowest_agl > 200:
+            continue
+        if end_ts - lt < LANDING_SETTLE_SECONDS:
+            continue  # not enough post-touchdown data yet — decide on a later pass
+        after = _after_samples(recent, lowest_sample, LANDING_SETTLE_SECONDS)
+        if _climbed_out(after, lowest_agl, airport):
+            continue  # climbed back out -> touch-and-go, not a landing
+        if not _approached_from_altitude(recent, lt, airport):
+            continue  # never descended in (parked/taxiing) -> not a landing
+
+        directional = _runway_for_direction(lowest_sample, runways)
+        used_runway = directional or ep["runway"]
+        runway_heading = used_runway.get("heading_deg") if used_runway else None
+        events.append({
+            "id": _event_id("landing", lowest_sample["icao24"], airport.icao, ep["bucket"]),
+            "type": "landing",
+            "icao24": lowest_sample["icao24"],
+            "callsign": lowest_sample.get("callsign") or lowest_sample["icao24"].upper(),
+            "timestamp": lt,
+            "airport_icao": airport.icao,
+            "runway_id": used_runway["runway_id"] if used_runway else None,
+            "runway_heading_deg": int(runway_heading) if runway_heading is not None else None,
             "runway_used": used_runway["runway_id"] if used_runway else None,
             "min_altitude_ft_agl": int(lowest_agl),
         })
@@ -716,6 +823,8 @@ def detect_events_over_period(
         events_by_id[event["id"]] = event
     for event in detect_touch_and_gos_over_period(samples, airport, runways, start_ts, end_ts):
         events_by_id[event["id"]] = event
+    for event in detect_landings_over_period(samples, airport, runways, start_ts, end_ts):
+        events_by_id[event["id"]] = event
     for event in detect_passes_over_period(samples, airport, params, start_ts, end_ts):
         events_by_id[event["id"]] = event
     return sorted(events_by_id.values(), key=lambda event: event["timestamp"])
@@ -729,5 +838,6 @@ def event_counts(events: list[dict]) -> dict[str, int]:
         "circles": counts["circle"],
         "touch_and_gos": counts["touch_and_go"],
         "low_approaches": counts["low_approach"],
+        "landings": counts["landing"],
         "passes": counts["pass_over_user"],
     }
