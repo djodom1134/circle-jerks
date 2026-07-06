@@ -23,6 +23,7 @@ import {
   getAtcFeeds,
   getConfig,
   getLiveStatus,
+  getPatternCircuits,
   getRepeatOffenders,
   getSponsors,
   getTrackHistory,
@@ -38,6 +39,7 @@ import {
   type LiveStatusResponse,
   type MessagePreferences,
   type Offender,
+  type PatternCircuitsResponse,
   type PatternPoint,
   type RepeatOffender,
   type RunwayPattern,
@@ -56,7 +58,6 @@ import {
   type StoredPreferences
 } from "./lib/preferences";
 import { getVisitorId } from "./lib/visitor";
-import { averagePaths } from "./lib/averagePath";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
 const APP_TITLE = "Automated Noise Complaint Generator";
@@ -109,6 +110,8 @@ export default function App() {
   const [historyDays, setHistoryDays] = useState(3);
   const [historyMode, setHistoryMode] = useState<"lines" | "density" | "average">("lines");
   const [historyLineAlpha, setHistoryLineAlpha] = useState(0.2);
+  const [historySigmaK, setHistorySigmaK] = useState(1);
+  const [historyCircuits, setHistoryCircuits] = useState<PatternCircuitsResponse | null>(null);
   const [historyData, setHistoryData] = useState<TrackHistoryResponse | null>(null);
   const [historyError, setHistoryError] = useState(false);
   const showHeatmap = mapOverlay === "noise";
@@ -367,18 +370,18 @@ export default function App() {
     return () => { cancelled = true; };
   }, [mapOverlay, airport?.icao, historyDays]);
 
-  // Count of averaged representative paths, for the Average-mode caption. Uses
-  // the SAME default opts as MapView's averagePaths() call so the count matches
-  // what the map actually draws — keep them in sync. 0 groups with >0 tracks
-  // means no direction bucket reached the minimum, so the map is intentionally
-  // blank and the caption must say so rather than claim a flight count.
-  const averageGroupCount = useMemo(() => {
-    if (mapOverlay !== "history" || historyMode !== "average" || !historyData || !airport) return null;
-    return averagePaths(
-      historyData.tracks.map((t) => ({ samples: t.samples })),
-      { lat: airport.lat, lon: airport.lon }
-    ).length;
-  }, [mapOverlay, historyMode, historyData, airport]);
+  useEffect(() => {
+    if (mapOverlay !== "history" || historyMode !== "average" || !airport?.icao) {
+      setHistoryCircuits(null);
+      return;
+    }
+    let cancelled = false;
+    setHistoryCircuits(null);
+    getPatternCircuits(airport.icao, historyDays)
+      .then((data) => { if (!cancelled) setHistoryCircuits(data); })
+      .catch(() => { if (!cancelled) setHistoryCircuits(null); });
+    return () => { cancelled = true; };
+  }, [mapOverlay, historyMode, airport?.icao, historyDays]);
 
   useEffect(() => {
     if (!scanParams) return;
@@ -560,6 +563,36 @@ export default function App() {
                   ))}
                 </div>
               </div>
+              {historyMode === "average" && (
+                <>
+                  <div className="history-controls-row">
+                    <span className="history-controls-label">Spread</span>
+                    <div className="segmented history-sigma">
+                      {[1, 2, 3].map((k) => (
+                        <button
+                          key={k}
+                          className={historySigmaK === k ? "active" : ""}
+                          onClick={() => setHistorySigmaK(k)}
+                        >
+                          {k}σ
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {historyCircuits && Object.keys(historyCircuits.counts_by_class).length > 0 && (
+                    <div className="history-key">
+                      {Object.entries(historyCircuits.counts_by_class)
+                        .sort((a, b) => (a[0] === "area" ? 1 : b[0] === "area" ? -1 : Number(a[0].replace(/[^0-9]/g, "")) - Number(b[0].replace(/[^0-9]/g, ""))))
+                        .map(([cls, n]) => (
+                          <span key={cls} className="history-key-item">
+                            <i className={`history-key-dot cls-${cls === "area" ? "area" : "rwy"}`} />
+                            {cls === "area" ? "Area" : `Rwy ${cls}`} ({n})
+                          </span>
+                        ))}
+                    </div>
+                  )}
+                </>
+              )}
               {historyMode === "lines" && (
                 <div className="history-controls-row">
                   <span className="history-controls-label">Opacity</span>
@@ -580,10 +613,14 @@ export default function App() {
               <div className="history-controls-caption">
                 {historyError
                   ? "Couldn't load history"
-                  : !historyData
-                    ? "Loading history…"
-                    : historyMode === "average" && averageGroupCount === 0
-                      ? `Not enough repeated tracks to average yet (${historyData.tracks.length.toLocaleString()} flights)`
+                  : historyMode === "average"
+                    ? !historyCircuits
+                      ? "Loading circuits…"
+                      : historyCircuits.total_circuits === 0
+                        ? "No classified circuits yet"
+                        : `${historyCircuits.total_circuits.toLocaleString()} circuits${historyCircuits.truncated ? " (capped)" : ""}`
+                    : !historyData
+                      ? "Loading history…"
                       : historyData.truncated
                         ? `Showing ${historyData.tracks.length.toLocaleString()} of ${historyData.total_tracks.toLocaleString()} flights`
                         : `${historyData.tracks.length.toLocaleString()} flights`}
@@ -606,6 +643,8 @@ export default function App() {
             historyTracks={mapOverlay === "history" ? historyData?.tracks ?? null : null}
             historyMode={mapOverlay === "history" ? historyMode : null}
             historyLineAlpha={historyLineAlpha}
+            historyCircuits={mapOverlay === "history" && historyMode === "average" ? historyCircuits?.circuits ?? null : null}
+            historySigmaK={historySigmaK}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
             patterns={patterns}
             editingRunwayId={patternEditing ? editingRunwayId : null}

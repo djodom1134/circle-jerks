@@ -1971,6 +1971,29 @@ input[type="range"] {
   color: #6b7185;
   font-weight: 600;
 }
+.history-sigma button {
+  min-width: 30px;
+}
+.history-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: #4b5563;
+}
+.history-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.history-key-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.history-key-dot.cls-rwy { background: #2563eb; }
+.history-key-dot.cls-area { background: #6b7185; }
 .history-controls-caption {
   color: #6b7185;
   font-weight: 600;
