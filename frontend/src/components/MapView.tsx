@@ -16,8 +16,9 @@ import OSM from "ol/source/OSM";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
 import { directionArrows, projectedPath } from "../lib/patternGeometry";
-import type { Airport, Offender, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
+import type { Airport, HistoricalTrack, Offender, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
 import { smoothSegment } from "../lib/spline";
+import { averagePaths } from "../lib/averagePath";
 
 // Aircraft climbing under full power are MUCH louder than the same aircraft
 // in cruise at the same altitude — engine + propeller noise dominates. Maps
@@ -94,6 +95,8 @@ interface Props {
   editingClosed?: boolean;
   editSeedKey?: number;
   onEditingPointsChange?: (points: { lat: number; lon: number }[]) => void;
+  historyTracks?: HistoricalTrack[] | null;
+  historyMode?: "lines" | "density" | "average" | null;
 }
 
 // dB → [r, g, b] for additive canvas compositing.
@@ -444,6 +447,19 @@ function styleForFeature(feature: Feature) {
     });
   }
 
+  if (kind === "history_line") {
+    const altAgl = feature.get("alt_agl_ft");
+    const [r, g, b] = colorFromAltitudeAgl(typeof altAgl === "number" ? altAgl : null);
+    return new Style({
+      stroke: new Stroke({ color: `rgba(${r}, ${g}, ${b}, 0.14)`, width: 1 }),
+    });
+  }
+  if (kind === "history_avg") {
+    return new Style({
+      stroke: new Stroke({ color: "rgba(27, 58, 107, 0.9)", width: 4 }),
+    });
+  }
+
   if (kind === "aircraft") {
     const heading = Number(feature.get("heading") ?? 0);
     return new Style({
@@ -513,13 +529,14 @@ function styleForFeature(feature: Feature) {
   });
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
   const aircraftSourceRef = useRef<VectorSource | null>(null);
   const patternSourceRef = useRef<VectorSource | null>(null);
   const editSourceRef = useRef<VectorSource | null>(null);
+  const historySourceRef = useRef<VectorSource | null>(null);
   const editLineRef = useRef<Feature<LineString> | null>(null);
   const onEditChangeRef = useRef(onEditingPointsChange);
   onEditChangeRef.current = onEditingPointsChange;
@@ -581,6 +598,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const windowStart = scanData?.window?.start_ts ?? 0;
   const windowEnd = scanData?.window?.end_ts ?? 0;
   const groundElevFt = airport?.elevation_ft ?? 0;
+  const historyActive = historyMode != null && historyTracks != null;
 
   const features = useMemo(() => {
     const rows: Feature[] = [];
@@ -594,7 +612,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     }
     // In heatmap mode the canvas overlay draws the gradient; here we only
     // emit the airport ring + home pin so the user still has reference points.
-    if (showHeatmap) return rows;
+    if (showHeatmap || historyActive) return rows;
     for (const track of scanData?.tracks ?? []) {
       const isSelected = selectedIcao24 === track.icao24;
       for (const coords of splitSegments(track.samples, false)) {
@@ -617,10 +635,10 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       }
     }
     return rows;
-  }, [airport, userLocation, scanData, selectedIcao24, showHeatmap, windowStart, windowEnd, groundElevFt]);
+  }, [airport, userLocation, scanData, selectedIcao24, showHeatmap, windowStart, windowEnd, groundElevFt, historyActive]);
 
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
-    if (showHeatmap) return [];
+    if (showHeatmap || historyActive) return [];
     const liveCutoff = Date.now() / 1000 - LIVE_AIRCRAFT_FRESHNESS_SECONDS;
     return (scanData?.tracks ?? [])
       .map((track) => ({
@@ -638,7 +656,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         }
         return latest >= liveCutoff;
       });
-  }, [scanData, selectedIcao24, showHeatmap]);
+  }, [scanData, selectedIcao24, showHeatmap, historyActive]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) {
@@ -648,6 +666,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     aircraftSourceRef.current = new VectorSource();
     patternSourceRef.current = new VectorSource();
     editSourceRef.current = new VectorSource();
+    historySourceRef.current = new VectorSource();
     const vectorLayer = new VectorLayer({
       source: sourceRef.current,
       style: (feature) => styleForFeature(feature as Feature)
@@ -662,6 +681,11 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       style: (feature) => styleForFeature(feature as Feature),
       zIndex: 6,
     });
+    const historyLayer = new VectorLayer({
+      source: historySourceRef.current,
+      style: (feature) => styleForFeature(feature as Feature),
+      zIndex: 4,
+    });
     const aircraftLayer = new VectorLayer({
       source: aircraftSourceRef.current,
       style: (feature) => styleForFeature(feature as Feature),
@@ -674,6 +698,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       layers: [
         new TileLayer({ source: new OSM({ crossOrigin: "anonymous" }) }),
         vectorLayer,
+        historyLayer,
         patternLayer,
         editLayer,
         aircraftLayer
@@ -751,6 +776,44 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       }
     }
   }, [patterns, mapReady]);
+
+  // Historical track overlay: Lines draws every simplified flight as a faint
+  // altitude-colored hairline; Average collapses them to a few bold
+  // representative centerlines. Density is drawn on its own canvas (separate
+  // effect), so here we clear when the mode isn't line/average.
+  useEffect(() => {
+    const source = historySourceRef.current;
+    if (!mapReady || !source) return;
+    source.clear();
+    if (!historyActive || !historyTracks) return;
+
+    if (historyMode === "lines") {
+      for (const track of historyTracks) {
+        if (track.samples.length < 2) continue;
+        const coords = track.samples.map((s) => fromLonLat([s.lon, s.lat]));
+        const altVals = track.samples
+          .map((s) => (s.altitude_ft != null ? s.altitude_ft - groundElevFt : null))
+          .filter((v): v is number => v != null && Number.isFinite(v));
+        const avgAltAglFt = altVals.length > 0
+          ? altVals.reduce((a, b) => a + b, 0) / altVals.length
+          : null;
+        source.addFeature(lineFeature(smoothSegment(coords), {
+          kind: "history_line",
+          alt_agl_ft: avgAltAglFt,
+        }));
+      }
+    } else if (historyMode === "average") {
+      if (!airport) return;
+      const averaged = averagePaths(
+        historyTracks.map((t) => ({ samples: t.samples })),
+        { lat: airport.lat, lon: airport.lon },
+      );
+      for (const path of averaged) {
+        const coords = path.points.map(([lon, lat]) => fromLonLat([lon, lat]));
+        source.addFeature(lineFeature(smoothSegment(coords), { kind: "history_avg" }));
+      }
+    }
+  }, [mapReady, historyActive, historyMode, historyTracks, airport, groundElevFt]);
 
   useEffect(() => {
     const map = mapRef.current;
