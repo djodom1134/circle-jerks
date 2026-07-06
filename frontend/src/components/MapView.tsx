@@ -857,9 +857,10 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     const source = historySourceRef.current;
     if (!mapReady || !source) return;
     source.clear();
-    if (!historyActive || !historyTracks) return;
+    if (!historyActive) return;
 
     if (historyMode === "lines") {
+      if (!historyTracks) return;
       for (const track of historyTracks) {
         if (track.samples.length < 2) continue;
         const coords = track.samples.map((s) => fromLonLat([s.lon, s.lat]));
@@ -883,7 +884,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       // Deterministic color order: runway classes sorted numerically, area last.
       const order = classes
         .map((c) => c.class)
-        .sort((a, b) => (a === "area" ? 1 : b === "area" ? -1 : Number(a) - Number(b)));
+        .sort((a, b) => (a === "area" ? 1 : b === "area" ? -1 : Number(a.replace(/[^0-9]/g, "")) - Number(b.replace(/[^0-9]/g, ""))));
       for (const cls of classes) {
         const color = classColor(cls.class, order.indexOf(cls.class));
         if (cls.band.length >= 4) {
