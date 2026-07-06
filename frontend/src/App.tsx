@@ -108,6 +108,7 @@ export default function App() {
   const [historyDays, setHistoryDays] = useState(3);
   const [historyMode, setHistoryMode] = useState<"lines" | "density" | "average">("lines");
   const [historyData, setHistoryData] = useState<TrackHistoryResponse | null>(null);
+  const [historyError, setHistoryError] = useState(false);
   const showHeatmap = mapOverlay === "noise";
   const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
@@ -350,12 +351,17 @@ export default function App() {
   useEffect(() => {
     if (mapOverlay !== "history" || !airport?.icao) {
       setHistoryData(null);
+      setHistoryError(false);
       return;
     }
     let cancelled = false;
+    // Clear stale data so a day/airport switch shows "Loading…" instead of the
+    // previous range's count, and reset any prior error before refetching.
+    setHistoryData(null);
+    setHistoryError(false);
     getTrackHistory(airport.icao, historyDays)
       .then((data) => { if (!cancelled) setHistoryData(data); })
-      .catch(() => { if (!cancelled) setHistoryData(null); });
+      .catch(() => { if (!cancelled) setHistoryError(true); });
     return () => { cancelled = true; };
   }, [mapOverlay, airport?.icao, historyDays]);
 
@@ -540,11 +546,13 @@ export default function App() {
                 </div>
               </div>
               <div className="history-controls-caption">
-                {historyData
-                  ? historyData.truncated
-                    ? `Showing ${historyData.tracks.length.toLocaleString()} of ${historyData.total_tracks.toLocaleString()} flights`
-                    : `${historyData.tracks.length.toLocaleString()} flights`
-                  : "Loading history…"}
+                {historyError
+                  ? "Couldn't load history"
+                  : historyData
+                    ? historyData.truncated
+                      ? `Showing ${historyData.tracks.length.toLocaleString()} of ${historyData.total_tracks.toLocaleString()} flights`
+                      : `${historyData.tracks.length.toLocaleString()} flights`
+                    : "Loading history…"}
               </div>
             </div>
           )}
