@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Route, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import StatsPage from "./components/StatsPage";
@@ -25,6 +25,7 @@ import {
   getLiveStatus,
   getRepeatOffenders,
   getSponsors,
+  getTrackHistory,
   nearestAirport,
   recordHeartbeat,
   recordSubmission,
@@ -44,6 +45,7 @@ import {
   type ScanResponse,
   type SponsorsResponse,
   type ToneSliders,
+  type TrackHistoryResponse,
   type WindowCode
 } from "./lib/api";
 import { formatLocalTime, numberOrDash, titleize } from "./lib/format";
@@ -102,7 +104,11 @@ export default function App() {
   const [airportResults, setAirportResults] = useState<Airport[]>([]);
   const [addressQuery, setAddressQuery] = useState(() => preferences.user_address ?? "");
   const [autoZoom, setAutoZoom] = useState(true);
-  const [showHeatmap, setShowHeatmap] = useState(false);
+  const [mapOverlay, setMapOverlay] = useState<"none" | "noise" | "history">("none");
+  const [historyDays, setHistoryDays] = useState(3);
+  const [historyMode, setHistoryMode] = useState<"lines" | "density" | "average">("lines");
+  const [historyData, setHistoryData] = useState<TrackHistoryResponse | null>(null);
+  const showHeatmap = mapOverlay === "noise";
   const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
   const [repeatOffenders, setRepeatOffenders] = useState<RepeatOffender[]>([]);
@@ -342,6 +348,18 @@ export default function App() {
   }, [refreshScan]);
 
   useEffect(() => {
+    if (mapOverlay !== "history" || !airport?.icao) {
+      setHistoryData(null);
+      return;
+    }
+    let cancelled = false;
+    getTrackHistory(airport.icao, historyDays)
+      .then((data) => { if (!cancelled) setHistoryData(data); })
+      .catch(() => { if (!cancelled) setHistoryData(null); });
+    return () => { cancelled = true; };
+  }, [mapOverlay, airport?.icao, historyDays]);
+
+  useEffect(() => {
     if (!scanParams) return;
     const sendHeartbeat = () => {
       void recordHeartbeat({
@@ -463,12 +481,22 @@ export default function App() {
             <button
               type="button"
               className={`map-icon-toggle${showHeatmap ? " active" : ""}`}
-              onClick={() => setShowHeatmap((value) => !value)}
+              onClick={() => setMapOverlay((o) => (o === "noise" ? "none" : "noise"))}
               title={showHeatmap ? "Showing noise-intensity heatmap. Click to return to individual tracks." : "Show a noise-intensity heatmap (lower aircraft = brighter)."}
               aria-label="Toggle noise heatmap"
               aria-pressed={showHeatmap}
             >
               <Flame size={16} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className={`map-icon-toggle${mapOverlay === "history" ? " active" : ""}`}
+              onClick={() => setMapOverlay((o) => (o === "history" ? "none" : "history"))}
+              title={mapOverlay === "history" ? "Showing historical track density. Click to hide." : "Show 1–7 days of historical flight paths."}
+              aria-label="Toggle historical track density"
+              aria-pressed={mapOverlay === "history"}
+            >
+              <Route size={16} aria-hidden="true" />
             </button>
             <button
               className={`map-icon-toggle${patternEditing ? " active" : ""}`}
@@ -481,6 +509,45 @@ export default function App() {
             </button>
             <AtcListenButton airportIcao={airport?.icao} />
           </div>
+          {mapOverlay === "history" && (
+            <div className="history-controls" role="group" aria-label="Historical track density controls">
+              <div className="history-controls-row">
+                <span className="history-controls-label">Days</span>
+                <div className="segmented history-days">
+                  {[1, 2, 3, 4, 5, 6, 7].map((d) => (
+                    <button
+                      key={d}
+                      className={historyDays === d ? "active" : ""}
+                      onClick={() => setHistoryDays(d)}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="history-controls-row">
+                <span className="history-controls-label">View</span>
+                <div className="segmented history-mode">
+                  {([["lines", "Lines"], ["density", "Density"], ["average", "Average"]] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      className={historyMode === mode ? "active" : ""}
+                      onClick={() => setHistoryMode(mode)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="history-controls-caption">
+                {historyData
+                  ? historyData.truncated
+                    ? `Showing ${historyData.tracks.length.toLocaleString()} of ${historyData.total_tracks.toLocaleString()} flights`
+                    : `${historyData.tracks.length.toLocaleString()} flights`
+                  : "Loading history…"}
+              </div>
+            </div>
+          )}
           <WindIndicator airportIcao={airport?.icao ?? null} windowCode={windowCode} />
           <BackfillBanner
             airportIcao={airport?.icao ?? null}
@@ -494,6 +561,8 @@ export default function App() {
             selectedIcao24={selected?.icao24}
             autoZoom={autoZoom}
             showHeatmap={showHeatmap}
+            historyTracks={mapOverlay === "history" ? historyData?.tracks ?? null : null}
+            historyMode={mapOverlay === "history" ? historyMode : null}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
             patterns={patterns}
             editingRunwayId={patternEditing ? editingRunwayId : null}
