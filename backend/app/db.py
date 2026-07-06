@@ -638,6 +638,7 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
         "circles": type_counts.get("circle", 0),
         "touch_and_gos": type_counts.get("touch_and_go", 0),
         "low_approaches": type_counts.get("low_approach", 0),
+        "landings": type_counts.get("landing", 0),
         "passes": type_counts.get("pass_over_user", 0),
         "unique_aircraft": unique_aircraft,
         "runway_changes": change_count,
@@ -752,9 +753,40 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
             "no_wind_data": r["total"] - classified,
         })
 
+    did_not_stop = counters["circles"] + counters["touch_and_gos"] + counters["low_approaches"]
+    landed = counters["landings"]
+    stop_total = did_not_stop + landed
+    stop_classification = {
+        "total": stop_total,
+        "did_not_stop": did_not_stop,
+        "landed": landed,
+        "did_not_stop_pct": round(100 * did_not_stop / stop_total, 1) if stop_total else None,
+    }
+
+    # Always by calendar day (UTC epoch days), independent of the chart bucket.
+    stop_over_time = []
+    for r in conn.execute(
+        "SELECT (timestamp/86400)*86400 AS day, "
+        "SUM(CASE WHEN type='landing' THEN 1 ELSE 0 END) AS landed, "
+        "SUM(CASE WHEN type IN ('circle','touch_and_go','low_approach') THEN 1 ELSE 0 END) AS did_not_stop "
+        "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? "
+        "AND type IN ('circle','touch_and_go','low_approach','landing') "
+        "GROUP BY day ORDER BY day", win,
+    ).fetchall():
+        total = r["did_not_stop"] + r["landed"]
+        stop_over_time.append({
+            "day": r["day"],
+            "did_not_stop": r["did_not_stop"],
+            "landed": r["landed"],
+            "total": total,
+            "pct": round(100 * r["did_not_stop"] / total, 1) if total else None,
+        })
+
     return {
         "counters": counters,
         "ops_over_time": ops_over_time,
+        "stop_classification": stop_classification,
+        "stop_over_time": stop_over_time,
         "wind": wind,
         "deviation": deviation,
         "cowboys": cowboys,

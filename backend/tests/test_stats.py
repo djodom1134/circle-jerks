@@ -144,6 +144,46 @@ def test_deviation_worst_dedups_by_tail(tmp_path):
     assert rows[0]["circles"] == 2
 
 
+def test_stop_classification_includes_circles_and_excludes_passes(tmp_path):
+    conn = seeded_conn(tmp_path / "s.sqlite3")
+    day = 86400
+    for i, t in enumerate(("circle", "circle", "touch_and_go", "low_approach", "landing")):
+        _op(conn, f"a{i}", t, day + i)
+    _op(conn, "p0", "pass_over_user", day + 9)  # excluded from ratio
+    conn.commit()
+
+    stats = db.airport_stats(conn, "KBJC", 0, 10 * day, bucket_seconds=day)
+    sc = stats["stop_classification"]
+    assert stats["counters"]["landings"] == 1
+    assert sc["did_not_stop"] == 4          # 2 circles + 1 t&g + 1 low approach
+    assert sc["landed"] == 1
+    assert sc["total"] == 5
+    assert sc["did_not_stop_pct"] == 80.0
+
+
+def test_stop_classification_pct_null_when_empty(tmp_path):
+    conn = seeded_conn(tmp_path / "s.sqlite3")
+    stats = db.airport_stats(conn, "KBJC", 0, 86400)
+    assert stats["stop_classification"]["total"] == 0
+    assert stats["stop_classification"]["did_not_stop_pct"] is None
+
+
+def test_stop_over_time_buckets_by_day(tmp_path):
+    conn = seeded_conn(tmp_path / "s.sqlite3")
+    day = 86400
+    # Day 1: 2 non-stop, 0 landed. Day 2: 1 non-stop, 1 landed.
+    _op(conn, "d1a", "circle", day + 10)
+    _op(conn, "d1b", "touch_and_go", day + 20)
+    _op(conn, "d2a", "touch_and_go", 2 * day + 10)
+    _op(conn, "d2b", "landing", 2 * day + 20)
+    conn.commit()
+
+    stats = db.airport_stats(conn, "KBJC", 0, 10 * day)
+    rows = {r["day"]: r for r in stats["stop_over_time"]}
+    assert rows[day]["did_not_stop"] == 2 and rows[day]["landed"] == 0 and rows[day]["pct"] == 100.0
+    assert rows[2 * day]["did_not_stop"] == 1 and rows[2 * day]["landed"] == 1 and rows[2 * day]["pct"] == 50.0
+
+
 def test_stats_endpoint(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app
