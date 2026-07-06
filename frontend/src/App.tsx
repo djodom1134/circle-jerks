@@ -60,6 +60,9 @@ import {
 import { getVisitorId } from "./lib/visitor";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
+// A runway/area class is only averaged+drawn when it has at least this many
+// circuits — must match meanAndBand's minCount default in lib/averagePath.ts.
+const AVERAGE_MIN_PER_CLASS = 3;
 const APP_TITLE = "Automated Noise Complaint Generator";
 const APP_TAGLINE = "Small engines, big egos. The 0.0001% who control the sky and cause 80% of the noise pollution.";
 const FAA_ANCIR_URL = "https://ancir.faa.gov/ancir?id=ancir_sc_cat_item&sys_id=6149ade187a1f550b0d987b9cebb357e";
@@ -112,6 +115,7 @@ export default function App() {
   const [historyLineAlpha, setHistoryLineAlpha] = useState(0.2);
   const [historySigmaK, setHistorySigmaK] = useState(1);
   const [historyCircuits, setHistoryCircuits] = useState<PatternCircuitsResponse | null>(null);
+  const [historyCircuitsError, setHistoryCircuitsError] = useState(false);
   const [historyData, setHistoryData] = useState<TrackHistoryResponse | null>(null);
   const [historyError, setHistoryError] = useState(false);
   const showHeatmap = mapOverlay === "noise";
@@ -373,13 +377,15 @@ export default function App() {
   useEffect(() => {
     if (mapOverlay !== "history" || historyMode !== "average" || !airport?.icao) {
       setHistoryCircuits(null);
+      setHistoryCircuitsError(false);
       return;
     }
     let cancelled = false;
     setHistoryCircuits(null);
+    setHistoryCircuitsError(false);
     getPatternCircuits(airport.icao, historyDays)
       .then((data) => { if (!cancelled) setHistoryCircuits(data); })
-      .catch(() => { if (!cancelled) setHistoryCircuits(null); });
+      .catch(() => { if (!cancelled) setHistoryCircuitsError(true); });
     return () => { cancelled = true; };
   }, [mapOverlay, historyMode, airport?.icao, historyDays]);
 
@@ -422,6 +428,10 @@ export default function App() {
     setAirport(nearest);
   }
 
+  // True when at least one class has enough circuits to actually average+draw.
+  const averageDrawable = historyCircuits
+    ? Object.values(historyCircuits.counts_by_class).some((n) => n >= AVERAGE_MIN_PER_CLASS)
+    : false;
   const activeNow = scanData?.counters.offenders_active_now ?? 0;
 
   return (
@@ -579,9 +589,10 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  {historyCircuits && Object.keys(historyCircuits.counts_by_class).length > 0 && (
+                  {historyCircuits && averageDrawable && (
                     <div className="history-key">
                       {Object.entries(historyCircuits.counts_by_class)
+                        .filter(([, n]) => n >= AVERAGE_MIN_PER_CLASS)
                         .sort((a, b) => (a[0] === "area" ? 1 : b[0] === "area" ? -1 : Number(a[0].replace(/[^0-9]/g, "")) - Number(b[0].replace(/[^0-9]/g, ""))))
                         .map(([cls, n]) => (
                           <span key={cls} className="history-key-item">
@@ -614,11 +625,15 @@ export default function App() {
                 {historyError
                   ? "Couldn't load history"
                   : historyMode === "average"
-                    ? !historyCircuits
-                      ? "Loading circuits…"
-                      : historyCircuits.total_circuits === 0
-                        ? "No classified circuits yet"
-                        : `${historyCircuits.total_circuits.toLocaleString()} circuits${historyCircuits.truncated ? " (capped)" : ""}`
+                    ? historyCircuitsError
+                      ? "Couldn't load circuits"
+                      : !historyCircuits
+                        ? "Loading circuits…"
+                        : historyCircuits.total_circuits === 0
+                          ? "No classified circuits yet"
+                          : !averageDrawable
+                            ? `Not enough repeated circuits to average yet (${historyCircuits.total_circuits.toLocaleString()} circuits)`
+                            : `${historyCircuits.total_circuits.toLocaleString()} circuits${historyCircuits.truncated ? " (capped)" : ""}`
                     : !historyData
                       ? "Loading history…"
                       : historyData.truncated
