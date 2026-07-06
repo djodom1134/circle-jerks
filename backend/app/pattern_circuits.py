@@ -89,11 +89,14 @@ def build_circuits(
             ],
         })
     total = len(built)
-    if total > cap:
-        built.sort(key=lambda c: c["ts"], reverse=True)
-        built = built[:cap]
+    # Tally the class breakdown over the FULL pre-cap set so counts_by_class
+    # sums to `total` (a truthful breakdown), then apply the cap.
     counts_by_class: dict[str, int] = {}
     for c in built:
         counts_by_class[c["class"]] = counts_by_class.get(c["class"], 0) + 1
+    if total > cap:
+        built.sort(key=lambda c: c["ts"], reverse=True)
+        built = built[:cap]
+    for c in built:
         del c["ts"]  # internal sort key, not part of the response
     return built, counts_by_class, total

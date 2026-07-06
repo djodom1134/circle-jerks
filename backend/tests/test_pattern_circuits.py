@@ -59,6 +59,7 @@ def test_build_circuits_caps_by_recency():
     tracks = {f"a{i:05d}": _track(f"a{i:05d}", 1000 + i * 1000) for i in range(6)}
     circuits, counts, total = pc.build_circuits(ops, tracks, cap=2)
     assert total == 6
+    assert counts == {"area": 6}
     assert len(circuits) == 2
     # kept the two most recent operation timestamps (i=4,5)
     kept = {c["icao24"] for c in circuits}
