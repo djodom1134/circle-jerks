@@ -97,6 +97,7 @@ interface Props {
   onEditingPointsChange?: (points: { lat: number; lon: number }[]) => void;
   historyTracks?: HistoricalTrack[] | null;
   historyMode?: "lines" | "density" | "average" | null;
+  historyLineAlpha?: number;
 }
 
 // dB → [r, g, b] for additive canvas compositing.
@@ -477,6 +478,8 @@ function styleForFeature(feature: Feature) {
   }
 
   if (kind === "history_line") {
+    // Default alpha; the history layer normally styles these via
+    // styleForHistoryFeature with a live, slider-controlled alpha instead.
     const altAgl = feature.get("alt_agl_ft");
     const [r, g, b] = colorFromAltitudeAgl(typeof altAgl === "number" ? altAgl : null);
     return new Style({
@@ -558,7 +561,21 @@ function styleForFeature(feature: Feature) {
   });
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null }: Props) {
+// The history layer styles its Lines with a live, slider-controlled alpha, so
+// it can't use the static styleForFeature. history_line here reads the current
+// alpha; everything else (history_avg) defers to styleForFeature.
+function styleForHistoryFeature(feature: Feature, lineAlpha: number) {
+  if (feature.get("kind") === "history_line") {
+    const altAgl = feature.get("alt_agl_ft");
+    const [r, g, b] = colorFromAltitudeAgl(typeof altAgl === "number" ? altAgl : null);
+    return new Style({
+      stroke: new Stroke({ color: `rgba(${r}, ${g}, ${b}, ${lineAlpha})`, width: 1 }),
+    });
+  }
+  return styleForFeature(feature);
+}
+
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
@@ -630,6 +647,8 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const windowEnd = scanData?.window?.end_ts ?? 0;
   const groundElevFt = airport?.elevation_ft ?? 0;
   const historyActive = historyMode != null && historyTracks != null;
+  const historyLineAlphaRef = useRef(0.2);
+  historyLineAlphaRef.current = historyLineAlpha;
 
   const features = useMemo(() => {
     const rows: Feature[] = [];
@@ -714,7 +733,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     });
     const historyLayer = new VectorLayer({
       source: historySourceRef.current,
-      style: (feature) => styleForFeature(feature as Feature),
+      style: (feature) => styleForHistoryFeature(feature as Feature, historyLineAlphaRef.current),
       zIndex: 4,
     });
     const aircraftLayer = new VectorLayer({
@@ -845,6 +864,13 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
       }
     }
   }, [mapReady, historyActive, historyMode, historyTracks, airport, groundElevFt]);
+
+  // Restyle history lines when the opacity slider moves — re-runs the layer's
+  // style function against the live alpha ref without rebuilding features.
+  useEffect(() => {
+    if (!mapReady) return;
+    historySourceRef.current?.changed();
+  }, [historyLineAlpha, mapReady]);
 
   useEffect(() => {
     const map = mapRef.current;

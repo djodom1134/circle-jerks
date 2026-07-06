@@ -108,6 +108,7 @@ export default function App() {
   const [mapOverlay, setMapOverlay] = useState<"none" | "noise" | "history">("none");
   const [historyDays, setHistoryDays] = useState(3);
   const [historyMode, setHistoryMode] = useState<"lines" | "density" | "average">("lines");
+  const [historyLineAlpha, setHistoryLineAlpha] = useState(0.2);
   const [historyData, setHistoryData] = useState<TrackHistoryResponse | null>(null);
   const [historyError, setHistoryError] = useState(false);
   const showHeatmap = mapOverlay === "noise";
@@ -559,6 +560,23 @@ export default function App() {
                   ))}
                 </div>
               </div>
+              {historyMode === "lines" && (
+                <div className="history-controls-row">
+                  <span className="history-controls-label">Opacity</span>
+                  <input
+                    className="history-alpha"
+                    type="range"
+                    min={0.03}
+                    max={1}
+                    step={0.01}
+                    value={historyLineAlpha}
+                    onChange={(e) => setHistoryLineAlpha(Number(e.target.value))}
+                    aria-label="Line opacity"
+                    title="Adjust how faint or bold the individual track lines are"
+                  />
+                  <span className="history-alpha-value">{Math.round(historyLineAlpha * 100)}%</span>
+                </div>
+              )}
               <div className="history-controls-caption">
                 {historyError
                   ? "Couldn't load history"
@@ -587,6 +605,7 @@ export default function App() {
             showHeatmap={showHeatmap}
             historyTracks={mapOverlay === "history" ? historyData?.tracks ?? null : null}
             historyMode={mapOverlay === "history" ? historyMode : null}
+            historyLineAlpha={historyLineAlpha}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
             patterns={patterns}
             editingRunwayId={patternEditing ? editingRunwayId : null}

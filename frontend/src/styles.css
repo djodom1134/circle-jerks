@@ -1959,6 +1959,18 @@ input[type="range"] {
   padding: 3px 7px;
   font-size: 12px;
 }
+.history-alpha {
+  flex: 1;
+  min-width: 90px;
+  accent-color: #1b3a6b;
+}
+.history-alpha-value {
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #6b7185;
+  font-weight: 600;
+}
 .history-controls-caption {
   color: #6b7185;
   font-weight: 600;
