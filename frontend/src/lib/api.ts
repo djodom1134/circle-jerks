@@ -885,3 +885,32 @@ export function getTrackHistory(icao: string, days: number, ceilingFt = 5000) {
     `/airports/${encodeURIComponent(icao)}/track-history?days=${days}&ceiling_ft=${ceilingFt}`
   );
 }
+
+export interface PatternCircuitSample {
+  lat: number;
+  lon: number;
+  timestamp: number;
+}
+
+export interface PatternCircuit {
+  class: string;
+  runway_id: string | null;
+  icao24: string;
+  samples: PatternCircuitSample[];
+}
+
+export interface PatternCircuitsResponse {
+  airport: { icao: string; lat: number; lon: number; elevation_ft: number };
+  days: number;
+  window: { start_ts: number; end_ts: number };
+  circuits: PatternCircuit[];
+  counts_by_class: Record<string, number>;
+  total_circuits: number;
+  truncated: boolean;
+}
+
+export function getPatternCircuits(icao: string, days: number) {
+  return getJson<PatternCircuitsResponse>(
+    `/airports/${encodeURIComponent(icao)}/pattern-circuits?days=${days}`
+  );
+}
