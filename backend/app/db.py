@@ -753,33 +753,56 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
             "no_wind_data": r["total"] - classified,
         })
 
-    did_not_stop = counters["circles"] + counters["touch_and_gos"] + counters["low_approaches"]
-    landed = counters["landings"]
-    stop_total = did_not_stop + landed
+    # Per-AIRCRAFT stop rate: of the distinct tails that came through the area,
+    # how many actually stopped (landed at least once) vs. just passed through /
+    # did laps and left. Counting operations is uninformative here — one training
+    # flight throws dozens of circles but lands once — so we count distinct tails.
+    # Broken out two ways: every aircraft detected, and only those that worked the
+    # pattern (circle/touch-and-go/low-approach/landing; excludes pure overflights).
+    stopped_aircraft = conn.execute(
+        "SELECT COUNT(DISTINCT icao24) AS n FROM operations "
+        "WHERE icao=? AND timestamp BETWEEN ? AND ? AND type='landing'", win,
+    ).fetchone()["n"]
+    pattern_aircraft = conn.execute(
+        "SELECT COUNT(DISTINCT icao24) AS n FROM operations "
+        "WHERE icao=? AND timestamp BETWEEN ? AND ? "
+        "AND type IN ('circle','touch_and_go','low_approach','landing')", win,
+    ).fetchone()["n"]
+
+    def _stop_bucket(total: int, stopped: int) -> dict:
+        return {
+            "total": total,
+            "stopped": stopped,
+            "did_not_stop": total - stopped,
+            "stopped_pct": round(100 * stopped / total, 1) if total else None,
+        }
+
+    # `unique_aircraft` (all distinct tails, any op type) is the "all aircraft"
+    # denominator; a landing is itself a pattern op, so `stopped_aircraft` is a
+    # subset of both denominators.
     stop_classification = {
-        "total": stop_total,
-        "did_not_stop": did_not_stop,
-        "landed": landed,
-        "did_not_stop_pct": round(100 * did_not_stop / stop_total, 1) if stop_total else None,
+        "all": _stop_bucket(unique_aircraft, stopped_aircraft),
+        "pattern": _stop_bucket(pattern_aircraft, stopped_aircraft),
     }
 
-    # Always by calendar day (UTC epoch days), independent of the chart bucket.
+    # Per-aircraft, by calendar day (UTC epoch days), independent of the chart
+    # bucket: distinct tails seen that day vs. distinct tails that landed that day
+    # (all-aircraft denominator, matching the "all" headline).
     stop_over_time = []
     for r in conn.execute(
         "SELECT (timestamp/86400)*86400 AS day, "
-        "SUM(CASE WHEN type='landing' THEN 1 ELSE 0 END) AS landed, "
-        "SUM(CASE WHEN type IN ('circle','touch_and_go','low_approach') THEN 1 ELSE 0 END) AS did_not_stop "
+        "COUNT(DISTINCT icao24) AS total, "
+        "COUNT(DISTINCT CASE WHEN type='landing' THEN icao24 END) AS stopped "
         "FROM operations WHERE icao=? AND timestamp BETWEEN ? AND ? "
-        "AND type IN ('circle','touch_and_go','low_approach','landing') "
         "GROUP BY day ORDER BY day", win,
     ).fetchall():
-        total = r["did_not_stop"] + r["landed"]
+        total, stopped = r["total"], r["stopped"]
         stop_over_time.append({
             "day": r["day"],
-            "did_not_stop": r["did_not_stop"],
-            "landed": r["landed"],
             "total": total,
-            "pct": round(100 * r["did_not_stop"] / total, 1) if total else None,
+            "stopped": stopped,
+            "did_not_stop": total - stopped,
+            "stopped_pct": round(100 * stopped / total, 1) if total else None,
         })
 
     return {

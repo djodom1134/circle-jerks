@@ -144,44 +144,54 @@ def test_deviation_worst_dedups_by_tail(tmp_path):
     assert rows[0]["circles"] == 2
 
 
-def test_stop_classification_includes_circles_and_excludes_passes(tmp_path):
+def test_stop_classification_per_aircraft_breakout(tmp_path):
     conn = seeded_conn(tmp_path / "s.sqlite3")
     day = 86400
-    for i, t in enumerate(("circle", "circle", "touch_and_go", "low_approach", "landing")):
-        _op(conn, f"a{i}", t, day + i)
-    _op(conn, "p0", "pass_over_user", day + 9)  # excluded from ratio
+    # Tail A: circles + a touch-and-go, never lands (did not stop).
+    _op(conn, "a1", "circle", day + 1, icao24="A")
+    _op(conn, "a2", "touch_and_go", day + 2, icao24="A")
+    # Tail B: circles then lands (stopped).
+    _op(conn, "b1", "circle", day + 3, icao24="B")
+    _op(conn, "b2", "landing", day + 4, icao24="B")
+    # Tail C: pure overflight (in "all", not in "pattern").
+    _op(conn, "c1", "pass_over_user", day + 5, icao24="C")
     conn.commit()
 
-    stats = db.airport_stats(conn, "KBJC", 0, 10 * day, bucket_seconds=day)
-    sc = stats["stop_classification"]
-    assert stats["counters"]["landings"] == 1
-    assert sc["did_not_stop"] == 4          # 2 circles + 1 t&g + 1 low approach
-    assert sc["landed"] == 1
-    assert sc["total"] == 5
-    assert sc["did_not_stop_pct"] == 80.0
+    sc = db.airport_stats(conn, "KBJC", 0, 10 * day)["stop_classification"]
+    # All aircraft: A, B, C = 3 distinct tails; stopped (landed) = B = 1.
+    assert sc["all"]["total"] == 3
+    assert sc["all"]["stopped"] == 1
+    assert sc["all"]["did_not_stop"] == 2
+    assert sc["all"]["stopped_pct"] == 33.3
+    # Pattern-working: A, B = 2 (C excluded, pass only); stopped = 1.
+    assert sc["pattern"]["total"] == 2
+    assert sc["pattern"]["stopped"] == 1
+    assert sc["pattern"]["did_not_stop"] == 1
+    assert sc["pattern"]["stopped_pct"] == 50.0
 
 
 def test_stop_classification_pct_null_when_empty(tmp_path):
     conn = seeded_conn(tmp_path / "s.sqlite3")
-    stats = db.airport_stats(conn, "KBJC", 0, 86400)
-    assert stats["stop_classification"]["total"] == 0
-    assert stats["stop_classification"]["did_not_stop_pct"] is None
+    sc = db.airport_stats(conn, "KBJC", 0, 86400)["stop_classification"]
+    assert sc["all"]["total"] == 0 and sc["all"]["stopped_pct"] is None
+    assert sc["pattern"]["total"] == 0 and sc["pattern"]["stopped_pct"] is None
 
 
-def test_stop_over_time_buckets_by_day(tmp_path):
+def test_stop_over_time_per_aircraft_by_day(tmp_path):
     conn = seeded_conn(tmp_path / "s.sqlite3")
     day = 86400
-    # Day 1: 2 non-stop, 0 landed. Day 2: 1 non-stop, 1 landed.
-    _op(conn, "d1a", "circle", day + 10)
-    _op(conn, "d1b", "touch_and_go", day + 20)
-    _op(conn, "d2a", "touch_and_go", 2 * day + 10)
-    _op(conn, "d2b", "landing", 2 * day + 20)
+    # Day 1: tail A circles (not stopped), tail B lands (stopped) → 2 tails, 1 stopped.
+    _op(conn, "d1a", "circle", day + 10, icao24="A")
+    _op(conn, "d1b", "landing", day + 20, icao24="B")
+    # Day 2: tail A appears again, circling only → 1 tail, 0 stopped.
+    _op(conn, "d2a", "circle", 2 * day + 10, icao24="A")
     conn.commit()
 
-    stats = db.airport_stats(conn, "KBJC", 0, 10 * day)
-    rows = {r["day"]: r for r in stats["stop_over_time"]}
-    assert rows[day]["did_not_stop"] == 2 and rows[day]["landed"] == 0 and rows[day]["pct"] == 100.0
-    assert rows[2 * day]["did_not_stop"] == 1 and rows[2 * day]["landed"] == 1 and rows[2 * day]["pct"] == 50.0
+    rows = {r["day"]: r for r in db.airport_stats(conn, "KBJC", 0, 10 * day)["stop_over_time"]}
+    assert rows[day]["total"] == 2 and rows[day]["stopped"] == 1 and rows[day]["did_not_stop"] == 1
+    assert rows[day]["stopped_pct"] == 50.0
+    assert rows[2 * day]["total"] == 1 and rows[2 * day]["stopped"] == 0 and rows[2 * day]["did_not_stop"] == 1
+    assert rows[2 * day]["stopped_pct"] == 0.0
 
 
 def test_stats_endpoint(tmp_path, monkeypatch):

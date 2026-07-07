@@ -52,32 +52,45 @@ export default function StatsPage() {
 
           <section className="stats-card">
             <h2>Do they actually stop?</h2>
-            {data.stop_classification.total === 0 ? (
-              <p className="stats-empty">No runway operations in this window.</p>
+            {data.stop_classification.all.total === 0 ? (
+              <p className="stats-empty">No aircraft in this window.</p>
             ) : (
               <>
                 <p className="stats-hero">
-                  <span className="stats-hero-pct">{data.stop_classification.did_not_stop_pct}%</span>
-                  <span className="stats-hero-label">did not stop</span>
+                  <span className="stats-hero-pct">{data.stop_classification.all.stopped_pct}%</span>
+                  <span className="stats-hero-label">of aircraft actually stopped</span>
                 </p>
                 <p className="stats-besteffort">
-                  {data.stop_classification.did_not_stop} fly-through{data.stop_classification.did_not_stop === 1 ? "" : "s"} (circles + touch-and-gos + low approaches) vs{" "}
-                  {data.stop_classification.landed} landing{data.stop_classification.landed === 1 ? "" : "s"} · this window.
-                  A “landing” means the aircraft reached the runway and did not climb back out within 5 min (≈ stayed ≥5 min).
+                  Counted per aircraft: of the distinct tails that came through, how many stopped (landed and
+                  stayed — reached the runway and did not climb back out within 5 min, ≈ stayed ≥5 min) vs. just
+                  passed through or did laps and left. A tail that landed at least once counts as stopped.
                 </p>
+                <table className="stats-table">
+                  <thead><tr><th>Of the aircraft that came through…</th><th>Stopped</th><th>Did not stop</th><th>% stopped</th></tr></thead>
+                  <tbody>
+                    {([["All aircraft", data.stop_classification.all], ["Pattern-working only", data.stop_classification.pattern]] as const).map(([label, b]) => (
+                      <tr key={label}>
+                        <td><strong>{label}</strong> ({b.total})</td>
+                        <td>{b.stopped}</td>
+                        <td>{b.did_not_stop}</td>
+                        <td>{b.stopped_pct === null ? "—" : `${b.stopped_pct}%`}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
                 {data.stop_over_time.length > 0 && (
                   <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={data.stop_over_time.map((d) => ({
                       t: new Date(d.day * 1000).toLocaleDateString([], { month: "numeric", day: "numeric" }),
                       "Did not stop": d.did_not_stop,
-                      "Landed": d.landed,
+                      "Stopped": d.stopped,
                     }))}>
                       <XAxis dataKey="t" fontSize={11} interval="preserveStartEnd" minTickGap={24} />
                       <YAxis allowDecimals={false} fontSize={11} />
                       <Tooltip />
                       <Legend />
                       <Bar dataKey="Did not stop" stackId="a" fill="#b3231f" />
-                      <Bar dataKey="Landed" stackId="a" fill="#1b3a6b" />
+                      <Bar dataKey="Stopped" stackId="a" fill="#1b3a6b" />
                     </BarChart>
                   </ResponsiveContainer>
                 )}
