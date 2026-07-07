@@ -81,11 +81,14 @@ def event_histogram(events: list[dict], window: WindowRange, tz_name: str) -> li
         "circle": 0,
         "touch_and_go": 0,
         "low_approach": 0,
+        "landing": 0,
         "pass_over_user": 0,
     })
     for event in events:
         label = minute_label(event["timestamp"], tz_name) if window.seconds < 3600 else hour_label(event["timestamp"], tz_name)
-        by_bucket[label][event["type"]] += 1
+        bucket = by_bucket[label]
+        # .get keeps an unfamiliar op type from KeyError-ing (and 404-ing /scan).
+        bucket[event["type"]] = bucket.get(event["type"], 0) + 1
     return [
         {"bucket": bucket, **counts}
         for bucket, counts in sorted(by_bucket.items())
