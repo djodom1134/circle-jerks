@@ -138,7 +138,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         (icao, start_ts, end_ts),
     ).fetchall()
 
-    # Report counts + cowboy counts, batched (avoid N+1).
+    # Report counts + cowboy counts + owner overrides, batched (avoid N+1).
     # NOTE: report_counts is a GLOBAL lifetime, cross-airport complaint tally
     # (aircraft_report_counts is not window- or airport-scoped) -- intentional,
     # matching the app's existing report semantics elsewhere.
@@ -154,6 +154,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         (icao, start_ts, end_ts),
     ).fetchall():
         cowboy_counts[r["icao24"]] = r["n"]
+    owner_overrides = _db.current_owner_overrides(conn)
 
     by_ac: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
@@ -164,7 +165,10 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         scores = _score_aircraft(ac_rows, rules, tz)
         callsign = next((r["callsign"] for r in reversed(ac_rows) if r["callsign"]), icao24.upper())
         registration = next((r["registration"] for r in ac_rows if r["registration"]), None)
-        owner_type = next((r["owner_type"] for r in ac_rows if r["owner_type"]), "unknown")
+        inferred = next((r["owner_type"] for r in ac_rows if r["owner_type"]), "unknown")
+        override = owner_overrides.get(icao24)
+        owner_class = override if override else inferred
+        owner_source = "community" if override else "inferred"
         model = next((r["model"] for r in ac_rows if r["model"]), None)
         operations = sum(1 for r in ac_rows if r["type"] in _OPERATION_TYPES)
         circles = sum(1 for r in ac_rows if r["type"] == "circle")
@@ -176,8 +180,8 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
             "registration": registration,
             "tail": registration or callsign,
             "aircraft_type": model,
-            "owner_class": owner_type,
-            "owner_source": "inferred",
+            "owner_class": owner_class,
+            "owner_source": owner_source,
             "vnap_score": composite_score(scores, rules),
             "reports": report_counts.get(icao24, 0),
             "operations": operations,

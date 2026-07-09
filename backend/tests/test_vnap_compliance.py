@@ -83,3 +83,19 @@ def test_missing_axis_is_none_and_excluded_from_composite(tmp_path):
     # composite is the mean of only the non-None axes (left_traffic + timeofday here)
     present = [v for k, v in ac["scores"].items() if v is not None]
     assert ac["vnap_score"] == round(sum(present) / len(present), 1)
+
+
+def test_compliance_uses_community_owner_override(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    base = 1780000000
+    _op(conn, "l1", "landing", base + 10, "dd44")
+    conn.execute(
+        "INSERT INTO aircraft_registry (n_number, icao_hex, owner_type) VALUES (?, ?, ?)",
+        ("N9", "DD44", "individual"),
+    )
+    db.set_owner_override(conn, "dd44", "flight_school", editor_visitor_id="v-12345678")
+    conn.commit()
+    out = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)
+    ac = next(a for a in out["aircraft"] if a["icao24"] == "dd44")
+    assert ac["owner_class"] == "flight_school"   # override beats registry "individual"
+    assert ac["owner_source"] == "community"
