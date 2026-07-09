@@ -27,3 +27,11 @@ def test_enrich_offenders_wires_vnap_score():
 
 def test_services_imports_vnap():
     assert hasattr(services, "vnap")
+
+
+def test_enrich_offenders_exposes_vnap_scores_and_cowboy_count():
+    import inspect
+    from app import services
+    src = inspect.getsource(services.enrich_offenders)
+    assert "vnap_scores" in src
+    assert "cowboy_count" in src

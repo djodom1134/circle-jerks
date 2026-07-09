@@ -56,6 +56,10 @@ export interface Offender {
   is_flight_school?: boolean;
   /** VNAP infraction score 0-100 (0 = clean, climbs with noise-abatement violations), null if unmeasured. */
   vnap_score?: number | null;
+  /** Per-axis VNAP violation sub-scores (0 = clean per axis), for the map spider diagram. */
+  vnap_scores?: Record<string, number | null> | null;
+  /** Against-wind runway changes attributed to this aircraft in the window. */
+  cowboy_count?: number;
 }
 
 export interface TrackSample {

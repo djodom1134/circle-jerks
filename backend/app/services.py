@@ -1058,11 +1058,11 @@ async def enrich_offenders(
                 model_by_icao[r["icao24"]] = r["model"]
     overrides = db.current_owner_overrides(conn)
 
-    # VNAP compliance score per aircraft (one batched computation, never per-offender).
-    vnap_by_icao: dict[str, float | None] = {}
+    # VNAP compliance record per aircraft (one batched computation, never per-offender).
+    vnap_by_icao: dict[str, dict] = {}
     if icao24s:
         vnap_by_icao = {
-            a["icao24"]: a["vnap_score"]
+            a["icao24"]: a
             for a in vnap.compute_aircraft_compliance(
                 conn, airport.icao, window.start_ts, window.end_ts, icao24s=icao24s
             )["aircraft"]
@@ -1086,6 +1086,7 @@ async def enrich_offenders(
                     )
                 except Exception:  # noqa: BLE001
                     origin = {}
+            v = vnap_by_icao.get(offender["icao24"]) or {}
             return {
                 **offender,
                 "report_count": report_counts.get(offender["icao24"], 0),
@@ -1093,7 +1094,9 @@ async def enrich_offenders(
                 "is_cowboy": offender["icao24"] in cowboy_set,
                 **resolve_offender_owner(offender["icao24"], owner_by_icao, overrides),
                 "aircraft_type": model_by_icao.get(offender["icao24"]),
-                "vnap_score": vnap_by_icao.get(offender["icao24"]),
+                "vnap_score": v.get("vnap_score"),
+                "vnap_scores": v.get("scores"),
+                "cowboy_count": v.get("cowboy_count", 0),
                 **altitude_over_user_summary(track, airport, params, window),
                 **origin,
             }
