@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS airports (
   lat REAL NOT NULL,
   lon REAL NOT NULL,
   elevation_ft INTEGER NOT NULL,
-  is_towered INTEGER NOT NULL DEFAULT 0
+  is_towered INTEGER NOT NULL DEFAULT 0,
+  timezone TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runways (
@@ -212,6 +213,7 @@ CREATE TABLE IF NOT EXISTS track_archive (
   callsign TEXT,
   in_window INTEGER NOT NULL DEFAULT 1,
   source TEXT,
+  emitter_category TEXT,
   archived_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
   PRIMARY KEY (icao24, timestamp)
 );
@@ -245,6 +247,7 @@ CREATE TABLE IF NOT EXISTS operations (
   runway_heading_deg REAL,
   turn_direction TEXT,
   min_altitude_ft_agl INTEGER,
+  emitter_category TEXT,
   matched_pattern_id INTEGER,
   deviation_mean_nm REAL,
   deviation_peak_nm REAL,
@@ -330,6 +333,14 @@ AIRPORT_SEED = [
 ]
 
 
+AIRPORT_TIMEZONE_SEED = {
+    "KBJC": "America/Denver", "KLMO": "America/Denver", "KBDU": "America/Denver",
+    "KAPA": "America/Denver", "KCFO": "America/Denver", "KDEN": "America/Denver",
+    "KFNL": "America/Denver", "KGXY": "America/Denver", "KCOS": "America/Denver",
+    "KFTG": "America/Denver",
+}
+
+
 RUNWAY_SEED = [
     ("KBJC", "12L", 39.9215, -105.1321, 120, 9000),
     ("KBJC", "30R", 39.8962, -105.1013, 300, 9000),
@@ -384,18 +395,26 @@ def init_db(path: str) -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(submission_aircraft)").fetchall()}
-    additions = [
-        ("circles", "INTEGER NOT NULL DEFAULT 0"),
-        ("touch_and_gos", "INTEGER NOT NULL DEFAULT 0"),
-        ("low_approaches", "INTEGER NOT NULL DEFAULT 0"),
-        ("passes_over_user", "INTEGER NOT NULL DEFAULT 0"),
-        ("origin_airport_icao", "TEXT"),
-        ("origin_label", "TEXT"),
-    ]
-    for column, decl in additions:
-        if column not in existing:
-            conn.execute(f"ALTER TABLE submission_aircraft ADD COLUMN {column} {decl}")
+    additions: dict[str, list[tuple[str, str]]] = {
+        "submission_aircraft": [
+            ("circles", "INTEGER NOT NULL DEFAULT 0"),
+            ("touch_and_gos", "INTEGER NOT NULL DEFAULT 0"),
+            ("low_approaches", "INTEGER NOT NULL DEFAULT 0"),
+            ("passes_over_user", "INTEGER NOT NULL DEFAULT 0"),
+            ("origin_airport_icao", "TEXT"),
+            ("origin_label", "TEXT"),
+        ],
+        "airports": [("timezone", "TEXT")],
+        "operations": [("emitter_category", "TEXT")],
+        "track_archive": [("emitter_category", "TEXT")],
+    }
+    for table, cols in additions.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if not existing:
+            continue  # table doesn't exist yet; SCHEMA will create it with the column
+        for column, decl in cols:
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def seed_db(conn: sqlite3.Connection) -> None:
@@ -423,6 +442,8 @@ def seed_db(conn: sqlite3.Connection) -> None:
         """,
         COMPLAINT_SEED,
     )
+    for icao, tz in AIRPORT_TIMEZONE_SEED.items():
+        conn.execute("UPDATE airports SET timezone=? WHERE icao=? AND timezone IS NULL", (tz, icao))
 
 
 @contextmanager
