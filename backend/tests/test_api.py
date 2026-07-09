@@ -237,4 +237,7 @@ def test_operations_trends_endpoint(tmp_path, monkeypatch):
         assert body["timezone"] == "America/Denver"
         assert len(body["time_of_day"]) == 24
         assert any(m["total"] == 2 for m in body["monthly"])
+
+    with TestClient(app) as client:
+        assert client.get("/airports/ZZZZ/operations-trends").status_code == 404
     get_settings.cache_clear()

@@ -25,3 +25,12 @@ def test_worker_live_path_runs_landing_detection():
 
 def test_services_imports_detect_landings_over_period():
     assert hasattr(services, "detect_landings_over_period")
+
+
+def test_worker_live_path_runs_takeoff_detection():
+    src = inspect.getsource(services.run_detectors_for_monitor)
+    assert "detect_takeoffs_over_period" in src
+
+
+def test_services_imports_detect_takeoffs_over_period():
+    assert hasattr(services, "detect_takeoffs_over_period")

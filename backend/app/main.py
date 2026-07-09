@@ -1369,6 +1369,8 @@ async def get_airport_operations_trends(
 ):
     now = _now if _now is not None else int(time.time())
     with db_session(settings.database_path) as conn:
+        if db.get_airport(conn, icao) is None:
+            raise HTTPException(status_code=404, detail="airport not found")
         trends = db.airport_operations_trends(conn, icao, now_ts=now, months=12)
     return {"airport_icao": icao.upper(), **trends}
 

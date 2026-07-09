@@ -11,7 +11,7 @@ import httpx
 
 from . import adsbdb, archive, db, deviation, flow, weather
 from .db import Airport
-from .detectors import closest_over_user_rows, detect_events, detect_events_over_period, detect_landings_over_period, event_counts, pass_geometry_key
+from .detectors import closest_over_user_rows, detect_events, detect_events_over_period, detect_landings_over_period, detect_takeoffs_over_period, event_counts, pass_geometry_key
 from .domain import ScanParams, hour_label, local_time_label, location_hash, monitor_hash
 from .geo import Point, bbox_for_radius, bbox_union, distance_nm, sq_degrees
 from .llm import (
@@ -369,11 +369,16 @@ async def run_detectors_for_monitor(
             # 5-min settle window. Run a windowed landing pass over the same
             # already-fetched tracks so the continuous worker detects landings
             # too; otherwise touch-and-gos accrue continuously but landings only
-            # on the /scan polling path, biasing "% did not stop" high. The
-            # detector's stable per-episode ids keep this idempotent across the
-            # worker's repeated cycles.
-            events = list(events) + detect_landings_over_period(
-                track, airport, runways, detector_start, detector_end
+            # on the /scan polling path, biasing "% did not stop" high. Takeoffs
+            # share the same rationale — they're only detected on the /scan
+            # over-period path, so backfill them here too or the operations
+            # trends chart under-counts takeoffs. The detectors' stable
+            # per-episode ids keep this idempotent across the worker's
+            # repeated cycles.
+            events = (
+                list(events)
+                + detect_landings_over_period(track, airport, runways, detector_start, detector_end)
+                + detect_takeoffs_over_period(track, airport, runways, detector_start, detector_end)
             )
         for event in events:
             if event["id"] not in existing_ids:

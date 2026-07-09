@@ -753,6 +753,11 @@ def detect_takeoffs_over_period(
             continue  # never climbed out -> landing/other, not a departure
         if _approached_from_altitude(recent, lt, airport):
             continue  # descended in first -> touch-and-go/low-approach, not a takeoff
+        # NOTE: misclassification risk runs the other direction too. With sparse
+        # ADS-B coverage, or a genuinely low/tight pattern that never clears 500 ft
+        # AGL, a real touch-and-go can fail the approach guard above and fall
+        # through to be counted here as a takeoff instead. `total` op count is
+        # preserved either way — only the takeoff/T&G split is biased.
         events.append(_build_runway_event("takeoff", ep, airport, runways))
     return events
 
