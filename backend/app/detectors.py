@@ -669,6 +669,7 @@ def detect_touch_and_gos_over_period(
         lowest_sample = ep["lowest_sample"]
         lowest_agl = ep["lowest_agl"]
         speed = ep["speed"]
+        lt = int(lowest_sample["timestamp"])
         after = _after_samples(recent, lowest_sample, CLIMB_OUT_LOOKAHEAD_SECONDS)
         if not after:
             continue
@@ -679,6 +680,8 @@ def detect_touch_and_gos_over_period(
         if not (lowest_agl <= 200 and speed_ok and _climbed_out(after, lowest_agl, airport)
                 and on_ground_seconds <= 60):
             continue
+        if not _approached_from_altitude(recent, lt, airport):
+            continue  # no prior approach -> a departure (takeoff), handled elsewhere
         event_type = "touch_and_go" if lowest_agl <= 50 else "low_approach"
         events.append(_build_runway_event(event_type, ep, airport, runways))
     return events
@@ -717,6 +720,40 @@ def detect_landings_over_period(
             continue  # never descended in (parked/taxiing) -> not a landing
 
         events.append(_build_runway_event("landing", ep, airport, runways))
+    return events
+
+
+def detect_takeoffs_over_period(
+    track: list[dict],
+    airport: Airport,
+    runways: list[dict],
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    """A takeoff = reached the runway low and climbed out, with NO prior approach
+    from altitude — i.e. the aircraft originated at the field and departed.
+
+    The departure complement of touch-and-go over the same runway-low episodes:
+    both climb out, but a touch-and-go descended in from >=500 ft AGL first while
+    a takeoff started on/near the ground. Only the first low bucket of a presence
+    counts, so a T&G's touchdown is never re-counted as a departure.
+    """
+    recent, episodes = _runway_low_episodes(track, airport, runways, start_ts, end_ts)
+    events = []
+    for ep in episodes:
+        if not ep["is_first_low"]:
+            continue
+        lowest_sample = ep["lowest_sample"]
+        lowest_agl = ep["lowest_agl"]
+        lt = int(lowest_sample["timestamp"])
+        if lowest_agl > 200:
+            continue
+        after = _after_samples(recent, lowest_sample, CLIMB_OUT_LOOKAHEAD_SECONDS)
+        if not _climbed_out(after, lowest_agl, airport):
+            continue  # never climbed out -> landing/other, not a departure
+        if _approached_from_altitude(recent, lt, airport):
+            continue  # descended in first -> touch-and-go/low-approach, not a takeoff
+        events.append(_build_runway_event("takeoff", ep, airport, runways))
     return events
 
 
@@ -822,6 +859,8 @@ def detect_events_over_period(
         events_by_id[event["id"]] = event
     for event in detect_landings_over_period(samples, airport, runways, start_ts, end_ts):
         events_by_id[event["id"]] = event
+    for event in detect_takeoffs_over_period(samples, airport, runways, start_ts, end_ts):
+        events_by_id[event["id"]] = event
     for event in detect_passes_over_period(samples, airport, params, start_ts, end_ts):
         events_by_id[event["id"]] = event
     return sorted(events_by_id.values(), key=lambda event: event["timestamp"])
@@ -836,5 +875,6 @@ def event_counts(events: list[dict]) -> dict[str, int]:
         "touch_and_gos": counts["touch_and_go"],
         "low_approaches": counts["low_approach"],
         "landings": counts["landing"],
+        "takeoffs": counts["takeoff"],
         "passes": counts["pass_over_user"],
     }
