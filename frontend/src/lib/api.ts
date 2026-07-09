@@ -879,6 +879,28 @@ export function getOperationsTrends(icao: string) {
   return getJson<OperationsTrendsResponse>(`/airports/${encodeURIComponent(icao)}/operations-trends`);
 }
 
+export interface VnapAircraft {
+  icao24: string; callsign: string; registration: string | null; tail: string;
+  aircraft_type: string | null; owner_class: string; owner_source: string;
+  vnap_score: number | null; reports: number; operations: number;
+  touch_and_gos: number; cowboy_count: number; deviation_mean_nm: number | null;
+  circles: number; scores: Record<string, number | null>;
+}
+
+export interface VnapComplianceResponse {
+  airport_icao: string;
+  window: { code: StatsWindow; start_ts: number; end_ts: number };
+  axes: string[];
+  averages: Record<string, number | null>;
+  aircraft: VnapAircraft[];
+}
+
+export function getVnapCompliance(icao: string, window: StatsWindow = "7d") {
+  return getJson<VnapComplianceResponse>(
+    `/airports/${encodeURIComponent(icao)}/vnap-compliance?window=${window}`,
+  );
+}
+
 export interface HistoricalTrackSample {
   lat: number;
   lon: number;

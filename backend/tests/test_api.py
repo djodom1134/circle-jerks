@@ -241,3 +241,34 @@ def test_operations_trends_endpoint(tmp_path, monkeypatch):
     with TestClient(app) as client:
         assert client.get("/airports/ZZZZ/operations-trends").status_code == 404
     get_settings.cache_clear()
+
+
+def test_vnap_compliance_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    from app import db
+    settings = get_settings()
+    db.init_db(settings.database_path)
+    base = 1780000000
+    with db.db_session(settings.database_path) as conn:
+        for oid, typ in (("l1", "landing"), ("g1", "touch_and_go"), ("c1", "circle")):
+            db.upsert_operation(conn, db.operation_from_event({
+                "id": oid, "type": typ, "icao24": "aa11", "callsign": "AA11",
+                "timestamp": base + 10, "airport_icao": "KLMO",
+            }))
+        conn.commit()
+    with TestClient(app) as client:
+        resp = client.get("/airports/KLMO/vnap-compliance?window=all&_now=%d" % (base + 100))
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["airport_icao"] == "KLMO"
+        assert body["axes"][0] == "tightness"
+        ac = next(a for a in body["aircraft"] if a["icao24"] == "aa11")
+        # operations = landing + takeoff + touch_and_go (circle excluded), per
+        # the already-tested _OPERATION_TYPES semantics in test_vnap_compliance.py.
+        assert ac["operations"] == 2
+        assert ac["circles"] == 1
+        assert client.get("/airports/ZZZZ/vnap-compliance").status_code == 404
+    get_settings.cache_clear()
