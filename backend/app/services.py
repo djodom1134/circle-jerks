@@ -1064,7 +1064,7 @@ async def enrich_offenders(
         vnap_by_icao = {
             a["icao24"]: a["vnap_score"]
             for a in vnap.compute_aircraft_compliance(
-                conn, airport.icao, window.start_ts, window.end_ts
+                conn, airport.icao, window.start_ts, window.end_ts, icao24s=icao24s
             )["aircraft"]
         }
 

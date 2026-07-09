@@ -117,42 +117,90 @@ _OPERATION_TYPES = ("landing", "takeoff", "touch_and_go")
 
 
 def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
-                                start_ts: int, end_ts: int) -> dict:
+                                start_ts: int, end_ts: int,
+                                icao24s: list[str] | None = None) -> dict:
     icao = icao.upper()
     rules = ruleset_for(icao)
     tz = _db.airport_timezone(conn, icao)
 
-    rows = conn.execute(
-        "SELECT o.icao24 AS icao24, o.callsign AS callsign, o.registration AS registration, "
-        "       o.timestamp AS ts, o.type AS type, o.deviation_mean_nm AS dev, "
-        "       o.turn_direction AS turn, o.runway_id AS runway, "
-        "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
-        "       o.min_altitude_ft_agl AS min_agl, "
-        "       (SELECT reg.owner_type FROM aircraft_registry reg "
-        "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS owner_type, "
-        "       (SELECT reg.model FROM aircraft_registry reg "
-        "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS model "
-        "FROM operations o "
-        "WHERE o.icao=? AND o.timestamp BETWEEN ? AND ? "
-        "ORDER BY o.timestamp ASC",
-        (icao, start_ts, end_ts),
-    ).fetchall()
+    # Optional scope-down to specific aircraft (scan hot path: only offenders'
+    # scores are consumed, so filtering here yields identical per-aircraft
+    # scores -- each is computed purely from its own rows -- with far less
+    # work than scanning every operation for the airport in the window.
+    filtered = [i.lower() for i in icao24s] if icao24s else None
+
+    if filtered:
+        placeholders = ",".join("?" * len(filtered))
+        rows_sql = (
+            "SELECT o.icao24 AS icao24, o.callsign AS callsign, o.registration AS registration, "
+            "       o.timestamp AS ts, o.type AS type, o.deviation_mean_nm AS dev, "
+            "       o.turn_direction AS turn, o.runway_id AS runway, "
+            "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
+            "       o.min_altitude_ft_agl AS min_agl, "
+            "       (SELECT reg.owner_type FROM aircraft_registry reg "
+            "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS owner_type, "
+            "       (SELECT reg.model FROM aircraft_registry reg "
+            "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS model "
+            "FROM operations o "
+            f"WHERE o.icao=? AND o.timestamp BETWEEN ? AND ? AND o.icao24 IN ({placeholders}) "
+            "ORDER BY o.timestamp ASC"
+        )
+        rows_params = (icao, start_ts, end_ts, *filtered)
+    else:
+        rows_sql = (
+            "SELECT o.icao24 AS icao24, o.callsign AS callsign, o.registration AS registration, "
+            "       o.timestamp AS ts, o.type AS type, o.deviation_mean_nm AS dev, "
+            "       o.turn_direction AS turn, o.runway_id AS runway, "
+            "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
+            "       o.min_altitude_ft_agl AS min_agl, "
+            "       (SELECT reg.owner_type FROM aircraft_registry reg "
+            "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS owner_type, "
+            "       (SELECT reg.model FROM aircraft_registry reg "
+            "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS model "
+            "FROM operations o "
+            "WHERE o.icao=? AND o.timestamp BETWEEN ? AND ? "
+            "ORDER BY o.timestamp ASC"
+        )
+        rows_params = (icao, start_ts, end_ts)
+
+    rows = conn.execute(rows_sql, rows_params).fetchall()
 
     # Report counts + cowboy counts + owner overrides, batched (avoid N+1).
     # NOTE: report_counts is a GLOBAL lifetime, cross-airport complaint tally
     # (aircraft_report_counts is not window- or airport-scoped) -- intentional,
     # matching the app's existing report semantics elsewhere.
-    report_counts = {
-        r["icao24"]: r["report_count"]
-        for r in conn.execute("SELECT icao24, report_count FROM aircraft_report_counts").fetchall()
-    }
+    if filtered:
+        placeholders = ",".join("?" * len(filtered))
+        report_counts = {
+            r["icao24"]: r["report_count"]
+            for r in conn.execute(
+                f"SELECT icao24, report_count FROM aircraft_report_counts WHERE icao24 IN ({placeholders})",
+                filtered,
+            ).fetchall()
+        }
+    else:
+        report_counts = {
+            r["icao24"]: r["report_count"]
+            for r in conn.execute("SELECT icao24, report_count FROM aircraft_report_counts").fetchall()
+        }
     cowboy_counts: dict[str, int] = {}
-    for r in conn.execute(
-        "SELECT cowboy_icao24 AS icao24, COUNT(*) AS n FROM runway_changes "
-        "WHERE icao=? AND changed_at BETWEEN ? AND ? AND cowboy_icao24 IS NOT NULL "
-        "GROUP BY cowboy_icao24",
-        (icao, start_ts, end_ts),
-    ).fetchall():
+    if filtered:
+        placeholders = ",".join("?" * len(filtered))
+        cowboy_rows = conn.execute(
+            "SELECT cowboy_icao24 AS icao24, COUNT(*) AS n FROM runway_changes "
+            f"WHERE icao=? AND changed_at BETWEEN ? AND ? AND cowboy_icao24 IS NOT NULL "
+            f"AND cowboy_icao24 IN ({placeholders}) "
+            "GROUP BY cowboy_icao24",
+            (icao, start_ts, end_ts, *filtered),
+        ).fetchall()
+    else:
+        cowboy_rows = conn.execute(
+            "SELECT cowboy_icao24 AS icao24, COUNT(*) AS n FROM runway_changes "
+            "WHERE icao=? AND changed_at BETWEEN ? AND ? AND cowboy_icao24 IS NOT NULL "
+            "GROUP BY cowboy_icao24",
+            (icao, start_ts, end_ts),
+        ).fetchall()
+    for r in cowboy_rows:
         cowboy_counts[r["icao24"]] = r["n"]
     owner_overrides = _db.current_owner_overrides(conn)
 

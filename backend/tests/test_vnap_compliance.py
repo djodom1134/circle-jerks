@@ -99,3 +99,18 @@ def test_compliance_uses_community_owner_override(tmp_path):
     ac = next(a for a in out["aircraft"] if a["icao24"] == "dd44")
     assert ac["owner_class"] == "flight_school"   # override beats registry "individual"
     assert ac["owner_source"] == "community"
+
+
+def test_compliance_icao24s_filter_matches_unscoped_score(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    base = 1780000000
+    _op(conn, "l1", "landing", base + 10, "aa11", turn="left")
+    _op(conn, "l2", "landing", base + 20, "bb22", turn="right")
+    conn.commit()
+    full = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)
+    scoped = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100, icao24s=["aa11"])
+    assert [a["icao24"] for a in scoped["aircraft"]] == ["aa11"]
+    full_aa = next(a for a in full["aircraft"] if a["icao24"] == "aa11")
+    scoped_aa = scoped["aircraft"][0]
+    assert scoped_aa["vnap_score"] == full_aa["vnap_score"]
+    assert scoped_aa["scores"] == full_aa["scores"]
