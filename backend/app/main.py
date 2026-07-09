@@ -135,7 +135,8 @@ class AdminLoginRequest(BaseModel):
 
 VALID_OWNER_TYPES = frozenset({
     "individual", "llc", "corporation", "government",
-    "flight_school", "university", "club", "trust", "unknown",
+    "flight_school", "university", "club", "trust",
+    "skydiving", "commercial_airline", "unknown",
 })
 
 

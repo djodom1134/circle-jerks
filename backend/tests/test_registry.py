@@ -129,6 +129,18 @@ def test_owner_type_trust():
     assert owner_type.infer_owner_type("SMITH FAMILY TRUST").owner_type == "trust"
 
 
+def test_owner_type_skydiving():
+    # Skydiving takes priority over the generic LLC/corporation markers.
+    assert owner_type.infer_owner_type("MILE-HI SKYDIVING CENTER INC").owner_type == "skydiving"
+    assert owner_type.infer_owner_type("FRONT RANGE PARACHUTE LLC").owner_type == "skydiving"
+
+
+def test_owner_type_commercial_airline():
+    assert owner_type.infer_owner_type("UNITED AIRLINES INC").owner_type == "commercial_airline"
+    assert owner_type.infer_owner_type("DELTA AIR LINES INC").owner_type == "commercial_airline"
+    assert owner_type.infer_owner_type("FRONTIER AIRWAYS").owner_type == "commercial_airline"
+
+
 def test_owner_type_individual():
     result = owner_type.infer_owner_type("JOHN A SMITH")
     assert result.owner_type == "individual"

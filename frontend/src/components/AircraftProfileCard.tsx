@@ -11,6 +11,8 @@ const OWNER_LABELS: Record<OwnerType, string> = {
   university: "University",
   club: "Club",
   trust: "Trust",
+  skydiving: "Skydiving",
+  commercial_airline: "Commercial airline",
   unknown: "Unknown",
 };
 

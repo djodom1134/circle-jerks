@@ -34,6 +34,20 @@ _FLIGHT_SCHOOL_PATTERNS = (
     r"\bACADEMY\s+OF\s+AVIATION\b",
 )
 
+_SKYDIVING_PATTERNS = (
+    r"\bSKYDIV\w*\b",
+    r"\bSKY\s+DIV\w*\b",
+    r"\bPARACHUT\w*\b",
+    r"\bDROP\s*ZONE\b",
+    r"\bFREE\s*FALL\b",
+)
+
+_COMMERCIAL_AIRLINE_PATTERNS = (
+    r"\bAIRLINES?\b",
+    r"\bAIRWAYS\b",
+    r"\bAIR\s+LINES?\b",
+)
+
 _CLUB_PATTERNS = (
     r"\bAERO\s+CLUB\b",
     r"\bFLYING\s+CLUB\b",
@@ -136,6 +150,22 @@ def infer_owner_type(name: str | None) -> OwnerTypeResult:
         return OwnerTypeResult(
             "flight_school",
             0.95,
+            f"Registrant name contains \"{hit}\"",
+        )
+
+    hit = _any_match(upper, _SKYDIVING_PATTERNS)
+    if hit:
+        return OwnerTypeResult(
+            "skydiving",
+            0.9,
+            f"Registrant name contains \"{hit}\"",
+        )
+
+    hit = _any_match(upper, _COMMERCIAL_AIRLINE_PATTERNS)
+    if hit:
+        return OwnerTypeResult(
+            "commercial_airline",
+            0.9,
             f"Registrant name contains \"{hit}\"",
         )
 

@@ -1145,7 +1145,8 @@ function originDisplay(row: Offender) {
 const OFFENDER_OWNER_LABELS: Record<string, string> = {
   individual: "Individual", llc: "LLC", corporation: "Corp", government: "Gov",
   flight_school: "Flight school", university: "University", club: "Club",
-  trust: "Trust", unknown: "Unknown",
+  trust: "Trust", skydiving: "Skydiving", commercial_airline: "Airline",
+  unknown: "Unknown",
 };
 
 function offenderHoverTitle(row: Offender): string {

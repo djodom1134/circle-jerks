@@ -13,12 +13,14 @@ export const AXIS_LABELS: Record<string, string> = {
 export const OWNER_LABELS: Record<string, string> = {
   individual: "Individual", llc: "LLC", corporation: "Corporation",
   government: "Government", flight_school: "Flight school", university: "University",
-  club: "Club", trust: "Trust", unknown: "Unknown",
+  club: "Club", trust: "Trust", skydiving: "Skydiving",
+  commercial_airline: "Commercial airline", unknown: "Unknown",
 };
 
 export const OWNER_OPTIONS = [
   "individual", "llc", "corporation", "government",
-  "flight_school", "university", "club", "trust", "unknown",
+  "flight_school", "university", "club", "trust",
+  "skydiving", "commercial_airline", "unknown",
 ];
 
 type Sortable = number | string | null;

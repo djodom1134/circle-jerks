@@ -512,6 +512,8 @@ export type OwnerType =
   | "university"
   | "club"
   | "trust"
+  | "skydiving"
+  | "commercial_airline"
   | "unknown";
 
 export interface AircraftProfile {
