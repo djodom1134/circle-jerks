@@ -22,6 +22,11 @@ describe("sortAircraft", () => {
     const rows = [ac({ icao24: "a", operations: 5 }), ac({ icao24: "b", operations: 1 })];
     expect(sortAircraft(rows, "operations", "asc").map((r) => r.icao24)).toEqual(["b", "a"]);
   });
+  it("keeps nulls last in ascending order too", () => {
+    const rows = [ac({ icao24: "a", vnap_score: 50 }), ac({ icao24: "b", vnap_score: null }),
+                  ac({ icao24: "c", vnap_score: 90 })];
+    expect(sortAircraft(rows, "vnap_score", "asc").map((r) => r.icao24)).toEqual(["a", "c", "b"]);
+  });
   it("sorts strings", () => {
     const rows = [ac({ icao24: "a", tail: "N9" }), ac({ icao24: "b", tail: "N1" })];
     expect(sortAircraft(rows, "tail", "asc").map((r) => r.tail)).toEqual(["N1", "N9"]);

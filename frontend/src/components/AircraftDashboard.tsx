@@ -3,8 +3,9 @@ import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
-import { getVnapCompliance, type VnapComplianceResponse, type VnapAircraft, type StatsWindow } from "../lib/api";
-import { sortAircraft, radarData, OWNER_LABELS } from "../lib/vnapDashboard";
+import { getVnapCompliance, setOwnerClass, type VnapComplianceResponse, type VnapAircraft, type StatsWindow } from "../lib/api";
+import { sortAircraft, radarData, OWNER_LABELS, OWNER_OPTIONS } from "../lib/vnapDashboard";
+import { getVisitorId } from "../lib/visitor";
 
 const COLUMNS: { key: string; label: string; numeric: boolean }[] = [
   { key: "tail", label: "Tail", numeric: false },
@@ -38,6 +39,17 @@ export default function AircraftDashboard({ icao, window }: { icao: string; wind
       .then(setData)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load compliance."));
   }, [icao, window]);
+
+  const reload = () => getVnapCompliance(icao, window).then(setData).catch(() => {});
+
+  const onOwnerChange = async (icao24: string, owner_type: string) => {
+    try {
+      await setOwnerClass(icao24, owner_type, getVisitorId());
+      await reload();
+    } catch {
+      /* keep prior value on failure; a toast could be added later */
+    }
+  };
 
   const sorted = useMemo(
     () => (data ? sortAircraft(data.aircraft, sortKey, sortDir) : []),
@@ -85,8 +97,15 @@ export default function AircraftDashboard({ icao, window }: { icao: string; wind
                     className={`vnap-row${a.icao24 === selectedAc?.icao24 ? " selected" : ""}`}
                     onClick={() => setSelected(a.icao24)}>
                   <td>{a.tail}</td>
-                  <td>{OWNER_LABELS[a.owner_class] ?? a.owner_class}
-                      {a.owner_source === "community" ? " ✓" : ""}</td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <select className="vnap-owner-select" value={a.owner_class}
+                            onChange={(e) => onOwnerChange(a.icao24, e.target.value)}>
+                      {OWNER_OPTIONS.map((o) => (
+                        <option key={o} value={o}>{OWNER_LABELS[o] ?? o}</option>
+                      ))}
+                    </select>
+                    {a.owner_source === "community" ? " ✓" : ""}
+                  </td>
                   <td>{fmt(a.aircraft_type, false)}</td>
                   <td>{fmt(a.vnap_score, true)}</td>
                   <td>{a.reports}</td>
