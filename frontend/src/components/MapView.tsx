@@ -105,6 +105,7 @@ interface Props {
   autoZoom?: boolean;
   showHeatmap?: boolean;
   onPickLocation: (lat: number, lon: number) => void;
+  onSelectAircraft?: (icao24: string | null) => void;
   patterns?: RunwayPattern[] | null;
   editingRunwayId?: string | null;
   editingPoints?: { lat: number; lon: number }[];
@@ -210,6 +211,7 @@ interface AircraftTrack {
   icao24: string;
   callsign: string;
   selected: boolean;
+  dimmed: boolean;
   samples: TrackSample[];
 }
 
@@ -461,9 +463,14 @@ function positionAt(samples: TrackSample[], displayTimeSeconds: number): Aircraf
   };
 }
 
+// Applied to every non-selected track/aircraft when a selection is active,
+// so the selected aircraft's track pops against a muted, uniform backdrop.
+const GRAY: [number, number, number] = [148, 152, 160];
+
 function styleForFeature(feature: Feature) {
   const kind = feature.get("kind");
   const selected = feature.get("selected") === 1;
+  const dimmed = feature.get("dimmed") === 1;
   if (kind === "ring" || kind === "pass") {
     return new Style({
       fill: new Fill({ color: kind === "pass" ? "rgba(214, 75, 44, 0.08)" : "rgba(27, 58, 107, 0.06)" }),
@@ -473,8 +480,8 @@ function styleForFeature(feature: Feature) {
   if (kind === "track_context") {
     return new Style({
       stroke: new Stroke({
-        color: selected ? "rgba(214, 75, 44, 0.36)" : "rgba(27, 58, 107, 0.2)",
-        width: selected ? 4 : 2
+        color: dimmed ? "rgba(148, 152, 160, 0.12)" : selected ? "rgba(214, 75, 44, 0.36)" : "rgba(27, 58, 107, 0.2)",
+        width: dimmed ? 1 : selected ? 4 : 2
       })
     });
   }
@@ -483,21 +490,26 @@ function styleForFeature(feature: Feature) {
     // ageRatio 0 = newest (opaque), 1 = oldest in window (faint)
     const alpha = Math.max(0.08, 1 - ageRatio * 0.92);
     const altAgl = feature.get("alt_agl_ft");
-    const [r, g, b] = selected
-      ? [214, 75, 44]
-      : colorFromAltitudeAgl(typeof altAgl === "number" ? altAgl : null);
+    const [r, g, b] = dimmed ? GRAY : colorFromAltitudeAgl(typeof altAgl === "number" ? altAgl : null);
+    const finalAlpha = dimmed ? alpha * 0.35 : alpha;
     return new Style({
       stroke: new Stroke({
-        color: `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`,
-        width: selected ? 5 : 3,
+        color: `rgba(${r}, ${g}, ${b}, ${finalAlpha.toFixed(3)})`,
+        width: dimmed ? 1 : selected ? 5 : 3,
       }),
     });
   }
   if (kind === "track_sample") {
     return new Style({
       image: new CircleStyle({
-        radius: selected ? 4 : 3,
-        fill: new Fill({ color: selected ? "rgba(214, 75, 44, 0.9)" : "rgba(27, 58, 107, 0.72)" }),
+        radius: dimmed ? 3 : selected ? 4 : 3,
+        fill: new Fill({
+          color: dimmed
+            ? "rgba(148, 152, 160, 0.5)"
+            : selected
+              ? "rgba(214, 75, 44, 0.9)"
+              : "rgba(27, 58, 107, 0.72)"
+        }),
         stroke: new Stroke({ color: "#ffffff", width: selected ? 1.5 : 1 })
       })
     });
@@ -521,14 +533,14 @@ function styleForFeature(feature: Feature) {
         rotation: (heading * Math.PI) / 180,
         angle: Math.PI / 2,
         rotateWithView: true,
-        fill: new Fill({ color: selected ? "#d64b2c" : "#1b3a6b" }),
+        fill: new Fill({ color: dimmed ? "#9498a0" : selected ? "#d64b2c" : "#1b3a6b" }),
         stroke: new Stroke({ color: "#ffffff", width: selected ? 2.5 : 2 })
       }),
       text: new Text({
         text: String(feature.get("label") ?? ""),
         offsetY: selected ? -24 : -20,
         font: selected ? "800 12px Inter, sans-serif" : "700 11px Inter, sans-serif",
-        fill: new Fill({ color: selected ? "#b8391e" : "#1b3a6b" }),
+        fill: new Fill({ color: dimmed ? "rgba(148, 152, 160, 0.85)" : selected ? "#b8391e" : "#1b3a6b" }),
         stroke: new Stroke({ color: "#ffffff", width: 3 })
       })
     });
@@ -608,7 +620,7 @@ function styleForHistoryFeature(feature: Feature, lineAlpha: number) {
   return styleForFeature(feature);
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2, historyAverage = null, historySigmaK = 1 }: Props) {
+export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, onSelectAircraft, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2, historyAverage = null, historySigmaK = 1 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
@@ -696,10 +708,12 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     // In heatmap mode the canvas overlay draws the gradient; here we only
     // emit the airport ring + home pin so the user still has reference points.
     if (showHeatmap || historyActive) return rows;
+    const hasSelection = !!selectedIcao24;
     for (const track of scanData?.tracks ?? []) {
       const isSelected = selectedIcao24 === track.icao24;
+      const dimmed = hasSelection && !isSelected ? 1 : 0;
       for (const coords of splitSegments(track.samples, false)) {
-        rows.push(lineFeature(coords, { kind: "track_context", selected: isSelected ? 1 : 0 }));
+        rows.push(lineFeature(coords, { kind: "track_context", selected: isSelected ? 1 : 0, dimmed }));
       }
       const aged = windowStart && windowEnd
         ? agedTrackSegments(track.samples, groundElevFt, windowStart, windowEnd)
@@ -712,6 +726,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         rows.push(lineFeature(coords, {
           kind: "track_active",
           selected: isSelected ? 1 : 0,
+          dimmed,
           age_ratio: ageRatio,
           alt_agl_ft: avgAltAglFt,
         }));
@@ -723,11 +738,13 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
   const aircraftTracks = useMemo<AircraftTrack[]>(() => {
     if (showHeatmap || historyActive) return [];
     const liveCutoff = Date.now() / 1000 - LIVE_AIRCRAFT_FRESHNESS_SECONDS;
+    const hasSelection = !!selectedIcao24;
     return (scanData?.tracks ?? [])
       .map((track) => ({
         icao24: track.icao24,
         callsign: track.callsign,
         selected: selectedIcao24 === track.icao24,
+        dimmed: hasSelection && selectedIcao24 !== track.icao24,
         samples: normalizeTrackSamples(track.samples)
       }))
       .filter((track) => {
@@ -813,6 +830,32 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     viewport.addEventListener("contextmenu", onContextMenu);
     return () => viewport.removeEventListener("contextmenu", onContextMenu);
   }, [mapReady]);
+
+  // Left-click selects the aircraft under the cursor, or clears the
+  // selection when the click hits nothing. Skipped while pattern editing is
+  // active so it doesn't fight with the Draw/Modify interactions above.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    if (editingRunwayId) return;
+    const map = mapRef.current;
+    const onClick = (evt: { pixel: number[] }) => {
+      let icao24: string | null = null;
+      map.forEachFeatureAtPixel(
+        evt.pixel,
+        (feat) => {
+          if (feat.get("kind") === "aircraft") {
+            icao24 = String(feat.get("icao24") ?? "");
+            return true;
+          }
+          return false;
+        },
+        { hitTolerance: 6 }
+      );
+      onSelectAircraft?.(icao24);
+    };
+    map.on("singleclick", onClick);
+    return () => map.un("singleclick", onClick);
+  }, [mapReady, editingRunwayId, onSelectAircraft]);
 
   // Close the context menu on outside click, scroll, or Escape. Click inside
   // the menu wrapper has stopPropagation, so it doesn't reach the window
@@ -1416,6 +1459,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         icao24: track.icao24,
         label: track.callsign,
         selected: track.selected ? 1 : 0,
+        dimmed: track.dimmed ? 1 : 0,
         heading: current.heading ?? feature.get("heading") ?? 0
       });
     }

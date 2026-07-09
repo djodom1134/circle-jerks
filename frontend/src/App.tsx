@@ -668,6 +668,9 @@ export default function App() {
             historyAverage={mapOverlay === "history" && historyMode === "average" ? historyAverage : null}
             historySigmaK={historySigmaK}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
+            onSelectAircraft={(icao24) =>
+              setSelected(icao24 ? scanData?.offenders.find((o) => o.icao24 === icao24) ?? null : null)
+            }
             patterns={patterns}
             editingRunwayId={patternEditing ? editingRunwayId : null}
             editingPoints={editingPoints}
