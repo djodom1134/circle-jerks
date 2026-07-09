@@ -54,3 +54,19 @@ def test_recent_days_pct_light(tmp_path):
     day = next(d for d in trends["recent_days"] if d["operations"] > 0)
     assert day["operations"] == 2
     assert day["pct_light"] == 50.0  # one of two ops is A1 (Light)
+
+
+def test_duplicate_registry_row_does_not_inflate_counts(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    base = 1780000000
+    _op(conn, "l1", "landing", base + 10, icao24="abcd12", emitter="A1")
+    for n, model in (("N1", "C172"), ("N2", "C182")):
+        conn.execute(
+            "INSERT INTO aircraft_registry (n_number, icao_hex, model) VALUES (?, ?, ?)",
+            (n, "ABCD12", model),
+        )
+    conn.commit()
+    trends = db.airport_operations_trends(conn, "KLMO", now_ts=base + 100, months=12)
+    month = next(m for m in trends["monthly"] if m["total"] > 0)
+    assert month["total"] == 1       # not inflated to 2 by the duplicate registry row
+    assert month["landings"] == 1

@@ -892,9 +892,10 @@ def airport_operations_trends(
 
     rows = conn.execute(
         "SELECT o.timestamp AS ts, o.type AS type, o.icao24 AS icao24, "
-        "       o.emitter_category AS emitter, reg.model AS model "
+        "       o.emitter_category AS emitter, "
+        "       (SELECT reg.model FROM aircraft_registry reg "
+        "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS model "
         "FROM operations o "
-        "LEFT JOIN aircraft_registry reg ON reg.icao_hex = upper(o.icao24) "
         "WHERE o.icao=? AND o.type IN (?,?,?) AND o.timestamp BETWEEN ? AND ? "
         "ORDER BY o.timestamp ASC",
         (icao, *_OPERATION_TYPES, start_ts, now_ts),
