@@ -107,6 +107,7 @@ def parse_readsb_aircraft(row: dict, payload_now: float, source: str) -> dict | 
         "squawk": row.get("squawk"),
         "aircraft_type": row.get("t"),
         "registration": row.get("r"),
+        "emitter_category": row.get("category"),
         "source": source,
     }
 
