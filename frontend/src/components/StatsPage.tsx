@@ -42,8 +42,6 @@ export default function StatsPage() {
 
       {data && (
         <>
-          <OperationsTrends icao={icao} />
-          <AircraftDashboard icao={icao} win={win} />
           <section className="stats-tiles">
             <Tile label="Touch & gos" value={data.counters.touch_and_gos} />
             <Tile label="Circles" value={data.counters.circles} />
@@ -53,6 +51,8 @@ export default function StatsPage() {
             <Tile label="Aircraft" value={data.counters.unique_aircraft} />
             <Tile label="Runway changes" value={data.counters.runway_changes} />
           </section>
+          <OperationsTrends icao={icao} />
+          <AircraftDashboard icao={icao} win={win} />
 
           <section className="stats-card">
             <h2>Do they actually stop?</h2>
