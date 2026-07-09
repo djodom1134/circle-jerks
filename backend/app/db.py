@@ -319,6 +319,32 @@ CREATE TABLE IF NOT EXISTS runway_changes (
   FOREIGN KEY (icao) REFERENCES airports(icao)
 );
 CREATE INDEX IF NOT EXISTS idx_runway_changes_icao ON runway_changes(icao, changed_at DESC);
+
+CREATE TABLE IF NOT EXISTS aircraft_owner_overrides (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  icao24 TEXT NOT NULL,
+  owner_type TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  locked INTEGER NOT NULL DEFAULT 0,
+  editor_visitor_id TEXT,
+  editor_ip TEXT,
+  change_note TEXT,
+  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+CREATE INDEX IF NOT EXISTS idx_owner_overrides_current ON aircraft_owner_overrides(icao24, is_current);
+
+CREATE TABLE IF NOT EXISTS aircraft_community_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  icao24 TEXT NOT NULL,
+  note TEXT NOT NULL,
+  is_flight_school INTEGER NOT NULL DEFAULT 0,
+  editor_visitor_id TEXT,
+  editor_ip TEXT,
+  hidden INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+CREATE INDEX IF NOT EXISTS idx_community_notes_icao ON aircraft_community_notes(icao24, created_at DESC);
 """
 
 
@@ -1164,6 +1190,97 @@ def count_recent_pattern_edits(
                OR (editor_ip IS NOT NULL AND editor_ip = ?))
         """,
         (since_ts, editor_visitor_id, editor_ip),
+    ).fetchone()
+    return row["c"]
+
+
+def set_owner_override(conn: sqlite3.Connection, icao24: str, owner_type: str,
+                       editor_visitor_id: str | None = None, editor_ip: str | None = None,
+                       change_note: str | None = None) -> dict:
+    """Append a new current owner-class override (mirrors save_runway_pattern)."""
+    icao24 = normalize_icao24(icao24)
+    row = conn.execute(
+        "SELECT MAX(version) AS v FROM aircraft_owner_overrides WHERE icao24=?", (icao24,),
+    ).fetchone()
+    next_version = (row["v"] or 0) + 1
+    conn.execute("UPDATE aircraft_owner_overrides SET is_current=0 WHERE icao24=?", (icao24,))
+    conn.execute(
+        "INSERT INTO aircraft_owner_overrides "
+        "  (icao24, owner_type, version, is_current, editor_visitor_id, editor_ip, change_note) "
+        "VALUES (?, ?, ?, 1, ?, ?, ?)",
+        (icao24, owner_type, next_version, editor_visitor_id, editor_ip, change_note),
+    )
+    return current_owner_override(conn, icao24)
+
+
+def current_owner_override(conn: sqlite3.Connection, icao24: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM aircraft_owner_overrides WHERE icao24=? AND is_current=1",
+        (normalize_icao24(icao24),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def current_owner_overrides(conn: sqlite3.Connection) -> dict[str, str]:
+    return {
+        r["icao24"]: r["owner_type"]
+        for r in conn.execute(
+            "SELECT icao24, owner_type FROM aircraft_owner_overrides WHERE is_current=1"
+        ).fetchall()
+    }
+
+
+def resolve_owner_class(conn: sqlite3.Connection, icao24: str) -> dict:
+    override = current_owner_override(conn, icao24)
+    if override:
+        return {"owner_class": override["owner_type"], "owner_source": "community"}
+    row = conn.execute(
+        "SELECT owner_type FROM aircraft_registry WHERE icao_hex = upper(?) LIMIT 1",
+        (normalize_icao24(icao24),),
+    ).fetchone()
+    return {"owner_class": (row["owner_type"] if row and row["owner_type"] else "unknown"),
+            "owner_source": "inferred"}
+
+
+def add_community_note(conn: sqlite3.Connection, icao24: str, note: str, is_flight_school: bool,
+                       editor_visitor_id: str | None = None, editor_ip: str | None = None) -> dict:
+    icao24 = normalize_icao24(icao24)
+    cur = conn.execute(
+        "INSERT INTO aircraft_community_notes "
+        "  (icao24, note, is_flight_school, editor_visitor_id, editor_ip) VALUES (?, ?, ?, ?, ?)",
+        (icao24, note, 1 if is_flight_school else 0, editor_visitor_id, editor_ip),
+    )
+    row = conn.execute(
+        "SELECT * FROM aircraft_community_notes WHERE id=?", (cur.lastrowid,),
+    ).fetchone()
+    return dict(row)
+
+
+def list_community_notes(conn: sqlite3.Connection, icao24: str,
+                         include_hidden: bool = False) -> list[dict]:
+    q = ("SELECT id, icao24, note, is_flight_school, created_at FROM aircraft_community_notes "
+         "WHERE icao24=?")
+    if not include_hidden:
+        q += " AND hidden=0"
+    q += " ORDER BY created_at DESC"
+    return [dict(r) for r in conn.execute(q, (normalize_icao24(icao24),)).fetchall()]
+
+
+def count_recent_crowd_edits(conn: sqlite3.Connection, visitor_id: str | None,
+                             ip: str | None, since_ts: int) -> int:
+    row = conn.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM aircraft_owner_overrides
+            WHERE created_at >= ?
+              AND ((editor_visitor_id IS NOT NULL AND editor_visitor_id = ?)
+                   OR (editor_ip IS NOT NULL AND editor_ip = ?))) +
+          (SELECT COUNT(*) FROM aircraft_community_notes
+            WHERE created_at >= ?
+              AND ((editor_visitor_id IS NOT NULL AND editor_visitor_id = ?)
+                   OR (editor_ip IS NOT NULL AND editor_ip = ?))) AS c
+        """,
+        (since_ts, visitor_id, ip, since_ts, visitor_id, ip),
     ).fetchone()
     return row["c"]
 
