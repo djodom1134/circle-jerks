@@ -4,8 +4,10 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
+from zoneinfo import ZoneInfo
 
 from .geo import Point, distance_nm
 
@@ -533,6 +535,33 @@ def read_operations(
         args.extend(types)
     query += " ORDER BY timestamp ASC"
     return conn.execute(query, args).fetchall()
+
+
+def airport_timezone(conn: sqlite3.Connection, icao: str) -> str | None:
+    row = conn.execute("SELECT timezone FROM airports WHERE icao=?", (icao.upper(),)).fetchone()
+    return row["timezone"] if row else None
+
+
+def _local_dt(ts: int, tz: str | None) -> datetime:
+    utc = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    if not tz:
+        return utc
+    try:
+        return utc.astimezone(ZoneInfo(tz))
+    except Exception:  # noqa: BLE001 — unknown tz name -> fall back to UTC
+        return utc
+
+
+def local_hour(ts: int, tz: str | None) -> int:
+    return _local_dt(ts, tz).hour
+
+
+def local_day_key(ts: int, tz: str | None) -> str:
+    return _local_dt(ts, tz).strftime("%Y-%m-%d")
+
+
+def local_month_key(ts: int, tz: str | None) -> str:
+    return _local_dt(ts, tz).strftime("%Y-%m")
 
 
 def persist_events(conn: sqlite3.Connection, events: Iterable[dict]) -> int:

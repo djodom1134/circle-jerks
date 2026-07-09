@@ -34,3 +34,20 @@ def test_migrate_adds_columns_to_legacy_db(tmp_path):
     assert "emitter_category" in _cols(conn, "operations")
     assert "emitter_category" in _cols(conn, "track_archive")
     assert "timezone" in _cols(conn, "airports")
+
+
+from app.db import local_hour, local_day_key, local_month_key
+
+
+def test_local_hour_denver_dst():
+    # 2026-07-01 02:00:00 UTC = 2026-06-30 20:00 MDT (UTC-6 in summer).
+    ts = 1782871200  # 2026-07-01T02:00:00Z
+    assert local_hour(ts, "America/Denver") == 20
+    assert local_day_key(ts, "America/Denver") == "2026-06-30"
+    assert local_month_key(ts, "America/Denver") == "2026-06"
+
+
+def test_local_hour_utc_fallback():
+    ts = 1782871200
+    assert local_hour(ts, None) == 2
+    assert local_day_key(ts, None) == "2026-07-01"
