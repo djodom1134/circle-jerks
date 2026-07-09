@@ -24,6 +24,7 @@ export const OWNER_OPTIONS = [
 type Sortable = number | string | null;
 
 function cellValue(row: VnapAircraft, key: string): Sortable {
+  if (key === "owner_class") return OWNER_LABELS[row.owner_class] ?? row.owner_class;
   if (key in row) return (row as unknown as Record<string, Sortable>)[key];
   return row.scores[key] ?? null; // axis columns
 }
@@ -48,11 +49,13 @@ export function radarData(
   axes: string[],
   selected: VnapAircraft | null,
   averages: Record<string, number | null>,
-): { axis: string; label: string; selected: number; average: number }[] {
+): { axis: string; label: string; selected: number; average: number; selectedNull: boolean; averageNull: boolean }[] {
   return axes.map((axis) => ({
     axis,
     label: AXIS_LABELS[axis] ?? axis,
     selected: selected?.scores[axis] ?? 0,
     average: averages[axis] ?? 0,
+    selectedNull: selected?.scores[axis] == null,
+    averageNull: averages[axis] == null,
   }));
 }

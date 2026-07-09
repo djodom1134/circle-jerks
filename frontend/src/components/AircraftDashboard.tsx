@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   Tooltip, Legend, ResponsiveContainer,
+  type TooltipValueType, type TooltipPayloadEntry,
 } from "recharts";
 import { getVnapCompliance, setOwnerClass, type VnapComplianceResponse, type VnapAircraft, type StatsWindow } from "../lib/api";
 import { sortAircraft, radarData, OWNER_LABELS, OWNER_OPTIONS } from "../lib/vnapDashboard";
@@ -26,7 +27,7 @@ function fmt(v: number | string | null, numeric: boolean): string {
   return String(v);
 }
 
-export default function AircraftDashboard({ icao, window }: { icao: string; window: StatsWindow }) {
+export default function AircraftDashboard({ icao, win }: { icao: string; win: StatsWindow }) {
   const [data, setData] = useState<VnapComplianceResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState("vnap_score");
@@ -35,12 +36,12 @@ export default function AircraftDashboard({ icao, window }: { icao: string; wind
 
   useEffect(() => {
     setData(null); setError(null); setSelected(null);
-    getVnapCompliance(icao, window)
+    getVnapCompliance(icao, win)
       .then(setData)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load compliance."));
-  }, [icao, window]);
+  }, [icao, win]);
 
-  const reload = () => getVnapCompliance(icao, window).then(setData).catch(() => {});
+  const reload = () => getVnapCompliance(icao, win).then(setData).catch(() => {});
 
   const onOwnerChange = async (icao24: string, owner_type: string) => {
     try {
@@ -72,6 +73,16 @@ export default function AircraftDashboard({ icao, window }: { icao: string; wind
     else { setSortKey(key); setSortDir(key === "tail" || key === "owner_class" || key === "aircraft_type" ? "asc" : "desc"); }
   };
 
+  const radarTooltipFormatter = (
+    value: TooltipValueType | undefined,
+    name: string | number | undefined,
+    item: TooltipPayloadEntry,
+  ): ReactNode => {
+    const row = item?.payload as { selectedNull?: boolean; averageNull?: boolean } | undefined;
+    if (name === "Average") return row?.averageNull ? "no data" : (value as ReactNode);
+    return row?.selectedNull ? "no data" : (value as ReactNode);
+  };
+
   return (
     <section className="stats-card vnap-dashboard">
       <h2>Aircraft VNAP compliance</h2>
@@ -79,6 +90,9 @@ export default function AircraftDashboard({ icao, window }: { icao: string; wind
         One row per aircraft over the selected window. Click a row to compare it against the set
         average on the radar. VNAP score is 0–100 (100 = follows the noise-abatement procedures).
       </p>
+      {data.aircraft.length === 0 ? (
+        <p className="stats-empty">No aircraft in this window.</p>
+      ) : (
       <div className="vnap-split">
         <div className="vnap-table-wrap">
           <table className="stats-table vnap-table">
@@ -131,11 +145,15 @@ export default function AircraftDashboard({ icao, window }: { icao: string; wind
               <Radar name="Average" dataKey="average" stroke="#8a8f98" fill="#8a8f98" fillOpacity={0.25} />
               <Radar name={selectedAc?.tail ?? "Selected"} dataKey="selected"
                      stroke="#1b3a6b" fill="#1b3a6b" fillOpacity={0.4} />
-              <Tooltip /><Legend />
+              <Tooltip formatter={radarTooltipFormatter} /><Legend />
             </RadarChart>
           </ResponsiveContainer>
+          <p className="stats-besteffort">
+            Larger web = more compliant (0–100). Axes with no data sit at the center.
+          </p>
         </div>
       </div>
+      )}
     </section>
   );
 }

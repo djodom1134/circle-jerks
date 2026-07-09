@@ -2,6 +2,10 @@ import { describe, it, expect } from "vitest";
 import { sortAircraft, radarData } from "./vnapDashboard";
 import type { VnapAircraft } from "./api";
 
+function acOwner(icao24: string, owner_class: string): VnapAircraft {
+  return ac({ icao24, owner_class });
+}
+
 function ac(partial: Partial<VnapAircraft>): VnapAircraft {
   return {
     icao24: "x", callsign: "X", registration: null, tail: "X", aircraft_type: null,
@@ -31,21 +35,40 @@ describe("sortAircraft", () => {
     const rows = [ac({ icao24: "a", tail: "N9" }), ac({ icao24: "b", tail: "N1" })];
     expect(sortAircraft(rows, "tail", "asc").map((r) => r.tail)).toEqual(["N1", "N9"]);
   });
+  it("sorts owner_class by its displayed label, not the raw enum key", () => {
+    const rows = [
+      acOwner("a", "llc"),
+      acOwner("b", "flight_school"),
+      acOwner("c", "individual"),
+    ];
+    // Labels: "Flight school" < "Individual" < "LLC" alphabetically
+    expect(sortAircraft(rows, "owner_class", "asc").map((r) => r.icao24)).toEqual(["b", "c", "a"]);
+  });
 });
 
 describe("radarData", () => {
-  it("maps selected+average per axis, null -> 0", () => {
+  it("maps selected+average per axis, null -> 0, and flags nulls per axis", () => {
     const axes = ["tightness", "altitude"];
     const sel = ac({ scores: { tightness: 80, altitude: null } });
     const out = radarData(axes, sel, { tightness: 60, altitude: 40 });
     expect(out).toEqual([
-      { axis: "tightness", label: "Pattern tightness", selected: 80, average: 60 },
-      { axis: "altitude", label: "Altitude", selected: 0, average: 40 },
+      { axis: "tightness", label: "Pattern tightness", selected: 80, average: 60, selectedNull: false, averageNull: false },
+      { axis: "altitude", label: "Altitude", selected: 0, average: 40, selectedNull: true, averageNull: false },
     ]);
   });
-  it("handles no selection (selected 0s)", () => {
+  it("flags averageNull when the fleet average itself is missing", () => {
+    const axes = ["timeofday"];
+    const sel = ac({ scores: { timeofday: 70 } });
+    const out = radarData(axes, sel, { timeofday: null });
+    expect(out[0]).toEqual({
+      axis: "timeofday", label: "Time of day", selected: 70, average: 0, selectedNull: false, averageNull: true,
+    });
+  });
+  it("handles no selection (selected 0s, selectedNull true)", () => {
     const out = radarData(["tightness"], null, { tightness: 55 });
     expect(out[0].selected).toBe(0);
     expect(out[0].average).toBe(55);
+    expect(out[0].selectedNull).toBe(true);
+    expect(out[0].averageNull).toBe(false);
   });
 });
