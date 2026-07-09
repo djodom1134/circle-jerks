@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import { getAirportStats, type AirportStatsResponse, type StatsWindow } from "../lib/api";
+import OperationsTrends from "./OperationsTrends";
 
 const WINDOWS: StatsWindow[] = ["1d", "7d", "30d", "all"];
 
@@ -40,6 +41,7 @@ export default function StatsPage() {
 
       {data && (
         <>
+          <OperationsTrends icao={icao} />
           <section className="stats-tiles">
             <Tile label="Touch & gos" value={data.counters.touch_and_gos} />
             <Tile label="Circles" value={data.counters.circles} />
