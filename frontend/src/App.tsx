@@ -1142,6 +1142,20 @@ function originDisplay(row: Offender) {
   return { label, detail };
 }
 
+const OFFENDER_OWNER_LABELS: Record<string, string> = {
+  individual: "Individual", llc: "LLC", corporation: "Corp", government: "Gov",
+  flight_school: "Flight school", university: "University", club: "Club",
+  trust: "Trust", unknown: "Unknown",
+};
+
+function offenderHoverTitle(row: Offender): string {
+  return [
+    `Type: ${row.aircraft_type ?? "unknown"}`,
+    `Owner: ${OFFENDER_OWNER_LABELS[row.owner_class ?? "unknown"] ?? row.owner_class}${row.owner_source === "community" ? " (community)" : ""}`,
+    `Flight school: ${row.is_flight_school ? "yes" : "no"}`,
+  ].join(" · ");
+}
+
 function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
   offenders: Offender[];
   selected: Offender | null;
@@ -1153,7 +1167,7 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
       <div className="section-title">Worst Offenders</div>
       <div className="table">
         <div className="table-row header">
-          <span>Callsign</span><span>Origin</span><span>Score</span><span>Cir</span><span>TG</span><span>Dev</span><span>Pass</span><span>Avg over you</span>
+          <span>Callsign</span><span>Origin</span><span>TG</span><span>VNAP</span>
         </div>
         {offenders.length === 0 && <div className="empty-row">No events in this window yet.</div>}
         {offenders.slice(0, 10).map((row) => (
@@ -1161,23 +1175,20 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
             key={row.icao24}
             className={`table-row ${selected?.icao24 === row.icao24 ? "selected" : ""}`}
             onClick={() => onSelect(row)}
+            title={offenderHoverTitle(row)}
           >
             <span>
-              <strong>{row.callsign}{row.is_cowboy ? " 🤠" : ""}</strong>
+              <strong>{row.callsign}{row.is_cowboy ? " 🤠" : ""}{row.is_flight_school ? " ✈" : ""}</strong>
               <small>{row.icao24}{reportCounts[row.icao24] ? ` | reported ${reportCounts[row.icao24]}x` : ""}</small>
             </span>
             <span>{originDisplay(row).label}<small>{originDisplay(row).detail}</small></span>
-            <span>{row.score}</span>
-            <span>{row.circles}</span>
             <span>
               {row.touch_and_gos}
               {row.runway_breakdown && Object.keys(row.runway_breakdown).length > 0 && (
                 <small>{runwayBreakdownLabel(row.runway_breakdown)}</small>
               )}
             </span>
-            <span>{row.deviation_mean_nm != null ? `${row.deviation_mean_nm} nm` : "—"}</span>
-            <span>{row.passes}</span>
-            <span>{numberOrDash(row.avg_altitude_over_user_ft_agl, " ft")}</span>
+            <span>{row.vnap_score != null ? row.vnap_score : "—"}</span>
           </button>
         ))}
       </div>

@@ -666,7 +666,7 @@ h2 {
 
 .table-row {
   display: grid;
-  grid-template-columns: 1.45fr 1.05fr 0.55fr 0.42fr 0.42fr 0.5fr;
+  grid-template-columns: 1.7fr 1.1fr 0.5fr 0.55fr;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -684,10 +684,6 @@ h2 {
   color: var(--muted);
   font-weight: 800;
   font-size: 0.78rem;
-}
-
-.table-row span:nth-last-child(-n + 2) {
-  display: none;
 }
 
 .table-row:not(.header):hover {
@@ -1482,7 +1478,7 @@ input[type="range"] {
     grid-template-columns: 1.35fr 0.7fr 0.45fr;
   }
 
-  .table-row span:nth-last-child(-n + 5) {
+  .table-row span:nth-last-child(-n + 1) {
     display: none;
   }
 
