@@ -272,3 +272,34 @@ def test_vnap_compliance_endpoint(tmp_path, monkeypatch):
         assert ac["circles"] == 1
         assert client.get("/airports/ZZZZ/vnap-compliance").status_code == 404
     get_settings.cache_clear()
+
+
+def test_owner_class_override_and_notes(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    from app import db
+    settings = get_settings()
+    db.init_db(settings.database_path)
+    with TestClient(app) as client:
+        # Bad bucket -> 422.
+        bad = client.put("/aircraft/aa11/owner-class",
+                         json={"owner_type": "spaceship", "visitor_id": "visitor-1234"})
+        assert bad.status_code == 422
+        # Valid override -> resolved community class.
+        ok = client.put("/aircraft/aa11/owner-class",
+                        json={"owner_type": "flight_school", "visitor_id": "visitor-1234",
+                              "change_note": "local school"})
+        assert ok.status_code == 200
+        assert ok.json()["owner_class"] == "flight_school"
+        assert ok.json()["owner_source"] == "community"
+        # Note round-trips and GET returns it + the resolved owner.
+        client.post("/aircraft/aa11/notes",
+                    json={"note": "laps at dawn", "is_flight_school": True,
+                          "visitor_id": "visitor-1234"})
+        got = client.get("/aircraft/aa11/notes")
+        assert got.status_code == 200
+        assert got.json()["owner"]["owner_class"] == "flight_school"
+        assert got.json()["notes"][0]["note"] == "laps at dawn"
+    get_settings.cache_clear()

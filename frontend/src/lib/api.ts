@@ -960,3 +960,23 @@ export function getPatternCircuits(icao: string, days: number) {
     `/airports/${encodeURIComponent(icao)}/pattern-circuits?days=${days}`
   );
 }
+
+// ─── Owner-class + community-notes API functions ──────────────────────────────
+
+export interface ResolvedOwner { owner_class: string; owner_source: string; }
+export interface AircraftNote { id: number; note: string; is_flight_school: boolean; created_at: number; }
+
+export function setOwnerClass(icao24: string, owner_type: string, visitor_id: string, change_note?: string) {
+  return putJson<ResolvedOwner>(`/aircraft/${encodeURIComponent(icao24)}/owner-class`,
+    { owner_type, visitor_id, change_note });
+}
+
+export function addAircraftNote(icao24: string, note: string, is_flight_school: boolean, visitor_id: string) {
+  return postJson<AircraftNote>(`/aircraft/${encodeURIComponent(icao24)}/notes`,
+    { note, is_flight_school, visitor_id });
+}
+
+export function getAircraftNotes(icao24: string) {
+  return getJson<{ owner: ResolvedOwner; notes: AircraftNote[] }>(
+    `/aircraft/${encodeURIComponent(icao24)}/notes`);
+}

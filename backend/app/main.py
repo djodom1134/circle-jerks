@@ -133,6 +133,24 @@ class AdminLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=400)
 
 
+VALID_OWNER_TYPES = frozenset({
+    "individual", "llc", "corporation", "government",
+    "flight_school", "university", "club", "trust", "unknown",
+})
+
+
+class OwnerClassRequest(BaseModel):
+    owner_type: str
+    visitor_id: str | None = Field(default=None, min_length=8, max_length=80)
+    change_note: str | None = Field(default=None, max_length=280)
+
+
+class CommunityNoteRequest(BaseModel):
+    note: str = Field(min_length=1, max_length=280)
+    is_flight_school: bool = False
+    visitor_id: str | None = Field(default=None, min_length=8, max_length=80)
+
+
 PATTERN_EDIT_WINDOW_S = 3600
 PATTERN_EDIT_MAX_PER_WINDOW = 30
 
@@ -1551,6 +1569,16 @@ def _enforce_pattern_edit_limit(conn, visitor_id: str | None, ip: str | None, no
         raise HTTPException(status_code=429, detail="too many pattern edits; slow down")
 
 
+def _enforce_crowd_edit_limit(conn, visitor_id: str | None, ip: str | None, now: int) -> None:
+    """Guard owner-class overrides and community notes: reject unidentifiable
+    editors (no visitor_id and no IP) and enforce the per-editor rate limit."""
+    if not visitor_id and not ip:
+        raise HTTPException(status_code=400, detail="cannot identify editor")
+    recent = db.count_recent_crowd_edits(conn, visitor_id, ip, now - PATTERN_EDIT_WINDOW_S)
+    if recent >= PATTERN_EDIT_MAX_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="too many edits; slow down")
+
+
 @app.put("/runways/{icao}/{runway_id}/pattern")
 async def save_runway_pattern_endpoint(
     icao: str,
@@ -1620,3 +1648,54 @@ async def revert_runway_pattern_endpoint(
         if saved is None:
             raise HTTPException(status_code=404, detail="version not found")
     return {"pattern": _pattern_response(saved)}
+
+
+@app.put("/aircraft/{icao24}/owner-class")
+async def set_aircraft_owner_class(
+    icao24: str,
+    payload: OwnerClassRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    if payload.owner_type not in VALID_OWNER_TYPES:
+        raise HTTPException(status_code=422, detail="invalid owner_type")
+    now = int(time.time())
+    ip = client_ip(request)
+    with db_session(settings.database_path) as conn:
+        _enforce_crowd_edit_limit(conn, payload.visitor_id, ip, now)
+        db.set_owner_override(conn, icao24, payload.owner_type,
+                              editor_visitor_id=payload.visitor_id, editor_ip=ip,
+                              change_note=payload.change_note)
+        resolved = db.resolve_owner_class(conn, icao24)
+    return resolved
+
+
+@app.post("/aircraft/{icao24}/notes")
+async def add_aircraft_note(
+    icao24: str,
+    payload: CommunityNoteRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    now = int(time.time())
+    ip = client_ip(request)
+    with db_session(settings.database_path) as conn:
+        _enforce_crowd_edit_limit(conn, payload.visitor_id, ip, now)
+        note = db.add_community_note(conn, icao24, payload.note, payload.is_flight_school,
+                                     editor_visitor_id=payload.visitor_id, editor_ip=ip)
+    return {"id": note["id"], "note": note["note"],
+            "is_flight_school": bool(note["is_flight_school"]), "created_at": note["created_at"]}
+
+
+@app.get("/aircraft/{icao24}/notes")
+async def get_aircraft_notes(
+    icao24: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        owner = db.resolve_owner_class(conn, icao24)
+        notes = db.list_community_notes(conn, icao24)
+    return {"owner": owner,
+            "notes": [{"id": n["id"], "note": n["note"],
+                       "is_flight_school": bool(n["is_flight_school"]),
+                       "created_at": n["created_at"]} for n in notes]}
