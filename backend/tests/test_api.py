@@ -302,4 +302,22 @@ def test_owner_class_override_and_notes(tmp_path, monkeypatch):
         assert got.status_code == 200
         assert got.json()["owner"]["owner_class"] == "flight_school"
         assert got.json()["notes"][0]["note"] == "laps at dawn"
+
+
+def test_owner_class_locked_returns_409(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    from app import db
+    settings = get_settings()
+    db.init_db(settings.database_path)
+    with db.db_session(settings.database_path) as conn:
+        db.set_owner_override(conn, "ff66", "llc", editor_visitor_id="v-12345678")
+        conn.execute("UPDATE aircraft_owner_overrides SET locked=1 WHERE icao24='ff66'")
+    with TestClient(app) as client:
+        resp = client.put("/aircraft/ff66/owner-class",
+                          json={"owner_type": "individual", "visitor_id": "visitor-9999"})
+        assert resp.status_code == 409
+    get_settings.cache_clear()
     get_settings.cache_clear()

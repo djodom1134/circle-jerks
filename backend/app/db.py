@@ -1257,13 +1257,13 @@ def add_community_note(conn: sqlite3.Connection, icao24: str, note: str, is_flig
 
 
 def list_community_notes(conn: sqlite3.Connection, icao24: str,
-                         include_hidden: bool = False) -> list[dict]:
+                         include_hidden: bool = False, limit: int = 200) -> list[dict]:
     q = ("SELECT id, icao24, note, is_flight_school, created_at FROM aircraft_community_notes "
          "WHERE icao24=?")
     if not include_hidden:
         q += " AND hidden=0"
-    q += " ORDER BY created_at DESC"
-    return [dict(r) for r in conn.execute(q, (normalize_icao24(icao24),)).fetchall()]
+    q += " ORDER BY created_at DESC LIMIT ?"
+    return [dict(r) for r in conn.execute(q, (normalize_icao24(icao24), limit)).fetchall()]
 
 
 def count_recent_crowd_edits(conn: sqlite3.Connection, visitor_id: str | None,

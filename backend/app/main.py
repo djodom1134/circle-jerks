@@ -1662,6 +1662,9 @@ async def set_aircraft_owner_class(
     now = int(time.time())
     ip = client_ip(request)
     with db_session(settings.database_path) as conn:
+        current = db.current_owner_override(conn, icao24)
+        if current and current["locked"]:
+            raise HTTPException(status_code=409, detail="owner class is locked")
         _enforce_crowd_edit_limit(conn, payload.visitor_id, ip, now)
         db.set_owner_override(conn, icao24, payload.owner_type,
                               editor_visitor_id=payload.visitor_id, editor_ip=ip,

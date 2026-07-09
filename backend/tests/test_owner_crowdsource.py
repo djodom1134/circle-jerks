@@ -61,3 +61,14 @@ def test_community_notes_and_rate_count(tmp_path):
     # rate counter sees both overrides and notes by this editor
     n = db.count_recent_crowd_edits(conn, "v-abcdef12", "9.9.9.9", since_ts=0)
     assert n == 1
+
+
+def test_locked_override_blocks_further_via_db_and_list_limit(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    # list_community_notes respects an explicit limit.
+    for i in range(3):
+        db.add_community_note(conn, "ee55", f"note {i}", is_flight_school=False,
+                              editor_visitor_id="v-abcdef12", editor_ip="1.1.1.1")
+    conn.commit()
+    assert len(db.list_community_notes(conn, "ee55", limit=2)) == 2
+    assert len(db.list_community_notes(conn, "ee55")) == 3  # default 200 -> all
