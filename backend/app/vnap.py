@@ -58,19 +58,19 @@ def altitude_score(typical_agl_ft: float | None, rules: VnapRuleset) -> float | 
 def timeofday_score(in_window: int, total: int) -> float | None:
     if not total:
         return None
-    return round(100.0 * in_window / total, 1)
+    return round(_clamp(100.0 * in_window / total), 1)
 
 
 def left_traffic_score(left: int, known: int) -> float | None:
     if not known:
         return None
-    return round(100.0 * left / known, 1)
+    return round(_clamp(100.0 * left / known), 1)
 
 
 def runway_pref_score(on_pref_when_favored: int, favored_total: int) -> float | None:
     if not favored_total:
         return None
-    return round(100.0 * on_pref_when_favored / favored_total, 1)
+    return round(_clamp(100.0 * on_pref_when_favored / favored_total), 1)
 
 
 def _session_limit_score(per_session_counts: list[int], limit: int) -> float | None:
