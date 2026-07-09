@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -871,6 +872,116 @@ def airport_stats(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: in
         "flight_schools": flight_schools,
         "runway_usage": runway_usage,
     }
+
+
+_OPERATION_TYPES = ("landing", "takeoff", "touch_and_go")
+_LIGHT_EMITTER = "A1"
+
+
+def airport_operations_trends(
+    conn: sqlite3.Connection,
+    icao: str,
+    now_ts: int,
+    months: int = 12,
+    recent_days: int = 10,
+    top_types: int = 8,
+) -> dict:
+    icao = icao.upper()
+    tz = airport_timezone(conn, icao)
+    start_ts = now_ts - months * 31 * 86400  # generous lower bound; we key by local month
+
+    rows = conn.execute(
+        "SELECT o.timestamp AS ts, o.type AS type, o.icao24 AS icao24, "
+        "       o.emitter_category AS emitter, reg.model AS model "
+        "FROM operations o "
+        "LEFT JOIN aircraft_registry reg ON reg.icao_hex = upper(o.icao24) "
+        "WHERE o.icao=? AND o.type IN (?,?,?) AND o.timestamp BETWEEN ? AND ? "
+        "ORDER BY o.timestamp ASC",
+        (icao, *_OPERATION_TYPES, start_ts, now_ts),
+    ).fetchall()
+
+    data_since = conn.execute(
+        "SELECT MIN(timestamp) AS t FROM operations WHERE icao=? AND type IN (?,?,?)",
+        (icao, *_OPERATION_TYPES),
+    ).fetchone()["t"]
+
+    # --- monthly buckets ---
+    monthly: dict[str, dict] = {}
+    for r in rows:
+        key = local_month_key(r["ts"], tz)
+        m = monthly.setdefault(key, {
+            "month": key, "landings": 0, "takeoffs": 0, "tg": 0, "total": 0,
+            "_types": defaultdict(int), "by_emitter": defaultdict(int),
+        })
+        if r["type"] == "landing":
+            m["landings"] += 1
+        elif r["type"] == "takeoff":
+            m["takeoffs"] += 1
+        else:
+            m["tg"] += 1
+        m["total"] += 1
+        m["_types"][r["model"] or "Unknown"] += 1
+        m["by_emitter"][_emitter_bucket(r["emitter"])] += 1
+
+    # Global top-N aircraft types across the window; everything else -> "Other".
+    type_totals: dict[str, int] = defaultdict(int)
+    for m in monthly.values():
+        for model, n in m["_types"].items():
+            type_totals[model] += n
+    top = {t for t, _ in sorted(type_totals.items(), key=lambda kv: kv[1], reverse=True)[:top_types]}
+
+    monthly_out = []
+    for key in sorted(monthly.keys()):
+        m = monthly[key]
+        by_type: dict[str, int] = defaultdict(int)
+        for model, n in m["_types"].items():
+            by_type[model if model in top else "Other"] += n
+        monthly_out.append({
+            "month": m["month"], "landings": m["landings"], "takeoffs": m["takeoffs"],
+            "tg": m["tg"], "total": m["total"],
+            "pct_tg": round(100.0 * m["tg"] / m["total"], 2) if m["total"] else 0.0,
+            "by_type": dict(by_type), "by_emitter": dict(m["by_emitter"]),
+        })
+
+    # --- recent N local days ---
+    day_agg: dict[str, dict] = {}
+    for r in rows:
+        key = local_day_key(r["ts"], tz)
+        d = day_agg.setdefault(key, {"date": key, "operations": 0, "tg": 0, "light": 0})
+        d["operations"] += 1
+        if r["type"] == "touch_and_go":
+            d["tg"] += 1
+        if r["emitter"] == _LIGHT_EMITTER:
+            d["light"] += 1
+    recent_out = []
+    for key in sorted(day_agg.keys(), reverse=True)[:recent_days]:
+        d = day_agg[key]
+        n = d["operations"]
+        recent_out.append({
+            "date": d["date"], "operations": n,
+            "pct_tg": round(100.0 * d["tg"] / n, 2) if n else 0.0,
+            "pct_light": round(100.0 * d["light"] / n, 2) if n else 0.0,
+        })
+    recent_out.reverse()  # oldest -> newest for display
+
+    # --- time of day (local hour, full window) ---
+    hours = [0] * 24
+    for r in rows:
+        hours[local_hour(r["ts"], tz)] += 1
+    time_of_day = [{"hour": h, "operations": hours[h]} for h in range(24)]
+
+    return {
+        "timezone": tz,
+        "data_since": data_since,
+        "recent_days": recent_out,
+        "monthly": monthly_out,
+        "time_of_day": time_of_day,
+    }
+
+
+def _emitter_bucket(code: str | None) -> str:
+    # Buckets shown to users; everything else collapses to "Other".
+    return code if code in {"A1", "A2", "A6", "B1", "B4"} else "Other"
 
 
 def get_airport(conn: sqlite3.Connection, icao: str) -> Airport | None:
