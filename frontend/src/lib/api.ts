@@ -49,6 +49,11 @@ export interface Offender {
   is_cowboy?: boolean;
   /** Breakdown of T&Gs / low approaches by runway_id, e.g. {"11": 3, "29": 7}. */
   runway_breakdown?: Record<string, number>;
+  /** Resolved owner class: community override if present, else registry-inferred. */
+  owner_class?: string;
+  owner_source?: string;
+  aircraft_type?: string | null;
+  is_flight_school?: boolean;
 }
 
 export interface TrackSample {

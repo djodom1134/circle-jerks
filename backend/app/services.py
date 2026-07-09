@@ -968,6 +968,22 @@ async def recent_tracks_for_response(
     )[:limit]
 
 
+def resolve_offender_owner(icao24: str, owner_by_icao: dict[str, str],
+                           overrides: dict[str, str]) -> dict:
+    """Resolve an offender's owner class: community override wins over the
+    registry-inferred owner_type. Pure function — no I/O — so the scan hot
+    path can batch the lookups upfront and call this per-offender in memory.
+    """
+    override = overrides.get(icao24)
+    inferred = owner_by_icao.get(icao24, "unknown")
+    owner_class = override or inferred
+    return {
+        "owner_class": owner_class,
+        "owner_source": "community" if override else "inferred",
+        "is_flight_school": owner_class == "flight_school",
+    }
+
+
 async def enrich_offenders(
     store: Store,
     settings: Settings,
@@ -1025,6 +1041,23 @@ async def enrich_offenders(
         ).fetchall()
         cowboy_set = {r["cowboy_icao24"] for r in cowboy_rows}
 
+    # Owner class + aircraft type, batched (perf rule: one query, never per-offender).
+    owner_by_icao: dict[str, str] = {}
+    model_by_icao: dict[str, str] = {}
+    if icao24s:
+        up = [i.upper() for i in icao24s]
+        ph = ",".join("?" * len(up))
+        for r in conn.execute(
+            f"SELECT lower(icao_hex) AS icao24, owner_type, model FROM aircraft_registry "
+            f"WHERE icao_hex IN ({ph})",
+            up,
+        ).fetchall():
+            if r["owner_type"]:
+                owner_by_icao[r["icao24"]] = r["owner_type"]
+            if r["model"]:
+                model_by_icao[r["icao24"]] = r["model"]
+    overrides = db.current_owner_overrides(conn)
+
     sem = asyncio.Semaphore(8)
 
     async def enrich_one(offender: dict, with_origin: bool) -> dict:
@@ -1048,6 +1081,8 @@ async def enrich_offenders(
                 "report_count": report_counts.get(offender["icao24"], 0),
                 "deviation_mean_nm": deviation_by_icao.get(offender["icao24"]),
                 "is_cowboy": offender["icao24"] in cowboy_set,
+                **resolve_offender_owner(offender["icao24"], owner_by_icao, overrides),
+                "aircraft_type": model_by_icao.get(offender["icao24"]),
                 **altitude_over_user_summary(track, airport, params, window),
                 **origin,
             }
