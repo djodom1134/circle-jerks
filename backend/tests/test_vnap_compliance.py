@@ -115,3 +115,32 @@ def test_compliance_icao24s_filter_matches_unscoped_score(tmp_path):
     scoped_aa = scoped["aircraft"][0]
     assert scoped_aa["vnap_score"] == full_aa["vnap_score"]
     assert scoped_aa["scores"] == full_aa["scores"]
+
+
+def test_vnap_score_gated_until_pattern_work(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    base = 1780000000
+    # gate1 clearly violates (low pass = altitude infraction, off-pattern circles)
+    # but only 3 circles + 0 T&G -> UNDER the gate -> score stays 0.
+    _op(conn, "p0", "pass_over_user", base + 5, "gate1", min_agl=200)
+    for i in range(3):
+        _op(conn, f"c{i}", "circle", base + 10 + i, "gate1", dev=0.9)
+    # work1 has the same violations but is doing real pattern work
+    # (10 circles + 1 T&G) -> gate passes -> real, non-zero score.
+    _op(conn, "tg", "touch_and_go", base + 5, "work1")
+    _op(conn, "p1", "pass_over_user", base + 6, "work1", min_agl=200)
+    for i in range(10):
+        _op(conn, f"w{i}", "circle", base + 20 + i, "work1", dev=0.9)
+    conn.commit()
+
+    out = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)
+    gated = next(a for a in out["aircraft"] if a["icao24"] == "gate1")
+    worked = next(a for a in out["aircraft"] if a["icao24"] == "work1")
+
+    assert gated["circles"] == 3 and gated["touch_and_gos"] == 0
+    assert gated["vnap_score"] == 0.0                 # under the gate -> stays 0
+    # but its per-axis breakdown is still computed (not zeroed)
+    assert gated["scores"]["tightness"] and gated["scores"]["tightness"] > 0
+
+    assert worked["circles"] == 10 and worked["touch_and_gos"] == 1
+    assert worked["vnap_score"] is not None and worked["vnap_score"] > 0.0

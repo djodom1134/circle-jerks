@@ -30,6 +30,10 @@ class VnapRuleset:
     # Preferred runway + its approximate heading (deg) for the wind-favored test.
     preferred_runway_id: str = "29"
     preferred_runway_heading_deg: float = 290.0
+    # A plane isn't "judged" until it's doing real pattern work: the VNAP score
+    # stays 0 until it has at least this many touch-and-gos AND circles.
+    score_min_tg: int = 1
+    score_min_circles: int = 10
 
 
 _KLMO = VnapRuleset()
@@ -222,6 +226,11 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         circles = sum(1 for r in ac_rows if r["type"] == "circle")
         tgs = sum(1 for r in ac_rows if r["type"] == "touch_and_go")
         devs = [r["dev"] for r in ac_rows if r["type"] == "circle" and r["dev"] is not None]
+        # VNAP stays 0 until the aircraft is doing real pattern work (>= 1 T&G AND
+        # >= 10 circles); otherwise there isn't enough signal to judge it.
+        vnap_score = composite_score(scores, rules)
+        if not (tgs >= rules.score_min_tg and circles >= rules.score_min_circles):
+            vnap_score = 0.0
         aircraft.append({
             "icao24": icao24,
             "callsign": callsign,
@@ -230,7 +239,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
             "aircraft_type": model,
             "owner_class": owner_class,
             "owner_source": owner_source,
-            "vnap_score": composite_score(scores, rules),
+            "vnap_score": vnap_score,
             "reports": report_counts.get(icao24, 0),
             "operations": operations,
             "touch_and_gos": tgs,
