@@ -24,6 +24,8 @@ def test_opensky_maps_numeric_category():
     sample = parse_state_vector(row, fallback_ts=1_700_000_000)
     assert sample["emitter_category"] == "A1"
     assert OPENSKY_CATEGORY_CODES[9] == "B1"  # glider
+    assert OPENSKY_CATEGORY_CODES[16] == "C1"  # surface emergency vehicle
+    assert OPENSKY_CATEGORY_CODES[20] == "C5"  # line obstacle
 
 
 def test_opensky_short_row_has_no_category():
