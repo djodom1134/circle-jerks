@@ -37,12 +37,18 @@ def api_request(token: str, method: str, path: str, payload: dict | None = None)
 
 
 def zone_id_for_domain(token: str, domain: str) -> str:
-    query = urllib.parse.urlencode({"name": domain})
-    data = api_request(token, "GET", f"/zones?{query}")
-    zones = data.get("result") or []
-    if not zones:
-        raise RuntimeError(f"Cloudflare zone not found for {domain}")
-    return zones[0]["id"]
+    # A subdomain (e.g. staging.circlejerks.live) is a record inside its
+    # registrable apex zone (circlejerks.live), not a zone of its own. Walk up
+    # the labels until a zone matches so subdomains resolve to the parent zone.
+    candidate = domain
+    while candidate.count(".") >= 1:
+        query = urllib.parse.urlencode({"name": candidate})
+        data = api_request(token, "GET", f"/zones?{query}")
+        zones = data.get("result") or []
+        if zones:
+            return zones[0]["id"]
+        candidate = candidate.split(".", 1)[1]
+    raise RuntimeError(f"Cloudflare zone not found for {domain}")
 
 
 def find_record(token: str, zone_id: str, record_type: str, name: str) -> dict | None:

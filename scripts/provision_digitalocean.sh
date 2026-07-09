@@ -96,7 +96,7 @@ if [ -z "${CIRCLEJERK_ADMIN_PASSWORD:-}" ] && [ -z "${CIRCLEJERK_ADMIN_PASSWORD_
 fi
 
 DOCTL=(doctl --access-token "$DIGITAL_OCEAN_API_KEY" --http-retry-max 2)
-SSH=(ssh -i "$SSH_PRIVATE_KEY_PATH" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15)
+SSH=(ssh -i "$SSH_PRIVATE_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15)
 
 fingerprint="$(ssh-keygen -E md5 -lf "$SSH_PUBLIC_KEY_PATH" | awk '{print $2}' | sed 's/^MD5://')"
 ssh_key_id="$("${DOCTL[@]}" compute ssh-key list --format ID,FingerPrint --no-header | awk -v fp="$fingerprint" '$2 == fp {print $1; exit}')"
@@ -158,7 +158,7 @@ done
 
 "${SSH[@]}" root@"$reserved_ip" "mkdir -p $ROOT/app"
 rsync -az --delete \
-  -e "ssh -i $SSH_PRIVATE_KEY_PATH -o StrictHostKeyChecking=accept-new" \
+  -e "ssh -i $SSH_PRIVATE_KEY_PATH -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
   --exclude '.git' \
   --exclude '.venv' \
   --exclude '.env' \
@@ -192,7 +192,7 @@ CIRCLEJERK_BBOX_MERGE_DISTANCE_NM=$(printf '%s' "${CIRCLEJERK_BBOX_MERGE_DISTANC
 CIRCLEJERK_OPENSKY_HISTORICAL_ENABLED=$(printf '%s' "${CIRCLEJERK_OPENSKY_HISTORICAL_ENABLED:-false}" | env_quote)
 ENV
 
-scp -i "$SSH_PRIVATE_KEY_PATH" -o StrictHostKeyChecking=accept-new "$tmp_env" root@"$reserved_ip":"$ROOT/app/.env" >/dev/null
+scp -i "$SSH_PRIVATE_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$tmp_env" root@"$reserved_ip":"$ROOT/app/.env" >/dev/null
 rm -f "$tmp_env"
 
 "${SSH[@]}" root@"$reserved_ip" "cd $ROOT/app && ./scripts/deploy_droplet.sh"
