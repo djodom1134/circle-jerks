@@ -488,6 +488,7 @@ def operation_from_event(event: dict) -> dict:
         "runway_heading_deg": event.get("runway_heading_deg"),
         "turn_direction": event.get("turn_direction"),
         "min_altitude_ft_agl": event.get("min_altitude_ft_agl"),
+        "emitter_category": event.get("emitter_category"),
     }
 
 
@@ -502,10 +503,12 @@ def upsert_operation(conn: sqlite3.Connection, op: dict) -> None:
         """
         INSERT INTO operations
           (id, icao, icao24, callsign, registration, type, timestamp,
-           runway_id, runway_heading_deg, turn_direction, min_altitude_ft_agl)
+           runway_id, runway_heading_deg, turn_direction, min_altitude_ft_agl,
+           emitter_category)
         VALUES
           (:id, :icao, :icao24, :callsign, :registration, :type, :timestamp,
-           :runway_id, :runway_heading_deg, :turn_direction, :min_altitude_ft_agl)
+           :runway_id, :runway_heading_deg, :turn_direction, :min_altitude_ft_agl,
+           :emitter_category)
         ON CONFLICT(id) DO NOTHING
         """,
         op,
@@ -1633,7 +1636,7 @@ _TRACK_ARCHIVE_COLUMNS = (
     "icao24", "timestamp", "lat", "lon",
     "altitude_ft", "baro_altitude_ft", "geo_altitude_ft",
     "heading_deg", "vertical_rate_fpm",
-    "callsign", "in_window", "source",
+    "callsign", "in_window", "source", "emitter_category",
 )
 
 
@@ -1669,6 +1672,7 @@ def archive_track_samples(
             sample.get("callsign"),
             1 if sample.get("in_window", True) else 0,
             sample.get("source"),
+            sample.get("emitter_category"),
         ))
     if not rows:
         return 0
@@ -1676,7 +1680,7 @@ def archive_track_samples(
         f"""
         INSERT OR IGNORE INTO track_archive
         ({', '.join(_TRACK_ARCHIVE_COLUMNS)}, archived_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
         """,
         rows,
     )
@@ -1831,5 +1835,6 @@ def _track_archive_row_to_sample(row: sqlite3.Row) -> dict:
         "callsign": row["callsign"],
         "in_window": bool(row["in_window"]),
         "source": row["source"],
+        "emitter_category": row["emitter_category"],
     }
 

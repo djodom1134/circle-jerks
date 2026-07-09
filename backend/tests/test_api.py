@@ -159,6 +159,7 @@ def test_pattern_circuits_endpoint(tmp_path, monkeypatch):
             "registration": None, "type": op_type, "timestamp": ts,
             "runway_id": runway, "runway_heading_deg": None,
             "turn_direction": None, "min_altitude_ft_agl": None,
+            "emitter_category": None,
         }
 
     with db.db_session(settings.database_path) as conn:

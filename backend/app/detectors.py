@@ -652,6 +652,7 @@ def _build_runway_event(event_type: str, ep: dict, airport: Airport, runways: li
         "runway_heading_deg": int(runway_heading) if runway_heading is not None else None,
         "runway_used": used_runway["runway_id"] if used_runway else None,
         "min_altitude_ft_agl": int(ep["lowest_agl"]),
+        "emitter_category": lowest_sample.get("emitter_category"),
     }
 
 
