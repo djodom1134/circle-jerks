@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import adsbdb, archive, db, deviation, flow, weather
+from . import adsbdb, archive, db, deviation, flow, vnap, weather
 from .db import Airport
 from .detectors import closest_over_user_rows, detect_events, detect_events_over_period, detect_landings_over_period, detect_takeoffs_over_period, event_counts, pass_geometry_key
 from .domain import ScanParams, hour_label, local_time_label, location_hash, monitor_hash
@@ -1058,6 +1058,16 @@ async def enrich_offenders(
                 model_by_icao[r["icao24"]] = r["model"]
     overrides = db.current_owner_overrides(conn)
 
+    # VNAP compliance score per aircraft (one batched computation, never per-offender).
+    vnap_by_icao: dict[str, float | None] = {}
+    if icao24s:
+        vnap_by_icao = {
+            a["icao24"]: a["vnap_score"]
+            for a in vnap.compute_aircraft_compliance(
+                conn, airport.icao, window.start_ts, window.end_ts
+            )["aircraft"]
+        }
+
     sem = asyncio.Semaphore(8)
 
     async def enrich_one(offender: dict, with_origin: bool) -> dict:
@@ -1083,6 +1093,7 @@ async def enrich_offenders(
                 "is_cowboy": offender["icao24"] in cowboy_set,
                 **resolve_offender_owner(offender["icao24"], owner_by_icao, overrides),
                 "aircraft_type": model_by_icao.get(offender["icao24"]),
+                "vnap_score": vnap_by_icao.get(offender["icao24"]),
                 **altitude_over_user_summary(track, airport, params, window),
                 **origin,
             }
