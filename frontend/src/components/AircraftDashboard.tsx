@@ -75,7 +75,7 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
 
   const downloadCsv = () => {
     if (!data) return;
-    const csv = toCsv(sorted, data.axes);
+    const csv = toCsv(sorted);
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
     a.href = url;

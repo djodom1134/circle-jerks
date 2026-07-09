@@ -11,7 +11,7 @@ function ac(partial: Partial<VnapAircraft>): VnapAircraft {
     icao24: "x", callsign: "X", registration: null, tail: "X", aircraft_type: null,
     owner_class: "unknown", owner_source: "inferred", vnap_score: null, reports: 0,
     operations: 0, touch_and_gos: 0, cowboy_count: 0, deviation_mean_nm: null, circles: 0,
-    scores: {}, ...partial,
+    scores: {}, metrics: {}, ...partial,
   };
 }
 
@@ -74,19 +74,23 @@ describe("radarData", () => {
 });
 
 describe("toCsv", () => {
-  it("emits a header + one row per aircraft incl. axis scores, escaping commas", () => {
+  it("emits a header + one row per aircraft using real-unit metrics, escaping commas", () => {
     const rows = [
       ac({ tail: "N1, Jr", aircraft_type: "C172", owner_class: "flight_school",
            vnap_score: 42.5, reports: 3, operations: 10, touch_and_gos: 4,
            cowboy_count: 1, deviation_mean_nm: 0.5, circles: 8,
-           scores: { tightness: 12, altitude: null } }),
+           scores: { tightness: 12, altitude: null },
+           metrics: {
+             altitude: 12.5, timeofday: 8.3, tg_volume: -3, circle_restraint: 2.86,
+             left_traffic: 60, runway29: 70, rwy_against: 40,
+           } }),
     ];
-    const csv = toCsv(rows, ["tightness", "altitude"]);
+    const csv = toCsv(rows);
     const [header, row] = csv.split("\n");
     expect(header).toBe(
-      "tail,aircraft_type,owner_class,owner_source,vnap_score,reports,operations,touch_and_gos,cowboy_count,deviation_mean_nm,circles,tightness,altitude",
+      "tail,aircraft_type,owner_class,owner_source,vnap_score,reports,operations,touch_and_gos,cowboy_count,deviation_mean_nm,circles,altitude,timeofday,tg_volume,circle_restraint,left_traffic,runway29,rwy_against",
     );
-    // comma-containing tail is quoted; null axis -> empty; axis value included
-    expect(row).toBe('"N1, Jr",C172,flight_school,inferred,42.5,3,10,4,1,0.5,8,12,');
+    // comma-containing tail is quoted; metrics values (not scores) render, no tightness column
+    expect(row).toBe('"N1, Jr",C172,flight_school,inferred,42.5,3,10,4,1,0.5,8,12.5,8.3,-3,2.86,60,70,40');
   });
 });

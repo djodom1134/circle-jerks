@@ -57,16 +57,19 @@ function csvEscape(v: unknown): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function toCsv(rows: VnapAircraft[], axes: string[]): string {
-  const cols = [...CSV_COLUMNS, ...axes];
+const METRIC_COLUMNS = [
+  "altitude", "timeofday", "tg_volume", "circle_restraint",
+  "left_traffic", "runway29", "rwy_against",
+];
+
+export function toCsv(rows: VnapAircraft[]): string {
+  const cols = [...CSV_COLUMNS, ...METRIC_COLUMNS];
   const header = cols.join(",");
   const lines = rows.map((r) =>
     cols
-      .map((c) =>
-        c in r
-          ? csvEscape((r as unknown as Record<string, unknown>)[c])
-          : csvEscape(r.scores[c]),
-      )
+      .map((c) => (c in r
+        ? csvEscape((r as unknown as Record<string, unknown>)[c])
+        : csvEscape(r.metrics?.[c] ?? null)))
       .join(","),
   );
   return [header, ...lines].join("\n");

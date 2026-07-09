@@ -898,6 +898,7 @@ export interface VnapAircraft {
   vnap_score: number | null; reports: number; operations: number;
   touch_and_gos: number; cowboy_count: number; deviation_mean_nm: number | null;
   circles: number; scores: Record<string, number | null>;
+  metrics?: Record<string, number | null> | null;
 }
 
 export interface VnapComplianceResponse {

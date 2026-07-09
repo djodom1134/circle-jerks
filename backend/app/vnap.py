@@ -141,6 +141,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
             "       o.turn_direction AS turn, o.runway_id AS runway, "
             "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
             "       o.min_altitude_ft_agl AS min_agl, "
+            "       o.headwind_kt AS headwind, o.runway_heading_deg AS rwy_heading, "
             "       (SELECT reg.owner_type FROM aircraft_registry reg "
             "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS owner_type, "
             "       (SELECT reg.model FROM aircraft_registry reg "
@@ -157,6 +158,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
             "       o.turn_direction AS turn, o.runway_id AS runway, "
             "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
             "       o.min_altitude_ft_agl AS min_agl, "
+            "       o.headwind_kt AS headwind, o.runway_heading_deg AS rwy_heading, "
             "       (SELECT reg.owner_type FROM aircraft_registry reg "
             "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS owner_type, "
             "       (SELECT reg.model FROM aircraft_registry reg "
@@ -168,6 +170,13 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         rows_params = (icao, start_ts, end_ts)
 
     rows = conn.execute(rows_sql, rows_params).fetchall()
+
+    data_since = conn.execute(
+        "SELECT MIN(timestamp) AS t FROM operations WHERE icao=?",
+        (icao,),
+    ).fetchone()["t"]
+    effective_start = start_ts if start_ts and start_ts > 0 else (data_since or end_ts)
+    window_days = max(1.0, (end_ts - effective_start) / 86400.0)
 
     # Report counts + cowboy counts + owner overrides, batched (avoid N+1).
     # NOTE: report_counts is a GLOBAL lifetime, cross-airport complaint tally
@@ -247,10 +256,48 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
             "deviation_mean_nm": round(sum(devs) / len(devs), 3) if devs else None,
             "circles": circles,
             "scores": scores,
+            "metrics": _metrics_aircraft(ac_rows, rules, tz, window_days),
         })
 
     averages = _averages(aircraft, rules)
     return {"axes": AXES, "averages": averages, "aircraft": aircraft}
+
+
+def _metrics_aircraft(rows, rules: VnapRuleset, tz: str | None, window_days: float) -> dict:
+    """Real-unit per-axis metrics for the CSV export (distinct from the 0-100 scores)."""
+    total = len(rows)
+    # altitude: % of over-home passes below 1000 ft AGL (the only ops carrying real altitude)
+    pass_agls = [r["min_agl"] for r in rows if r["type"] == "pass_over_user" and r["min_agl"] is not None]
+    altitude = round(100.0 * sum(1 for a in pass_agls if a < rules.agl_target_ft) / len(pass_agls), 1) if pass_agls else None
+    # timeofday: % of ops OUTSIDE the 8-8 local window
+    in_window = sum(1 for r in rows if rules.quiet_start_hour <= _db.local_hour(r["ts"], tz) < rules.quiet_end_hour)
+    timeofday = round(100.0 * (total - in_window) / total, 1) if total else None
+    # tg_volume: touch-and-gos per day minus the 10/day limit (can be negative)
+    tgs = sum(1 for r in rows if r["type"] == "touch_and_go")
+    tg_volume = round(tgs / window_days - rules.tg_per_session_limit, 2)
+    # circle_restraint: circles per day
+    circles = sum(1 for r in rows if r["type"] == "circle")
+    circle_restraint = round(circles / window_days, 2)
+    # left_traffic: % of known-direction (pattern) ops that were left-turning
+    known = sum(1 for r in rows if r["turn"] in ("left", "right"))
+    left = sum(1 for r in rows if r["turn"] == "left")
+    left_traffic = round(100.0 * left / known, 1) if known else None
+    # takeoff-based runway metrics
+    takeoffs = [r for r in rows if r["type"] == "takeoff" and r["runway"]]
+
+    def _hw(r):
+        if r["headwind"] is not None:
+            return r["headwind"]
+        return headwind_component(r["rwy_heading"], r["wind_from"], r["wind_speed"])
+
+    runway29 = round(100.0 * sum(1 for r in takeoffs if r["runway"] == rules.preferred_runway_id) / len(takeoffs), 1) if takeoffs else None
+    tw = [r for r in takeoffs if _hw(r) is not None]
+    rwy_against = round(100.0 * sum(1 for r in tw if _hw(r) < 0) / len(tw), 1) if tw else None
+    return {
+        "altitude": altitude, "timeofday": timeofday, "tg_volume": tg_volume,
+        "circle_restraint": circle_restraint, "left_traffic": left_traffic,
+        "runway29": runway29, "rwy_against": rwy_against,
+    }
 
 
 def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:

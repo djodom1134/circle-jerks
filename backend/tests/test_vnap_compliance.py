@@ -12,10 +12,11 @@ def seeded_conn(path):
 
 
 def _op(conn, oid, type_, ts, icao24="a1", dev=None, turn=None, runway=None,
-        wind_from=None, wind_speed=None, min_agl=None):
+        wind_from=None, wind_speed=None, min_agl=None, runway_heading=None):
     db.upsert_operation(conn, db.operation_from_event({
         "id": oid, "type": type_, "icao24": icao24, "callsign": icao24.upper(),
         "timestamp": ts, "airport_icao": "KLMO", "runway_id": runway,
+        "runway_heading_deg": runway_heading,
         "turn_direction": turn, "min_altitude_ft_agl": min_agl,
     }))
     if dev is not None or wind_from is not None:
@@ -144,3 +145,31 @@ def test_vnap_score_gated_until_pattern_work(tmp_path):
 
     assert worked["circles"] == 10 and worked["touch_and_gos"] == 1
     assert worked["vnap_score"] is not None and worked["vnap_score"] > 0.0
+
+
+def test_metrics_real_units(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    base = 1780000000
+    icao24 = "ee55"
+    for i in range(2):
+        _op(conn, f"tg{i}", "touch_and_go", base + 5 + i, icao24, turn="left")
+    for i in range(20):
+        _op(conn, f"c{i}", "circle", base + 10 + i, icao24, dev=0.9)
+    _op(conn, "p1", "pass_over_user", base + 40, icao24, min_agl=500)
+    # Takeoff on non-preferred runway "11" (heading 110) with a tailwind
+    # (wind from 290 -> straight down runway 11's back -> headwind component < 0).
+    _op(conn, "t1", "takeoff", base + 50, icao24, runway="11",
+        runway_heading=110.0, wind_from=290, wind_speed=10)
+    conn.commit()
+
+    out = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)
+    ac = next(a for a in out["aircraft"] if a["icao24"] == icao24)
+    metrics = ac["metrics"]
+
+    # window_days floors to 1.0 for this short window, so per-day rates == raw counts.
+    assert metrics["tg_volume"] == 2 / 1.0 - 10        # -8.0: well under the 10/day limit
+    assert metrics["circle_restraint"] == 20 / 1.0     # 20.0 circles/day
+    assert metrics["altitude"] == 100.0                # the one pass (500ft) is < 1000ft target
+    assert metrics["left_traffic"] == 100.0            # only known-direction ops (the 2 T&Gs) were left
+    assert metrics["runway29"] == 0.0                  # the one takeoff used rwy 11, not 29
+    assert metrics["rwy_against"] == 100.0             # that takeoff had a tailwind
