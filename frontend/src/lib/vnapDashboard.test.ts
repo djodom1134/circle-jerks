@@ -82,13 +82,13 @@ describe("toCsv", () => {
            scores: { tightness: 12, altitude: null },
            metrics: {
              altitude: 12.5, timeofday: 8.3, tg_volume: -3, circle_restraint: 2.86,
-             left_traffic: 60, runway29: 70, rwy_against: 40,
+             left_traffic: 60, preferred_runway: 70, rwy_against: 40,
            } }),
     ];
     const csv = toCsv(rows);
     const [header, row] = csv.split("\n");
     expect(header).toBe(
-      "tail,aircraft_type,owner_class,owner_source,vnap_score,reports,operations,touch_and_gos,cowboy_count,deviation_mean_nm,circles,altitude,timeofday,tg_volume,circle_restraint,left_traffic,runway29,rwy_against",
+      "tail,aircraft_type,owner_class,owner_source,vnap_score,reports,operations,touch_and_gos,cowboy_count,deviation_mean_nm,circles,altitude,timeofday,tg_volume,circle_restraint,left_traffic,preferred_runway,rwy_against",
     );
     // comma-containing tail is quoted; metrics values (not scores) render, no tightness column
     expect(row).toBe('"N1, Jr",C172,flight_school,inferred,42.5,3,10,4,1,0.5,8,12.5,8.3,-3,2.86,60,70,40');

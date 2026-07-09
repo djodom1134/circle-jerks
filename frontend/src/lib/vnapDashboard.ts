@@ -59,7 +59,7 @@ function csvEscape(v: unknown): string {
 
 const METRIC_COLUMNS = [
   "altitude", "timeofday", "tg_volume", "circle_restraint",
-  "left_traffic", "runway29", "rwy_against",
+  "left_traffic", "preferred_runway", "rwy_against",
 ];
 
 export function toCsv(rows: VnapAircraft[]): string {

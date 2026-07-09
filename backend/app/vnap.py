@@ -171,12 +171,6 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
 
     rows = conn.execute(rows_sql, rows_params).fetchall()
 
-    data_since = conn.execute(
-        "SELECT MIN(timestamp) AS t FROM operations WHERE icao=?",
-        (icao,),
-    ).fetchone()["t"]
-    effective_start = start_ts if start_ts and start_ts > 0 else (data_since or end_ts)
-    window_days = max(1.0, (end_ts - effective_start) / 86400.0)
 
     # Report counts + cowboy counts + owner overrides, batched (avoid N+1).
     # NOTE: report_counts is a GLOBAL lifetime, cross-airport complaint tally
@@ -256,28 +250,31 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
             "deviation_mean_nm": round(sum(devs) / len(devs), 3) if devs else None,
             "circles": circles,
             "scores": scores,
-            "metrics": _metrics_aircraft(ac_rows, rules, tz, window_days),
+            "metrics": _metrics_aircraft(ac_rows, rules, tz),
         })
 
     averages = _averages(aircraft, rules)
     return {"axes": AXES, "averages": averages, "aircraft": aircraft}
 
 
-def _metrics_aircraft(rows, rules: VnapRuleset, tz: str | None, window_days: float) -> dict:
+def _metrics_aircraft(rows, rules: VnapRuleset, tz: str | None) -> dict:
     """Real-unit per-axis metrics for the CSV export (distinct from the 0-100 scores)."""
     total = len(rows)
+    # Per-day rates use only the days THIS aircraft was actually present (distinct
+    # local calendar days with >=1 op), not the whole window.
+    active_days = max(1, len({_db.local_day_key(r["ts"], tz) for r in rows}))
     # altitude: % of over-home passes below 1000 ft AGL (the only ops carrying real altitude)
     pass_agls = [r["min_agl"] for r in rows if r["type"] == "pass_over_user" and r["min_agl"] is not None]
     altitude = round(100.0 * sum(1 for a in pass_agls if a < rules.agl_target_ft) / len(pass_agls), 1) if pass_agls else None
     # timeofday: % of ops OUTSIDE the 8-8 local window
     in_window = sum(1 for r in rows if rules.quiet_start_hour <= _db.local_hour(r["ts"], tz) < rules.quiet_end_hour)
     timeofday = round(100.0 * (total - in_window) / total, 1) if total else None
-    # tg_volume: touch-and-gos per day minus the 10/day limit (can be negative)
+    # tg_volume: touch-and-gos per active day minus the 10/day limit (can be negative)
     tgs = sum(1 for r in rows if r["type"] == "touch_and_go")
-    tg_volume = round(tgs / window_days - rules.tg_per_session_limit, 2)
-    # circle_restraint: circles per day
+    tg_volume = round(tgs / active_days - rules.tg_per_session_limit, 2)
+    # circle_restraint: circles per active day
     circles = sum(1 for r in rows if r["type"] == "circle")
-    circle_restraint = round(circles / window_days, 2)
+    circle_restraint = round(circles / active_days, 2)
     # left_traffic: % of known-direction (pattern) ops that were left-turning
     known = sum(1 for r in rows if r["turn"] in ("left", "right"))
     left = sum(1 for r in rows if r["turn"] == "left")
@@ -296,7 +293,7 @@ def _metrics_aircraft(rows, rules: VnapRuleset, tz: str | None, window_days: flo
     return {
         "altitude": altitude, "timeofday": timeofday, "tg_volume": tg_volume,
         "circle_restraint": circle_restraint, "left_traffic": left_traffic,
-        "runway29": runway29, "rwy_against": rwy_against,
+        "preferred_runway": runway29, "rwy_against": rwy_against,
     }
 
 

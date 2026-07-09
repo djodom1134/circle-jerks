@@ -166,10 +166,27 @@ def test_metrics_real_units(tmp_path):
     ac = next(a for a in out["aircraft"] if a["icao24"] == icao24)
     metrics = ac["metrics"]
 
-    # window_days floors to 1.0 for this short window, so per-day rates == raw counts.
+    # All ops fall on the same local day -> active_days == 1, so per-day rates == raw counts.
     assert metrics["tg_volume"] == 2 / 1.0 - 10        # -8.0: well under the 10/day limit
     assert metrics["circle_restraint"] == 20 / 1.0     # 20.0 circles/day
     assert metrics["altitude"] == 100.0                # the one pass (500ft) is < 1000ft target
     assert metrics["left_traffic"] == 100.0            # only known-direction ops (the 2 T&Gs) were left
-    assert metrics["runway29"] == 0.0                  # the one takeoff used rwy 11, not 29
+    assert metrics["preferred_runway"] == 0.0          # the one takeoff used rwy 11, not 29
     assert metrics["rwy_against"] == 100.0             # that takeoff had a tailwind
+
+
+def test_metrics_per_day_uses_active_days_only(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    base = 1780000000
+    icao24 = "dd66"
+    # 20 circles spread across 2 distinct local days.
+    for i in range(10):
+        _op(conn, f"a{i}", "circle", base + i, icao24, dev=0.5)
+    for i in range(10):
+        _op(conn, f"b{i}", "circle", base + 86400 + i, icao24, dev=0.5)
+    conn.commit()
+    # Wide 4-day window, but the aircraft is present on only 2 days.
+    out = vnap.compute_aircraft_compliance(conn, "KLMO", base - 86400, base + 3 * 86400)
+    ac = next(a for a in out["aircraft"] if a["icao24"] == icao24)
+    # 20 circles / 2 ACTIVE days = 10.0 (not divided by the 4-day window).
+    assert ac["metrics"]["circle_restraint"] == 10.0
