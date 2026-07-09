@@ -100,6 +100,8 @@ export default function App() {
   const [windowCode, setWindowCode] = useState<WindowCode>(windowFromQuery());
   const [scanData, setScanData] = useState<ScanResponse | null>(null);
   const [selected, setSelected] = useState<Offender | null>(null);
+  const [focusedIcao24, setFocusedIcao24] = useState<string | null>(null);
+  const onSelectAircraft = useCallback((icao24: string | null) => setFocusedIcao24(icao24), []);
   const [formUrl, setFormUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading configuration");
   const [airportQuery, setAirportQuery] = useState(
@@ -660,7 +662,7 @@ export default function App() {
             airport={airport}
             userLocation={userLocation}
             scanData={scanData}
-            selectedIcao24={selected?.icao24}
+            selectedIcao24={focusedIcao24}
             autoZoom={autoZoom}
             showHeatmap={showHeatmap}
             historyTracks={mapOverlay === "history" ? historyData?.tracks ?? null : null}
@@ -669,9 +671,7 @@ export default function App() {
             historyAverage={mapOverlay === "history" && historyMode === "average" ? historyAverage : null}
             historySigmaK={historySigmaK}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
-            onSelectAircraft={(icao24) =>
-              setSelected(icao24 ? scanData?.offenders.find((o) => o.icao24 === icao24) ?? null : null)
-            }
+            onSelectAircraft={onSelectAircraft}
             patterns={patterns}
             editingRunwayId={patternEditing ? editingRunwayId : null}
             editingPoints={editingPoints}
@@ -690,13 +690,18 @@ export default function App() {
               onSaved={reloadPatterns}
             />
           )}
-          {selected && !patternEditing && (
-            <AircraftMapCard
-              offender={selected}
-              offenders={scanData?.offenders ?? []}
-              onClose={() => setSelected(null)}
-            />
-          )}
+          {(() => {
+            const focusedOffender = focusedIcao24
+              ? scanData?.offenders.find((o) => o.icao24 === focusedIcao24) ?? null
+              : null;
+            return focusedOffender && !patternEditing && mapOverlay !== "history" ? (
+              <AircraftMapCard
+                offender={focusedOffender}
+                offenders={scanData?.offenders ?? []}
+                onClose={() => setFocusedIcao24(null)}
+              />
+            ) : null;
+          })()}
         </section>
 
         <section className="side-panel">
@@ -742,7 +747,7 @@ export default function App() {
             offenders={scanData?.offenders ?? []}
             selected={selected}
             reportCounts={preferences.report_counts}
-            onSelect={setSelected}
+            onSelect={(o) => { setSelected(o); setFocusedIcao24(o.icao24); }}
           />
           <Histogram rows={scanData?.histogram ?? []} />
         </section>
