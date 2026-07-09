@@ -439,6 +439,24 @@ h2 {
   min-height: 480px;
 }
 
+.aircraft-map-card {
+  position: absolute; top: 10%; right: 12px; height: 80%;
+  width: min(360px, 33%); max-width: 33%; z-index: 20;
+  display: flex; flex-direction: column; gap: 10px; padding: 14px 16px;
+  border-radius: 12px; border: 1px solid rgba(27, 58, 107, 0.18);
+  background: rgba(255, 255, 255, 0.82); backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  overflow-y: auto; color: var(--text);
+}
+.amc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.amc-head h3 { margin: 0; font-size: 15px; color: var(--ink); }
+.amc-close { border: none; background: transparent; font-size: 20px; line-height: 1; cursor: pointer; color: var(--muted); padding: 0 4px; }
+.amc-rows { display: flex; flex-direction: column; gap: 2px; }
+.amc-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; padding: 3px 0; border-bottom: 1px solid rgba(27,58,107,0.06); }
+.amc-row .amc-label { color: var(--muted); }
+.amc-row .amc-value { font-weight: 700; color: var(--ink); text-align: right; }
+.amc-radar { margin-top: 4px; }
+
 .openlayers-map canvas {
   filter: sepia(0.16) saturate(0.85) brightness(1.02) contrast(0.94);
 }

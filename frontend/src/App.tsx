@@ -6,6 +6,7 @@ import StatsPage from "./components/StatsPage";
 import MapView from "./components/MapView";
 import OnboardingTour, { shouldShowOnboarding } from "./components/OnboardingTour";
 import PatternEditorPanel from "./components/PatternEditorPanel";
+import AircraftMapCard from "./components/AircraftMapCard";
 import WindIndicator from "./components/WindIndicator";
 import BackfillBanner from "./components/BackfillBanner";
 import FlowBadge from "./components/FlowBadge";
@@ -687,6 +688,13 @@ export default function App() {
               onSeedPoints={seedEditingPoints}
               onClose={() => { setPatternEditing(false); setEditingRunwayId(null); setEditingPoints([]); }}
               onSaved={reloadPatterns}
+            />
+          )}
+          {selected && !patternEditing && (
+            <AircraftMapCard
+              offender={selected}
+              offenders={scanData?.offenders ?? []}
+              onClose={() => setSelected(null)}
             />
           )}
         </section>
