@@ -863,6 +863,22 @@ export function getAirportStats(icao: string, window: StatsWindow = "7d") {
   return getJson<AirportStatsResponse>(`/airports/${encodeURIComponent(icao)}/stats?window=${window}`);
 }
 
+export interface OperationsTrendsResponse {
+  airport_icao: string;
+  timezone: string | null;
+  data_since: number | null;
+  recent_days: { date: string; operations: number; pct_tg: number; pct_light: number }[];
+  monthly: {
+    month: string; landings: number; takeoffs: number; tg: number; total: number;
+    pct_tg: number; by_type: Record<string, number>; by_emitter: Record<string, number>;
+  }[];
+  time_of_day: { hour: number; operations: number }[];
+}
+
+export function getOperationsTrends(icao: string) {
+  return getJson<OperationsTrendsResponse>(`/airports/${encodeURIComponent(icao)}/operations-trends`);
+}
+
 export interface HistoricalTrackSample {
   lat: number;
   lon: number;

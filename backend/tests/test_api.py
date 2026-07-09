@@ -209,3 +209,32 @@ def test_pattern_circuits_endpoint(tmp_path, monkeypatch):
         assert client.get("/airports/KTST/pattern-circuits?days=0").status_code == 422
         assert client.get("/airports/KTST/pattern-circuits?days=8").status_code == 422
     get_settings.cache_clear()
+
+
+def test_operations_trends_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    from app import db
+    settings = get_settings()
+    db.init_db(settings.database_path)
+    base = 1780000000
+    with db.db_session(settings.database_path) as conn:
+        # KLMO is already seeded by db.init_db; no airport insert needed.
+        for oid, typ in (("l1", "landing"), ("g1", "touch_and_go")):
+            db.upsert_operation(conn, db.operation_from_event({
+                "id": oid, "type": typ, "icao24": "a1", "callsign": "A1",
+                "timestamp": base, "airport_icao": "KLMO", "emitter_category": "A1",
+            }))
+        conn.commit()
+
+    with TestClient(app) as client:
+        resp = client.get(f"/airports/KLMO/operations-trends?_now={base + 100}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["airport_icao"] == "KLMO"
+        assert body["timezone"] == "America/Denver"
+        assert len(body["time_of_day"]) == 24
+        assert any(m["total"] == 2 for m in body["monthly"])
+    get_settings.cache_clear()

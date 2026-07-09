@@ -1361,6 +1361,18 @@ async def get_airport_stats(
     }
 
 
+@app.get("/airports/{icao}/operations-trends")
+async def get_airport_operations_trends(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    _now: int | None = None,
+):
+    now = _now if _now is not None else int(time.time())
+    with db_session(settings.database_path) as conn:
+        trends = db.airport_operations_trends(conn, icao, now_ts=now, months=12)
+    return {"airport_icao": icao.upper(), **trends}
+
+
 # Radius (nm) of the area we pull historical tracks for — matches the scan ring.
 _TRACK_HISTORY_RING_NM = 8.0
 
