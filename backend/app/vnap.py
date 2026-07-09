@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+
+from . import db as _db
+from .flow import headwind_component
 
 
 AXES = [
@@ -107,3 +111,139 @@ def group_sessions(timestamps_sorted: list[int], gap_min: int) -> list[list[int]
     if current:
         sessions.append(current)
     return sessions
+
+
+_OPERATION_TYPES = ("landing", "takeoff", "touch_and_go")
+
+
+def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
+                                start_ts: int, end_ts: int) -> dict:
+    icao = icao.upper()
+    rules = ruleset_for(icao)
+    tz = _db.airport_timezone(conn, icao)
+
+    rows = conn.execute(
+        "SELECT o.icao24 AS icao24, o.callsign AS callsign, o.registration AS registration, "
+        "       o.timestamp AS ts, o.type AS type, o.deviation_mean_nm AS dev, "
+        "       o.turn_direction AS turn, o.runway_id AS runway, "
+        "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
+        "       o.min_altitude_ft_agl AS min_agl, "
+        "       (SELECT reg.owner_type FROM aircraft_registry reg "
+        "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS owner_type, "
+        "       (SELECT reg.model FROM aircraft_registry reg "
+        "        WHERE reg.icao_hex = upper(o.icao24) LIMIT 1) AS model "
+        "FROM operations o "
+        "WHERE o.icao=? AND o.timestamp BETWEEN ? AND ? "
+        "ORDER BY o.timestamp ASC",
+        (icao, start_ts, end_ts),
+    ).fetchall()
+
+    # Report counts + cowboy counts, batched (avoid N+1).
+    report_counts = {
+        r["icao24"]: r["report_count"]
+        for r in conn.execute("SELECT icao24, report_count FROM aircraft_report_counts").fetchall()
+    }
+    cowboy_counts: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT cowboy_icao24 AS icao24, COUNT(*) AS n FROM runway_changes "
+        "WHERE icao=? AND changed_at BETWEEN ? AND ? AND cowboy_icao24 IS NOT NULL "
+        "GROUP BY cowboy_icao24",
+        (icao, start_ts, end_ts),
+    ).fetchall():
+        cowboy_counts[r["icao24"]] = r["n"]
+
+    by_ac: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_ac.setdefault(row["icao24"], []).append(row)
+
+    aircraft = []
+    for icao24, ac_rows in by_ac.items():
+        scores = _score_aircraft(ac_rows, rules, tz)
+        callsign = next((r["callsign"] for r in reversed(ac_rows) if r["callsign"]), icao24.upper())
+        registration = next((r["registration"] for r in ac_rows if r["registration"]), None)
+        owner_type = next((r["owner_type"] for r in ac_rows if r["owner_type"]), "unknown")
+        model = next((r["model"] for r in ac_rows if r["model"]), None)
+        operations = sum(1 for r in ac_rows if r["type"] in _OPERATION_TYPES)
+        circles = sum(1 for r in ac_rows if r["type"] == "circle")
+        tgs = sum(1 for r in ac_rows if r["type"] == "touch_and_go")
+        devs = [r["dev"] for r in ac_rows if r["type"] == "circle" and r["dev"] is not None]
+        aircraft.append({
+            "icao24": icao24,
+            "callsign": callsign,
+            "registration": registration,
+            "tail": registration or callsign,
+            "aircraft_type": model,
+            "owner_class": owner_type,
+            "owner_source": "inferred",
+            "vnap_score": composite_score(scores, rules),
+            "reports": report_counts.get(icao24, 0),
+            "operations": operations,
+            "touch_and_gos": tgs,
+            "cowboy_count": cowboy_counts.get(icao24, 0),
+            "deviation_mean_nm": round(sum(devs) / len(devs), 3) if devs else None,
+            "circles": circles,
+            "scores": scores,
+        })
+
+    averages = _averages(aircraft, rules)
+    return {"axes": AXES, "averages": averages, "aircraft": aircraft}
+
+
+def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
+    # tightness: mean deviation over circle ops that have it.
+    devs = [r["dev"] for r in rows if r["type"] == "circle" and r["dev"] is not None]
+    avg_dev = sum(devs) / len(devs) if devs else None
+
+    # altitude: median min-AGL over circle ops (their lap-low approximates pattern alt).
+    agls = sorted(r["min_agl"] for r in rows if r["type"] == "circle" and r["min_agl"] is not None)
+    typical_agl = agls[len(agls) // 2] if agls else None
+
+    # timeofday: fraction of ALL ops inside the local quiet window [start, end).
+    total = len(rows)
+    in_window = 0
+    for r in rows:
+        hour = _db.local_hour(r["ts"], tz)
+        if rules.quiet_start_hour <= hour < rules.quiet_end_hour:
+            in_window += 1
+
+    # tg_volume / circle_restraint: per-session counts.
+    tg_ts = sorted(r["ts"] for r in rows if r["type"] == "touch_and_go")
+    circle_ts = sorted(r["ts"] for r in rows if r["type"] == "circle")
+    tg_sessions = [len(s) for s in group_sessions(tg_ts, rules.session_gap_min)]
+    circle_sessions = [len(s) for s in group_sessions(circle_ts, rules.session_gap_min)]
+
+    # left_traffic: fraction left of ops with a known direction.
+    known = sum(1 for r in rows if r["turn"] in ("left", "right"))
+    left = sum(1 for r in rows if r["turn"] == "left")
+
+    # runway29: of ops where the preferred runway was wind-favored, fraction that used it.
+    favored_total = 0
+    on_pref = 0
+    for r in rows:
+        if not r["runway"] or r["wind_from"] is None or r["wind_speed"] is None:
+            continue
+        hw = headwind_component(rules.preferred_runway_heading_deg, r["wind_from"], r["wind_speed"])
+        if hw is not None and hw > 0:
+            favored_total += 1
+            if r["runway"] == rules.preferred_runway_id:
+                on_pref += 1
+
+    return {
+        "tightness": tightness_score(avg_dev, rules),
+        "altitude": altitude_score(float(typical_agl) if typical_agl is not None else None, rules),
+        "timeofday": timeofday_score(in_window, total),
+        "tg_volume": tg_volume_score(tg_sessions, rules),
+        "circle_restraint": circle_restraint_score(circle_sessions, rules),
+        "left_traffic": left_traffic_score(left, known),
+        "runway29": runway_pref_score(on_pref, favored_total),
+    }
+
+
+def _averages(aircraft: list[dict], rules: VnapRuleset) -> dict:
+    out: dict[str, float | None] = {}
+    for axis in AXES:
+        vals = [a["scores"][axis] for a in aircraft if a["scores"][axis] is not None]
+        out[axis] = round(sum(vals) / len(vals), 1) if vals else None
+    comps = [a["vnap_score"] for a in aircraft if a["vnap_score"] is not None]
+    out["composite"] = round(sum(comps) / len(comps), 1) if comps else None
+    return out
