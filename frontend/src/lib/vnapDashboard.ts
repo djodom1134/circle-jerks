@@ -45,6 +45,31 @@ export function sortAircraft(rows: VnapAircraft[], key: string, dir: "asc" | "de
   });
 }
 
+const CSV_COLUMNS = [
+  "tail", "aircraft_type", "owner_class", "owner_source", "vnap_score", "reports",
+  "operations", "touch_and_gos", "cowboy_count", "deviation_mean_nm", "circles",
+];
+
+function csvEscape(v: unknown): string {
+  const s = v === null || v === undefined ? "" : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+export function toCsv(rows: VnapAircraft[], axes: string[]): string {
+  const cols = [...CSV_COLUMNS, ...axes];
+  const header = cols.join(",");
+  const lines = rows.map((r) =>
+    cols
+      .map((c) =>
+        c in r
+          ? csvEscape((r as unknown as Record<string, unknown>)[c])
+          : csvEscape(r.scores[c]),
+      )
+      .join(","),
+  );
+  return [header, ...lines].join("\n");
+}
+
 export function radarData(
   axes: string[],
   selected: VnapAircraft | null,

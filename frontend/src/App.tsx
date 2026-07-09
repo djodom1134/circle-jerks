@@ -1167,7 +1167,7 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
       <div className="section-title">Worst Offenders</div>
       <div className="table">
         <div className="table-row header">
-          <span>Callsign</span><span>Origin</span><span>TG</span><span title="VNAP compliance 0-100 (100 = follows noise-abatement procedures). Rows are ranked by overall offender behavior, not by this column.">VNAP</span>
+          <span>Callsign</span><span>Origin</span><span>TG</span><span title="VNAP infraction score: starts at 0 (clean) and climbs toward 100 as noise-abatement violations pile up. Higher = worse.">VNAP</span>
         </div>
         {offenders.length === 0 && <div className="empty-row">No events in this window yet.</div>}
         {offenders.slice(0, 10).map((row) => (

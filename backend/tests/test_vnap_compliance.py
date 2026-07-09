@@ -47,12 +47,13 @@ def test_compliance_basic_counts_and_scores(tmp_path):
     assert ac["operations"] == 4          # circle excluded from operations count
     assert ac["circles"] == 1
     assert ac["touch_and_gos"] == 1
-    assert ac["scores"]["tightness"] == 100.0      # dev 0.0
-    assert ac["scores"]["altitude"] == 100.0       # pass-over-user min agl 1000
-    # left_traffic: 3 of 4 direction-known ops are left -> 75.0
-    assert ac["scores"]["left_traffic"] == 75.0
-    # runway29: 1 op where 29 favored, 1 used 29 -> 100.0
-    assert ac["scores"]["runway29"] == 100.0
+    # Scores are VIOLATION scores now: 0 = fully compliant, higher = more infractions.
+    assert ac["scores"]["tightness"] == 0.0        # dev 0.0 -> no tightness violation
+    assert ac["scores"]["altitude"] == 0.0         # pass-over-user min agl 1000 -> compliant
+    # left_traffic: 3 of 4 direction-known ops are left -> 25% not-left violation
+    assert ac["scores"]["left_traffic"] == 25.0
+    # runway29: 1 op where 29 favored, 1 used 29 -> no violation
+    assert ac["scores"]["runway29"] == 0.0
     assert ac["vnap_score"] is not None
     assert "composite" in out["averages"]
 
@@ -62,12 +63,12 @@ def test_altitude_axis_sourced_from_passes_not_circles(tmp_path):
     base = 1780000000
     # A circle with no min_altitude (as the real circle detector emits) -> no altitude signal.
     _op(conn, "c1", "circle", base + 10, "cc33", dev=0.2)
-    # A pass over the user at 800 ft AGL -> altitude axis = altitude_score(800) = 80.0.
+    # A pass over the user at 800 ft AGL -> 80% compliant -> 20 altitude violation.
     _op(conn, "p1", "pass_over_user", base + 20, "cc33", min_agl=800)
     conn.commit()
     out = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)
     ac = next(a for a in out["aircraft"] if a["icao24"] == "cc33")
-    assert ac["scores"]["altitude"] == 80.0
+    assert ac["scores"]["altitude"] == 20.0
 
 
 def test_missing_axis_is_none_and_excluded_from_composite(tmp_path):

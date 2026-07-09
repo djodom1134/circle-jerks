@@ -5,7 +5,7 @@ import {
   type TooltipValueType, type TooltipPayloadEntry,
 } from "recharts";
 import { getVnapCompliance, setOwnerClass, type VnapComplianceResponse, type VnapAircraft, type StatsWindow } from "../lib/api";
-import { sortAircraft, radarData, OWNER_LABELS, OWNER_OPTIONS } from "../lib/vnapDashboard";
+import { sortAircraft, radarData, toCsv, OWNER_LABELS, OWNER_OPTIONS } from "../lib/vnapDashboard";
 import { getVisitorId } from "../lib/visitor";
 
 const COLUMNS: { key: string; label: string; numeric: boolean }[] = [
@@ -31,7 +31,7 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
   const [data, setData] = useState<VnapComplianceResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState("vnap_score");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc"); // worst (lowest VNAP) first
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc"); // worst (highest VNAP violations) first
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
@@ -73,6 +73,17 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
     else { setSortKey(key); setSortDir(key === "tail" || key === "owner_class" || key === "aircraft_type" ? "asc" : "desc"); }
   };
 
+  const downloadCsv = () => {
+    if (!data) return;
+    const csv = toCsv(sorted, data.axes);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vnap-${icao}-${win}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const radarTooltipFormatter = (
     value: TooltipValueType | undefined,
     name: string | number | undefined,
@@ -85,10 +96,16 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
 
   return (
     <section className="stats-card vnap-dashboard">
-      <h2>Aircraft VNAP compliance</h2>
+      <div className="vnap-dash-head">
+        <h2>Aircraft VNAP compliance</h2>
+        <button className="vnap-csv-btn" onClick={downloadCsv} disabled={data.aircraft.length === 0}>
+          Download CSV
+        </button>
+      </div>
       <p className="stats-besteffort">
         One row per aircraft over the selected window. Click a row to compare it against the set
-        average on the radar. VNAP score is 0–100 (100 = follows the noise-abatement procedures).
+        average on the radar. VNAP score starts at 0 (clean) and climbs toward 100 as
+        noise-abatement infractions are made — higher = worse.
       </p>
       {data.aircraft.length === 0 ? (
         <p className="stats-empty">No aircraft in this window.</p>
@@ -149,7 +166,7 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
             </RadarChart>
           </ResponsiveContainer>
           <p className="stats-besteffort">
-            Larger web = more compliant (0–100). Axes with no data sit at the center.
+            Larger web = more infractions (0–100). A clean aircraft (and axes with no data) sit at the center.
           </p>
         </div>
       </div>

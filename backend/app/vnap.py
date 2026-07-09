@@ -293,7 +293,7 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
             if r["runway"] == rules.preferred_runway_id:
                 on_pref += 1
 
-    return {
+    compliance = {
         "tightness": tightness_score(avg_dev, rules),
         "altitude": altitude_score(float(typical_agl) if typical_agl is not None else None, rules),
         "timeofday": timeofday_score(in_window, total),
@@ -302,6 +302,11 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
         "left_traffic": left_traffic_score(left, known),
         "runway29": runway_pref_score(on_pref, favored_total),
     }
+    # VNAP is reported as a VIOLATION score: 0 = fully compliant, climbing toward
+    # 100 as noise-abatement infractions accumulate. The scorer helpers above
+    # return per-axis COMPLIANCE (100 = good); invert here so the whole surface
+    # (per-axis scores + composite + averages) reads as "higher = worse".
+    return {axis: (None if v is None else round(100.0 - v, 1)) for axis, v in compliance.items()}
 
 
 def _averages(aircraft: list[dict], rules: VnapRuleset) -> dict:

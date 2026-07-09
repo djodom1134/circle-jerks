@@ -2974,8 +2974,23 @@ input[type="range"] {
 .stats-hero { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 8px; }
 .stats-hero-pct { font-size: 40px; font-weight: 800; color: #b3231f; line-height: 1; }
 .stats-hero-label { font-size: 14px; font-weight: 700; color: var(--muted); }
+/* Break the compliance dashboard out of the 1000px stats-page container so the
+   table + radar get room to breathe; centered on the viewport. */
+.vnap-dashboard {
+  width: min(1680px, calc(100vw - 40px));
+  max-width: none;
+  position: relative;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.vnap-dash-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.vnap-dash-head h2 { margin: 0; }
+.vnap-csv-btn { font-size: 12px; font-weight: 700; padding: 5px 12px; border: 1px solid var(--line);
+  border-radius: 6px; background: #fff; color: var(--ink); cursor: pointer; white-space: nowrap; }
+.vnap-csv-btn:hover { background: var(--panel); }
+.vnap-csv-btn:disabled { opacity: 0.5; cursor: default; }
 .vnap-split { display: grid; grid-template-columns: 1fr; gap: 16px; }
-@media (min-width: 900px) { .vnap-split { grid-template-columns: 1.4fr 1fr; } }
+@media (min-width: 900px) { .vnap-split { grid-template-columns: 1.6fr 1fr; } }
 .vnap-table-wrap { overflow-x: auto; }
 .vnap-th { cursor: pointer; user-select: none; white-space: nowrap; }
 .vnap-row { cursor: pointer; }

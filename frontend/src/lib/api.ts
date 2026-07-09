@@ -54,7 +54,7 @@ export interface Offender {
   owner_source?: string;
   aircraft_type?: string | null;
   is_flight_school?: boolean;
-  /** VNAP compliance score 0-100 (100 = follows noise-abatement procedures), null if unmeasured. */
+  /** VNAP infraction score 0-100 (0 = clean, climbs with noise-abatement violations), null if unmeasured. */
   vnap_score?: number | null;
 }
 
