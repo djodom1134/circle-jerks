@@ -34,7 +34,10 @@ def test_compliance_basic_counts_and_scores(tmp_path):
     _op(conn, "l2", "landing", base + 20, "aa11", turn="left")
     _op(conn, "t1", "takeoff", base + 30, "aa11", turn="left")
     _op(conn, "g1", "touch_and_go", base + 40, "aa11", turn="right")
-    _op(conn, "c1", "circle", base + 50, "aa11", dev=0.0, min_agl=1000)
+    _op(conn, "c1", "circle", base + 50, "aa11", dev=0.0)
+    # Altitude axis is sourced from pass-over-user ops (real circle rows never
+    # carry min_altitude_ft_agl -- see test_altitude_axis_sourced_from_passes_not_circles).
+    _op(conn, "p1", "pass_over_user", base + 55, "aa11", min_agl=1000)
     conn.commit()
 
     out = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)
@@ -45,13 +48,26 @@ def test_compliance_basic_counts_and_scores(tmp_path):
     assert ac["circles"] == 1
     assert ac["touch_and_gos"] == 1
     assert ac["scores"]["tightness"] == 100.0      # dev 0.0
-    assert ac["scores"]["altitude"] == 100.0       # circle min agl 1000
+    assert ac["scores"]["altitude"] == 100.0       # pass-over-user min agl 1000
     # left_traffic: 3 of 4 direction-known ops are left -> 75.0
     assert ac["scores"]["left_traffic"] == 75.0
     # runway29: 1 op where 29 favored, 1 used 29 -> 100.0
     assert ac["scores"]["runway29"] == 100.0
     assert ac["vnap_score"] is not None
     assert "composite" in out["averages"]
+
+
+def test_altitude_axis_sourced_from_passes_not_circles(tmp_path):
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    base = 1780000000
+    # A circle with no min_altitude (as the real circle detector emits) -> no altitude signal.
+    _op(conn, "c1", "circle", base + 10, "cc33", dev=0.2)
+    # A pass over the user at 800 ft AGL -> altitude axis = altitude_score(800) = 80.0.
+    _op(conn, "p1", "pass_over_user", base + 20, "cc33", min_agl=800)
+    conn.commit()
+    out = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)
+    ac = next(a for a in out["aircraft"] if a["icao24"] == "cc33")
+    assert ac["scores"]["altitude"] == 80.0
 
 
 def test_missing_axis_is_none_and_excluded_from_composite(tmp_path):

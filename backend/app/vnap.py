@@ -139,6 +139,9 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
     ).fetchall()
 
     # Report counts + cowboy counts, batched (avoid N+1).
+    # NOTE: report_counts is a GLOBAL lifetime, cross-airport complaint tally
+    # (aircraft_report_counts is not window- or airport-scoped) -- intentional,
+    # matching the app's existing report semantics elsewhere.
     report_counts = {
         r["icao24"]: r["report_count"]
         for r in conn.execute("SELECT icao24, report_count FROM aircraft_report_counts").fetchall()
@@ -194,11 +197,18 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
     devs = [r["dev"] for r in rows if r["type"] == "circle" and r["dev"] is not None]
     avg_dev = sum(devs) / len(devs) if devs else None
 
-    # altitude: median min-AGL over circle ops (their lap-low approximates pattern alt).
-    agls = sorted(r["min_agl"] for r in rows if r["type"] == "circle" and r["min_agl"] is not None)
-    typical_agl = agls[len(agls) // 2] if agls else None
+    # altitude: how low the aircraft flew over homes/town. Only pass-over-user ops
+    # measure altitude over a residence (runway ops carry only touchdown lows; the
+    # circle detector never populates min_altitude_ft_agl). None => axis skipped.
+    pass_agls = sorted(
+        r["min_agl"] for r in rows
+        if r["type"] == "pass_over_user" and r["min_agl"] is not None
+    )
+    typical_agl = pass_agls[len(pass_agls) // 2] if pass_agls else None
 
-    # timeofday: fraction of ALL ops inside the local quiet window [start, end).
+    # timeofday: fraction of ALL traffic (incl. circles) inside the local quiet
+    # window [start, end) -- noise compliance applies to every flight, unlike the
+    # `operations` count field (landing+takeoff+tg only).
     total = len(rows)
     in_window = 0
     for r in rows:
@@ -212,7 +222,9 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
     tg_sessions = [len(s) for s in group_sessions(tg_ts, rules.session_gap_min)]
     circle_sessions = [len(s) for s in group_sessions(circle_ts, rules.session_gap_min)]
 
-    # left_traffic: fraction left of ops with a known direction.
+    # left_traffic: fraction left of ALL traffic (incl. circles) with a known
+    # direction -- circles carry turn_direction, so they count here by design,
+    # distinct from the `operations` count field (landing+takeoff+tg only).
     known = sum(1 for r in rows if r["turn"] in ("left", "right"))
     left = sum(1 for r in rows if r["turn"] == "left")
 
@@ -223,7 +235,8 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
         if not r["runway"] or r["wind_from"] is None or r["wind_speed"] is None:
             continue
         hw = headwind_component(rules.preferred_runway_heading_deg, r["wind_from"], r["wind_speed"])
-        if hw is not None and hw > 0:
+        # Favored gate per spec: headwind component >= 0 (not strictly > 0).
+        if hw is not None and hw >= 0:
             favored_total += 1
             if r["runway"] == rules.preferred_runway_id:
                 on_pref += 1
@@ -240,6 +253,9 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
 
 
 def _averages(aircraft: list[dict], rules: VnapRuleset) -> dict:
+    # NOTE: `composite` below is the mean of PER-AIRCRAFT composites, not the
+    # composite of these per-axis averages -- a Phase-3 radar "average" polygon
+    # built from the per-axis averages will not exactly equal this composite.
     out: dict[str, float | None] = {}
     for axis in AXES:
         vals = [a["scores"][axis] for a in aircraft if a["scores"][axis] is not None]
