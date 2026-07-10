@@ -51,6 +51,11 @@ export default function AircraftMapCard({ offender, offenders, onClose }: Props)
 
   const origin = offender.origin_label ?? offender.origin_city ?? offender.origin_airport_icao;
 
+  // The `tightness` axis is the share of pattern time spent OUTSIDE the VNAP
+  // corridor — a real percentage, so render it as one rather than a bare score.
+  const offPatternPct = offender.vnap_scores?.tightness;
+  const offPattern = offPatternPct == null ? "—" : `${offPatternPct}%`;
+
   const axes = Object.keys(AXIS_LABELS);
   const chart = axes.map((a) => ({
     label: AXIS_LABELS[a],
@@ -76,6 +81,7 @@ export default function AircraftMapCard({ offender, offenders, onClose }: Props)
         <Row label="Passes" value={fmt(offender.passes)} />
         <Row label="Avg altitude over you (ft)" value={fmt(offender.avg_altitude_over_user_ft_agl)} />
         <Row label="Min altitude over you (ft)" value={fmt(offender.min_altitude_over_user_ft_agl)} />
+        <Row label="Time off pattern" value={offPattern} />
         <Row label="Deviation (nm)" value={fmt(offender.deviation_mean_nm)} />
         <Row label="Times reported" value={fmt(offender.report_count)} />
       </div>

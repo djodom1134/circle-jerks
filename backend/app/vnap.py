@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from statistics import median
 
 from . import db as _db
 from .flow import headwind_component
@@ -22,13 +21,12 @@ class VnapRuleset:
     # Altitude: >= target AGL over the (whole) area -> 100; scales to 0 at zero.
     agl_target_ft: float = 1000.0
     agl_zero_ft: float = 0.0
-    # Pattern tightness: typical (median) deviation (nm) at which the score hits 0.
-    dev_floor_nm: float = 1.0
-    # ...and the fewest circles needed before that median means anything. Below
-    # this the axis is skipped (None). Transients that fly one wide loop near
-    # the field get matched to a pattern they never flew; on 7d of KLMO data
-    # they were 35% of scored aircraft, all pinned at the 100 ceiling, with a
-    # median of 3 ops against 27 for real pattern flyers.
+    # Pattern tightness scores the share of pattern time spent outside the VNAP
+    # corridor (see off_pattern_fraction), so it needs no distance calibration.
+    # It does need enough laps to mean anything: below this the axis is skipped.
+    # Transients that fly one wide loop near the field get matched to a pattern
+    # they never flew; on 7d of KLMO data they were 35% of scored aircraft, all
+    # pinned at the ceiling, with a median of 3 ops against 27 for real flyers.
     tightness_min_circles: int = 5
     # Per-session limits.
     tg_per_session_limit: int = 10
@@ -57,29 +55,41 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
-def typical_deviation_nm(devs: list[float], min_circles: int = 1) -> float | None:
-    """Median per-op deviation — the aircraft's *typical* tightness.
+def off_pattern_fraction(rows: list) -> float | None:
+    """Fraction of pattern time spent OUTSIDE the VNAP corridor.
 
-    Per-op deviations are bimodal: a trainer grinding the pattern sits near
-    0.1 nm but throws the occasional multi-nm go-around or wide downwind. An
-    arithmetic mean lets one excursion dominate (11 ops at ~0.14 nm plus a
-    single 3.12 nm op means 0.389), which made genuinely tight flyers score the
-    same as loose ones. The altitude axis already summarises with a median for
-    the same reason.
-
-    Returns None below `min_circles` ops: a median over one or two circles is
-    noise, and those aircraft are overwhelmingly transients rather than pattern
-    flyers. A skipped axis is honest; a fabricated 100 is not.
+    Time-weighted across the aircraft's laps — sum(time_off) / sum(time_total) —
+    not a mean of per-lap percentages, so a long lap spent outside the corridor
+    is not cancelled by a short one inside it. Laps with no timing (deviation
+    never computed, e.g. the airport has no drawn pattern) are ignored.
     """
-    if len(devs) < max(1, min_circles):
+    off = total = 0
+    for row in rows:
+        t = row["time_total_s"]
+        o = row["time_off_pattern_s"]
+        if not t or o is None:
+            continue
+        off += int(o)
+        total += int(t)
+    if total <= 0:
         return None
-    return round(median(devs), 3)
+    return round(off / total, 3)
 
 
-def tightness_score(typical_dev_nm: float | None, rules: VnapRuleset) -> float | None:
-    if typical_dev_nm is None:
+def off_pattern_score(fraction: float | None) -> float | None:
+    """Compliance from the off-pattern fraction. Inverted to a VIOLATION score
+    by the caller, so an aircraft outside the corridor 68% of the time
+    publishes a tightness of 68.
+
+    This replaced a mean-perpendicular-distance score, which read a mild 29 for
+    an aircraft that sat outside the corridor two thirds of every lap: averaging
+    distance lets the on-corridor stretches mask the excursions. Time outside
+    the corridor is already computed per lap, is in real units, and neither
+    saturates nor needs a calibration constant.
+    """
+    if fraction is None:
         return None
-    return round(_clamp(100.0 * (1.0 - typical_dev_nm / rules.dev_floor_nm)), 1)
+    return round(_clamp(100.0 * (1.0 - fraction)), 1)
 
 
 def altitude_score(typical_agl_ft: float | None, rules: VnapRuleset) -> float | None:
@@ -164,6 +174,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         rows_sql = (
             "SELECT o.icao24 AS icao24, o.callsign AS callsign, o.registration AS registration, "
             "       o.timestamp AS ts, o.type AS type, o.deviation_mean_nm AS dev, "
+            "       o.time_off_pattern_s AS time_off_pattern_s, o.time_total_s AS time_total_s, "
             "       o.turn_direction AS turn, o.runway_id AS runway, "
             "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
             "       o.min_altitude_ft_agl AS min_agl, "
@@ -181,6 +192,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         rows_sql = (
             "SELECT o.icao24 AS icao24, o.callsign AS callsign, o.registration AS registration, "
             "       o.timestamp AS ts, o.type AS type, o.deviation_mean_nm AS dev, "
+            "       o.time_off_pattern_s AS time_off_pattern_s, o.time_total_s AS time_total_s, "
             "       o.turn_direction AS turn, o.runway_id AS runway, "
             "       o.wind_from_deg AS wind_from, o.wind_speed_kt AS wind_speed, "
             "       o.min_altitude_ft_agl AS min_agl, "
@@ -324,9 +336,14 @@ def _metrics_aircraft(rows, rules: VnapRuleset, tz: str | None) -> dict:
 
 
 def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
-    # tightness: typical (median) deviation over circle ops that have it.
-    devs = [r["dev"] for r in rows if r["type"] == "circle" and r["dev"] is not None]
-    typical_dev = typical_deviation_nm(devs, rules.tightness_min_circles)
+    # tightness: share of pattern time spent OUTSIDE the VNAP corridor. Scored
+    # from time, not mean distance -- an aircraft can average a modest 0.29nm
+    # off-centreline while actually sitting outside the corridor 68% of the lap.
+    circle_rows = [r for r in rows if r["type"] == "circle"]
+    off_pattern = (
+        off_pattern_fraction(circle_rows)
+        if len(circle_rows) >= rules.tightness_min_circles else None
+    )
 
     # altitude: how low the aircraft flew over homes/town. Only pass-over-user ops
     # measure altitude over a residence (runway ops carry only touchdown lows; the
@@ -373,7 +390,7 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
                 on_pref += 1
 
     compliance = {
-        "tightness": tightness_score(typical_dev, rules),
+        "tightness": off_pattern_score(off_pattern),
         "altitude": altitude_score(float(typical_agl) if typical_agl is not None else None, rules),
         "timeofday": timeofday_score(in_window, total),
         "tg_volume": tg_volume_score(tg_sessions, rules),

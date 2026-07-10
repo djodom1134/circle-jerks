@@ -10,16 +10,6 @@ R = ruleset_for("KLMO")
 def test_axes_order():
     assert vnap.AXES == ["tightness", "altitude", "timeofday", "tg_volume",
                          "circle_restraint", "left_traffic", "runway29"]
-
-
-def test_tightness_score():
-    assert vnap.tightness_score(0.0, R) == 100.0          # dead on pattern
-    assert vnap.tightness_score(R.dev_floor_nm, R) == 0.0  # at the floor -> 0
-    assert vnap.tightness_score(0.5, R) == 50.0            # halfway (floor 1.0)
-    assert vnap.tightness_score(5.0, R) == 0.0             # clamped, not negative
-    assert vnap.tightness_score(None, R) is None
-
-
 def test_altitude_score():
     assert vnap.altitude_score(1000.0, R) == 100.0   # at/above target
     assert vnap.altitude_score(1500.0, R) == 100.0   # clamped
@@ -50,70 +40,83 @@ def test_session_limit_scores():
     assert vnap.tg_volume_score([], R) is None
     # circle limit 4
     assert vnap.circle_restraint_score([8], R) == 50.0
+def test_off_pattern_fraction_is_time_weighted():
+    """The tightness axis scored MEAN perpendicular distance, so N737JR — who
+    sat outside the VNAP corridor 66-73% of every lap, peaking 1.75nm off —
+    scored a mild 29 because his mean distance was only 0.29nm. Score the time
+    spent outside the corridor instead: it is already computed and stored, it
+    is in real units, and it neither saturates nor needs calibration.
 
-
-def test_composite_skips_missing_axes():
-    scores = {"tightness": 100.0, "altitude": None, "timeofday": 50.0}
-    # mean of the two present = 75.0
-    assert vnap.composite_score(scores, R) == 75.0
-    assert vnap.composite_score({"a": None}, R) is None
-
-
-def test_group_sessions():
-    # gap_min=60 -> 3600s. Two clusters separated by > 1h.
-    ts = [0, 60, 120, 5000, 5060]
-    assert vnap.group_sessions(ts, 60) == [[0, 60, 120], [5000, 5060]]
-    assert vnap.group_sessions([], 60) == []
-
-
-def test_tightness_uses_the_typical_op_not_the_mean():
-    """The tightness axis summarised an aircraft's per-op deviations with an
-    arithmetic mean. Those deviations are bimodal — a tight-pattern trainer sits
-    around 0.1 nm but throws the occasional 3 nm go-around — so one excursion
-    tripled the mean and made a tight flyer score the same as a loose one.
-
-    Real KLMO data:
-      N971KC: 11 ops in 0.07-0.20 nm + one 3.12  -> median 0.143, mean 0.389
-      N1218S: 48 ops in 0.07-0.57 nm + 14 wide   -> median 0.351, mean 0.772
-    A 2.5x difference in typical tightness collapsed to 0.389 vs 0.42.
+    Time-weighted, not a mean of per-lap percentages: a long lap outside the
+    corridor must not be cancelled by a short one inside it.
     """
-    tight = [0.07, 0.10, 0.10, 0.12, 0.13, 0.14, 0.14, 0.17, 0.18, 0.19, 0.20, 3.12]
-    loose = [0.30, 0.33, 0.35, 0.35, 0.36, 0.40, 0.42, 2.20, 2.29, 2.56]
+    rows = [
+        {"time_off_pattern_s": 200, "time_total_s": 300},   # 66.7%
+        {"time_off_pattern_s": 220, "time_total_s": 300},   # 73.3%
+    ]
+    frac = vnap.off_pattern_fraction(rows)
+    assert frac == round((200 + 220) / 600, 3)              # 0.7
 
-    tight_dev = vnap.typical_deviation_nm(tight)
-    loose_dev = vnap.typical_deviation_nm(loose)
-
-    # The single 3.12 outlier must not drag the tight flyer up to the loose one.
-    assert tight_dev == 0.14
-    assert loose_dev == 0.38
-
-    tight_score = vnap.tightness_score(tight_dev, R)
-    loose_score = vnap.tightness_score(loose_dev, R)
-    # Separated by a wide, visible margin on a 0-100 axis.
-    assert tight_score - loose_score >= 20, (tight_score, loose_score)
+    # Compliance 30 -> the published VIOLATION score is 70.
+    assert vnap.off_pattern_score(frac) == 30.0
+    assert vnap.off_pattern_score(0.0) == 100.0             # never leaves corridor
+    assert vnap.off_pattern_score(1.0) == 0.0               # never inside it
+    assert vnap.off_pattern_score(None) is None
 
 
-def test_typical_deviation_handles_empty_and_single():
-    assert vnap.typical_deviation_nm([]) is None
-    assert vnap.typical_deviation_nm([0.25]) == 0.25
+def test_off_pattern_fraction_ignores_laps_without_timing():
+    rows = [
+        {"time_off_pattern_s": None, "time_total_s": None},
+        {"time_off_pattern_s": 100, "time_total_s": 400},
+    ]
+    assert vnap.off_pattern_fraction(rows) == 0.25
+    assert vnap.off_pattern_fraction([{"time_off_pattern_s": 5, "time_total_s": 0}]) is None
+    assert vnap.off_pattern_fraction([]) is None
 
 
-def test_tightness_needs_enough_circles_to_have_a_typical_value():
-    """A median over one or two ops is noise, not a "typical" tightness.
+def test_tightness_axis_reports_time_off_pattern(tmp_path):
+    """End to end: the published `tightness` axis must read ~68 for an aircraft
+    outside the corridor ~68% of the time, not ~29 from its mean distance."""
+    from app import db
 
-    On 7 days of real KLMO data, 35% of aircraft saturated the axis at 100.
-    That cohort had a median of 3 circle ops (vs 27 for everyone else) — 14 of
-    them flew exactly one circle. They are transients doing a single wide loop
-    that got matched to a pattern they never flew, not loose pattern flyers.
-    Gating on a minimum op count drops saturation to ~21%; what remains has
-    enough ops to be genuinely, honestly loose.
-    """
-    assert R.tightness_min_circles == 5
+    conn = db.connect(str(tmp_path / "t.sqlite3"))
+    conn.executescript(db.SCHEMA); db.seed_db(conn)
+    base = 1780000000
+    for i in range(6):                      # >= tightness_min_circles
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": f"c{i}", "type": "circle", "icao24": "zz99", "callsign": "N737JR",
+            "timestamp": base + i, "airport_icao": "KLMO",
+        }))
+        conn.execute(
+            "UPDATE operations SET deviation_mean_nm=?, time_off_pattern_s=?, time_total_s=?, "
+            "pct_off_pattern=? WHERE id=?",
+            (0.29, 204, 300, 0.68, f"c{i}"),
+        )
+    conn.commit()
 
-    below = [3.0] * (R.tightness_min_circles - 1)   # one wide transient loop
-    at_limit = [0.2] * R.tightness_min_circles
+    out = vnap.compute_aircraft_compliance(conn, "KLMO", base - 10, base + 100)
+    ac = next(a for a in out["aircraft"] if a["icao24"] == "zz99")
+    assert ac["scores"]["tightness"] == 68.0
 
-    assert vnap.typical_deviation_nm(below, R.tightness_min_circles) is None
-    assert vnap.typical_deviation_nm(at_limit, R.tightness_min_circles) == 0.2
-    # A skipped axis yields None, exactly like altitude with no pass-over rows.
-    assert vnap.tightness_score(vnap.typical_deviation_nm(below, R.tightness_min_circles), R) is None
+
+def test_tightness_axis_needs_enough_laps(tmp_path):
+    """Below tightness_min_circles the axis is skipped, not fabricated. A single
+    wide transient loop must not publish a maximal violation."""
+    from app import db
+
+    conn = db.connect(str(tmp_path / "g.sqlite3"))
+    conn.executescript(db.SCHEMA); db.seed_db(conn)
+    base = 1780000000
+    for i in range(R.tightness_min_circles - 1):        # one short of the gate
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": f"g{i}", "type": "circle", "icao24": "yy88", "callsign": "N1",
+            "timestamp": base + i, "airport_icao": "KLMO",
+        }))
+        conn.execute(
+            "UPDATE operations SET time_off_pattern_s=?, time_total_s=? WHERE id=?",
+            (300, 300, f"g{i}"),                       # 100% off pattern
+        )
+    conn.commit()
+    out = vnap.compute_aircraft_compliance(conn, "KLMO", base - 10, base + 100)
+    ac = next(a for a in out["aircraft"] if a["icao24"] == "yy88")
+    assert ac["scores"]["tightness"] is None

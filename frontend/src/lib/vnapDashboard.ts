@@ -1,7 +1,7 @@
 import type { VnapAircraft } from "./api";
 
 export const AXIS_LABELS: Record<string, string> = {
-  tightness: "Pattern tightness",
+  tightness: "Time off pattern",
   altitude: "Altitude",
   timeofday: "Time of day",
   tg_volume: "T&G volume",

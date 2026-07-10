@@ -12,7 +12,8 @@ def seeded_conn(path):
 
 
 def _op(conn, oid, type_, ts, icao24="a1", dev=None, turn=None, runway=None,
-        wind_from=None, wind_speed=None, min_agl=None, runway_heading=None):
+        wind_from=None, wind_speed=None, min_agl=None, runway_heading=None,
+        off_s=None, total_s=None):
     db.upsert_operation(conn, db.operation_from_event({
         "id": oid, "type": type_, "icao24": icao24, "callsign": icao24.upper(),
         "timestamp": ts, "airport_icao": "KLMO", "runway_id": runway,
@@ -23,6 +24,12 @@ def _op(conn, oid, type_, ts, icao24="a1", dev=None, turn=None, runway=None,
         conn.execute(
             "UPDATE operations SET deviation_mean_nm=?, wind_from_deg=?, wind_speed_kt=? WHERE id=?",
             (dev, wind_from, wind_speed, oid),
+        )
+    if total_s is not None:
+        # The tightness axis scores TIME outside the corridor, not distance.
+        conn.execute(
+            "UPDATE operations SET time_off_pattern_s=?, time_total_s=? WHERE id=?",
+            (off_s or 0, total_s, oid),
         )
 
 
@@ -38,7 +45,7 @@ def test_compliance_basic_counts_and_scores(tmp_path):
     # tightness needs >= rules.tightness_min_circles ops before a median means
     # anything; below that the axis is skipped.
     for i in range(5):
-        _op(conn, f"c{i}", "circle", base + 50 + i, "aa11", dev=0.0)
+        _op(conn, f"c{i}", "circle", base + 50 + i, "aa11", dev=0.0, off_s=0, total_s=300)
     # Altitude axis is sourced from pass-over-user ops (real circle rows never
     # carry min_altitude_ft_agl -- see test_altitude_axis_sourced_from_passes_not_circles).
     _op(conn, "p1", "pass_over_user", base + 55, "aa11", min_agl=1000)
@@ -52,7 +59,7 @@ def test_compliance_basic_counts_and_scores(tmp_path):
     assert ac["circles"] == 5
     assert ac["touch_and_gos"] == 1
     # Scores are VIOLATION scores now: 0 = fully compliant, higher = more infractions.
-    assert ac["scores"]["tightness"] == 0.0        # dev 0.0 -> no tightness violation
+    assert ac["scores"]["tightness"] == 0.0        # never outside the corridor
     assert ac["scores"]["altitude"] == 0.0         # pass-over-user min agl 1000 -> compliant
     # left_traffic: 3 of 4 direction-known ops are left -> 25% not-left violation
     assert ac["scores"]["left_traffic"] == 25.0
@@ -129,13 +136,13 @@ def test_vnap_score_gated_until_pattern_work(tmp_path):
     # (5 circles is enough for the tightness axis itself; the composite needs 10.)
     _op(conn, "p0", "pass_over_user", base + 5, "gate1", min_agl=200)
     for i in range(5):
-        _op(conn, f"c{i}", "circle", base + 10 + i, "gate1", dev=0.9)
+        _op(conn, f"c{i}", "circle", base + 10 + i, "gate1", dev=0.9, off_s=270, total_s=300)
     # work1 has the same violations but is doing real pattern work
     # (10 circles + 1 T&G) -> gate passes -> real, non-zero score.
     _op(conn, "tg", "touch_and_go", base + 5, "work1")
     _op(conn, "p1", "pass_over_user", base + 6, "work1", min_agl=200)
     for i in range(10):
-        _op(conn, f"w{i}", "circle", base + 20 + i, "work1", dev=0.9)
+        _op(conn, f"w{i}", "circle", base + 20 + i, "work1", dev=0.9, off_s=270, total_s=300)
     conn.commit()
 
     out = vnap.compute_aircraft_compliance(conn, "KLMO", base, base + 100)

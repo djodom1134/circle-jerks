@@ -52,7 +52,7 @@ describe("radarData", () => {
     const sel = ac({ scores: { tightness: 80, altitude: null } });
     const out = radarData(axes, sel, { tightness: 60, altitude: 40 });
     expect(out).toEqual([
-      { axis: "tightness", label: "Pattern tightness", selected: 80, average: 60, selectedNull: false, averageNull: false },
+      { axis: "tightness", label: "Time off pattern", selected: 80, average: 60, selectedNull: false, averageNull: false },
       { axis: "altitude", label: "Altitude", selected: 0, average: 40, selectedNull: true, averageNull: false },
     ]);
   });
