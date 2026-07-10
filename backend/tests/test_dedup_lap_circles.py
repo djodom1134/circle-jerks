@@ -89,3 +89,28 @@ def test_scoped_to_icao(tmp_path):
     deleted, _ = dedup_lap_circles(conn, icao24="aa11")
     assert deleted == 1
     assert conn.execute("SELECT COUNT(*) FROM operations WHERE icao24='dd44'").fetchone()[0] == 2
+
+
+def test_merges_same_lap_even_when_peaks_differ(tmp_path):
+    """Redetections of one lap can carry slightly different recomputed peaks;
+    two circles closer than a lap's minimum length are the same lap regardless.
+    A residual the peak key alone would miss."""
+    conn = _conn(tmp_path)
+    _seed(conn, "aa11", 1.748, 1780000000)
+    _seed(conn, "aa11", 1.812, 1780000000 + 40)   # 40s later, different peak
+    _seed(conn, "aa11", 1.905, 1780000000 + 95)   # 95s, different peak
+    # a genuinely separate lap, well past SAFE_REDETECT_S and LAP_WINDOW_S
+    _seed(conn, "aa11", 0.5, 1780000000 + 500)
+    conn.commit()
+    deleted, remaining = dedup_lap_circles(conn)
+    assert deleted == 2 and remaining == 2
+
+
+def test_does_not_merge_realistic_adjacent_laps(tmp_path):
+    """Two real laps ~400s apart (KLMO pattern cadence) must both survive."""
+    conn = _conn(tmp_path)
+    _seed(conn, "aa11", 1.0, 1780000000)
+    _seed(conn, "aa11", 1.1, 1780000000 + 400)
+    conn.commit()
+    deleted, remaining = dedup_lap_circles(conn)
+    assert deleted == 0 and remaining == 2

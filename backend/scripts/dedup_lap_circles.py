@@ -43,10 +43,15 @@ from pathlib import Path
 from app import db
 
 # Two circle rows sharing a deviation peak within this many seconds are the same
-# physical lap. Comfortably longer than a lap's own duration (~5-8 min of which
-# only the redetections near one pass share a peak) yet far shorter than the gap
+# physical lap. Longer than a lap's own duration yet far shorter than the gap
 # before that exact peak could plausibly recur on a new lap.
 LAP_WINDOW_S = 300
+
+# No aircraft flies a full pattern lap in under this long, so two circle rows for
+# the same aircraft closer than this are ALWAYS redetections of one lap — safe to
+# merge for any aircraft even when their recomputed deviation peaks differ (which
+# the peak key alone would miss). Well below the tightest real lap spacing.
+SAFE_REDETECT_S = 150
 
 
 def dedup_lap_circles(
@@ -76,19 +81,31 @@ def dedup_lap_circles(
     rows = conn.execute(
         "SELECT id, icao24, deviation_peak_nm, timestamp FROM operations "
         f"WHERE type='circle' AND deviation_peak_nm IS NOT NULL{scope_sql} "
-        "ORDER BY icao24, deviation_peak_nm, timestamp ASC",
+        "ORDER BY icao24, timestamp ASC",
         scope_params,
     ).fetchall()
 
+    # Walk each aircraft's circles in time order. A row is a redetection of the
+    # last KEPT lap (drop it) when it is either within SAFE_REDETECT_S of it
+    # (too soon to be a separate lap for any aircraft) or shares that lap's
+    # deviation peak within LAP_WINDOW_S. Comparing to the last KEPT row — not
+    # the previous row — stops a lap's own spread of redetections from being
+    # mistaken for the start of the next lap.
     to_delete: list[str] = []
-    anchor_key: tuple[str, float] | None = None
-    anchor_ts: int | None = None
+    cur_icao: str | None = None
+    kept_ts: int | None = None
+    kept_peak: float | None = None
     for oid, ic, peak, ts in rows:
-        key = (ic, round(peak, 3))
-        if key == anchor_key and anchor_ts is not None and ts - anchor_ts < LAP_WINDOW_S:
-            to_delete.append(oid)          # same lap, redetection -> drop
+        if ic != cur_icao:
+            cur_icao, kept_ts, kept_peak = ic, None, None
+        same_lap = kept_ts is not None and (
+            ts - kept_ts < SAFE_REDETECT_S
+            or (round(peak, 3) == round(kept_peak, 3) and ts - kept_ts < LAP_WINDOW_S)
+        )
+        if same_lap:
+            to_delete.append(oid)
         else:
-            anchor_key, anchor_ts = key, ts  # first row of a new lap -> keep
+            kept_ts, kept_peak = ts, peak
 
     if to_delete:
         conn.executemany("DELETE FROM operations WHERE id=?", [(oid,) for oid in to_delete])
