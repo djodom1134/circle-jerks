@@ -46,8 +46,10 @@ def test_departure_is_takeoff():
 def test_touch_and_go_is_not_a_takeoff():
     takeoffs = detect_takeoffs_over_period(_touch_and_go_track(), _ap(), RWY, 900, 1200)
     assert takeoffs == []
+    # The episode path now classifies the low runway contact as a low approach;
+    # touch-and-go is derived from circles over the runway (test_tg_over_runway).
     tgs = detect_touch_and_gos_over_period(_touch_and_go_track(), _ap(), RWY, 900, 1200)
-    assert "touch_and_go" in [e["type"] for e in tgs]
+    assert "low_approach" in [e["type"] for e in tgs]
 
 
 def test_departure_is_not_a_touch_and_go():

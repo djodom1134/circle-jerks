@@ -6,7 +6,7 @@ from statistics import mean
 
 from .db import Airport
 from .domain import ScanParams
-from .geo import Point, bearing_deg, closest_segment_approach_nm, distance_nm, heading_delta_deg
+from .geo import Point, bearing_deg, closest_segment_approach_nm, destination_point, distance_nm, heading_delta_deg
 
 MAX_SEGMENT_GAP_SECONDS = 90
 MIN_CIRCLE_SAMPLES = 6
@@ -36,6 +36,12 @@ MAX_CIRCLE_CLOSURE_NM = 0.5
 # full laps, doubling the circle count.
 TIGHT_CLOSURE_BONUS_NM = 0.5
 MAX_CIRCLE_ALTITUDE_FT_AGL = 2000
+# A closed lap counts as a touch-and-go when its path passes within this far of
+# the runway segment — i.e. it flew over the runway, at any altitude. (Real
+# pattern work tracks the runway to within ~0.01 nm; an off-field orbit stays
+# well beyond 0.3 nm.) Touch-and-go is now a geometric subset of circles, not a
+# <=50 ft touchdown.
+RUNWAY_OVERLAP_NM = 0.25
 
 # --- Runway-contact / landing classification ---
 # Look this far past a touchdown to decide touch-and-go vs. landing. Widened
@@ -228,6 +234,7 @@ def _detect_circles_in_samples(
     params: ScanParams,
     start_ts: int | None = None,
     end_ts: int | None = None,
+    runways: list[dict] | None = None,
 ) -> list[dict]:
     if len(samples) < MIN_CIRCLE_SAMPLES:
         return []
@@ -291,9 +298,11 @@ def _detect_circles_in_samples(
         # one lap across ~3 buckets (2.8x over-count on real KLMO pattern work).
         closest_idx = min(range(len(loop_samples)), key=lambda i: radius_values[i])
         pass_ts = int(loop_samples[closest_idx]["timestamp"])
+        pass_anchor = round(pass_ts / CIRCLE_LAP_ANCHOR_SECONDS)
         return {
-            "id": _event_id("circle", current["icao24"], airport.icao,
-                            round(pass_ts / CIRCLE_LAP_ANCHOR_SECONDS)),
+            "id": _event_id("circle", current["icao24"], airport.icao, pass_anchor),
+            "pass_anchor": pass_anchor,
+            "over_runway": _loop_over_runway(loop_samples, runways) if runways else None,
             "type": "circle",
             "icao24": current["icao24"],
             "callsign": current.get("callsign") or current["icao24"].upper(),
@@ -377,14 +386,73 @@ def _detect_circles_in_samples(
     return events
 
 
-def detect_circles(track: list[dict], airport: Airport, params: ScanParams) -> list[dict]:
+def _runway_segments(runways: list[dict]) -> list[tuple[str, Point, Point, float | None]]:
+    segments = []
+    for r in runways:
+        thr = Point(r["lat_threshold"], r["lon_threshold"])
+        far = destination_point(thr, r["heading_deg"], (r.get("length_ft") or 4000) / 6076.12)
+        segments.append((r["runway_id"], thr, far, r.get("heading_deg")))
+    return segments
+
+
+def _loop_over_runway(loop_samples: list[dict], runways: list[dict]) -> tuple[str, float | None] | None:
+    """The (runway_id, heading) whose segment the loop passes over, or None.
+
+    A loop flies "over the runway" when any of its samples come within
+    RUNWAY_OVERLAP_NM of the runway segment.
+    """
+    if not runways:
+        return None
+    segments = _runway_segments(runways)
+    best: tuple[str, float | None] | None = None
+    best_d = RUNWAY_OVERLAP_NM
+    for sample in loop_samples:
+        point = Point(sample["lat"], sample["lon"])
+        for rid, a, b, hdg in segments:
+            d = closest_segment_approach_nm(a, b, point)[0]
+            if d < best_d:
+                best_d, best = d, (rid, hdg)
+    return best
+
+
+def touch_and_gos_from_circles(circles: list[dict]) -> list[dict]:
+    """A touch-and-go is a circle whose loop passed over the runway. One lap
+    over the runway is therefore both a circle and a touch-and-go; the two share
+    the same per-lap runway-pass anchor so their ids stay stable across scans.
+    """
+    events = []
+    for circle in circles:
+        over = circle.get("over_runway")
+        if not over:
+            continue
+        rid, heading = over
+        events.append({
+            "id": _event_id("touch_and_go", circle["icao24"], circle["airport_icao"],
+                            circle["pass_anchor"]),
+            "type": "touch_and_go",
+            "icao24": circle["icao24"],
+            "callsign": circle["callsign"],
+            "timestamp": circle["timestamp"],
+            "airport_icao": circle["airport_icao"],
+            "runway_id": rid,
+            "runway_heading_deg": int(heading) if heading is not None else None,
+            "runway_used": rid,
+            "min_altitude_ft_agl": (circle.get("alt_band_ft") or [None])[0],
+            "turn_direction": circle.get("turn_direction"),
+            "emitter_category": None,
+        })
+    return events
+
+
+def detect_circles(track: list[dict], airport: Airport, params: ScanParams,
+                   runways: list[dict] | None = None) -> list[dict]:
     # A "circle" is a detected closed pattern lap (>= ~340 deg of cumulative
     # turn, <= 2000 ft AGL, tight closure). The older home<->airport
     # line-crossing counter was removed: a track orbiting the airport crosses
     # the home<->airport chord ~twice per revolution, so it counted ~2x per
     # lap and inflated circle totals.
     recent = samples_in_last(track, 20 * 60)
-    return _detect_circles_in_samples(recent, airport, params)
+    return _detect_circles_in_samples(recent, airport, params, runways=runways)
 
 
 def detect_circles_over_period(
@@ -393,6 +461,7 @@ def detect_circles_over_period(
     params: ScanParams,
     start_ts: int,
     end_ts: int,
+    runways: list[dict] | None = None,
 ) -> list[dict]:
     samples = [
         sample for sample in sorted(track, key=lambda row: row["timestamp"])
@@ -400,7 +469,7 @@ def detect_circles_over_period(
     ]
     # Closed-lap events carry the lap window that deviation needs, so the
     # historical/backfill variant runs the same detector as the live path.
-    return _detect_circles_in_samples(samples, airport, params)
+    return _detect_circles_in_samples(samples, airport, params, runways=runways)
 
 
 def _nearest_runway(sample: dict, runways: list[dict]) -> tuple[dict | None, float]:
@@ -585,8 +654,10 @@ def detect_touch_and_gos_over_period(
             continue
         if not _approached_from_altitude(recent, lt, airport):
             continue  # no prior approach -> a departure (takeoff), handled elsewhere
-        event_type = "touch_and_go" if lowest_agl <= 50 else "low_approach"
-        events.append(_build_runway_event(event_type, ep, airport, runways))
+        # Touch-and-go is now derived geometrically from circles that cross the
+        # runway (touch_and_gos_from_circles). This episode path emits only the
+        # low-approach sub-metric — a low pass over the runway that climbed out.
+        events.append(_build_runway_event("low_approach", ep, airport, runways))
     return events
 
 
@@ -742,7 +813,12 @@ def detect_events(track: list[dict], airport: Airport, runways: list[dict], para
     if not track:
         return []
     events = []
-    events.extend(detect_circles(track, airport, params))
+    circles = detect_circles(track, airport, params, runways)
+    events.extend(circles)
+    # A touch-and-go is a circle whose loop crossed the runway (see
+    # touch_and_gos_from_circles); the episode detector below now emits only
+    # low approaches and landings, never touch-and-gos.
+    events.extend(touch_and_gos_from_circles(circles))
     events.extend(detect_touch_and_gos(track, airport, runways))
     events.extend(detect_passes(track, airport, params))
     return events
@@ -761,7 +837,10 @@ def detect_events_over_period(
         if start_ts - 20 * 60 <= sample["timestamp"] <= end_ts + 120
     ]
     events_by_id = {}
-    for event in detect_circles_over_period(samples, airport, params, start_ts, end_ts):
+    circles = detect_circles_over_period(samples, airport, params, start_ts, end_ts, runways)
+    for event in circles:
+        events_by_id[event["id"]] = event
+    for event in touch_and_gos_from_circles(circles):
         events_by_id[event["id"]] = event
     for event in detect_touch_and_gos_over_period(samples, airport, runways, start_ts, end_ts):
         events_by_id[event["id"]] = event

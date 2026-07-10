@@ -336,12 +336,15 @@ def test_long_ground_presence_yields_single_landing():
     assert len([e for e in events if e["type"] == "landing"]) == 1
 
 
-def test_touch_and_go_still_detected_after_refactor():
+def test_low_runway_pass_detected_after_refactor():
+    # Touch-and-go is now derived from circles that cross the runway
+    # (test_tg_over_runway.py). The episode detector recognises the low runway
+    # contact as a low approach and never as a landing.
     ap = airport_kbjc()
     track = touch_and_go_track(t0=18000)
     events = detect_touch_and_gos_over_period(track, ap, KBJC_RUNWAYS, 18000, 18900)
-    assert any(e["type"] == "touch_and_go" for e in events)
-    assert all(e["type"] != "landing" for e in events)
+    assert any(e["type"] == "low_approach" for e in events)
+    assert all(e["type"] not in ("landing", "touch_and_go") for e in events)
 
 
 def test_taxiing_without_approach_is_not_a_landing():
