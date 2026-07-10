@@ -471,7 +471,7 @@ export default function App() {
           <FeedStatusIcon liveStatus={liveStatus} />
           <div className="live-pill">
             <span aria-hidden="true" />
-            live · {activeNow} circling now
+            live · tracking {activeNow} {activeNow === 1 ? "plane" : "planes"}
           </div>
           <div className="status">{status}</div>
         </div>
@@ -1145,7 +1145,7 @@ function Counters({
         <div><strong>{counters?.circles ?? 0}</strong><span>circles</span></div>
         <div><strong>{counters?.touch_and_gos ?? 0}</strong><span>touch-and-gos</span></div>
         <div><strong>{counters?.passes ?? 0}</strong><span>passes over you</span></div>
-        <div><strong>{counters?.offenders_active_now ?? 0}</strong><span>circling now</span></div>
+        <div><strong>{counters?.offenders_active_now ?? 0}</strong><span>planes tracked</span></div>
         <div><strong>{data?.tracks.length ?? 0}</strong><span>tracked paths {counters?.label ?? ""}</span></div>
       </div>
       <FlowBadge airportIcao={airportIcao} />
@@ -1478,7 +1478,7 @@ function defaultShareText(
     ? `${scanData.airport.city} (${scanData.airport.icao})`
     : scanParams.airport_icao;
   const stats = counters
-    ? `${counters.circles} circles, ${counters.touch_and_gos} touch-and-gos, ${counters.passes} passes over my location, and ${counters.offenders_active_now} circling now`
+    ? `${counters.circles} circles, ${counters.touch_and_gos} touch-and-gos, ${counters.passes} passes over my location, and ${counters.offenders_active_now} planes tracked nearby`
     : "repeated aircraft activity";
   return [
     "Share on social media!",
@@ -1569,7 +1569,7 @@ async function makeShareImage(input: {
     ["Circles", counters?.circles ?? 0],
     ["T&Gs", counters?.touch_and_gos ?? 0],
     ["Passes", counters?.passes ?? 0],
-    ["Circling now", counters?.offenders_active_now ?? 0]
+    ["Tracked now", counters?.offenders_active_now ?? 0]
   ];
   statRows.forEach(([label, value], index) => {
     const x = 66 + index * 237;
