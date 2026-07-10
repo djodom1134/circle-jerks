@@ -432,7 +432,14 @@ async def run_detectors_for_monitor(
         detector_start = detector_end - max_lookback
     hot_icao24s = await store.list_aircraft()
     if _window_extends_into_cold_tier(detector_start - 20 * 60, settings):
-        cold_icao24s = db.list_archive_aircraft(conn, detector_start - 20 * 60, detector_end)
+        # Prefilter the archive by the PADDED bbox — the same box the
+        # authoritative track_intersects_bbox test uses — so the SQL can never
+        # exclude an aircraft that filter would have kept. Without it we pulled
+        # every aircraft archived in the window and every one of their samples.
+        cold_icao24s = db.list_archive_aircraft(
+            conn, detector_start - 20 * 60, detector_end,
+            bbox=padded_bbox(tuple(monitor["bbox"])),
+        )
         icao24s = sorted(set(hot_icao24s) | set(cold_icao24s))
     else:
         icao24s = hot_icao24s
@@ -479,6 +486,15 @@ async def run_detectors_for_monitor(
             wind = {}
         flow.process(conn, airport.icao, runways, new_events, wind, now)
     return DetectorRun(written, detected)
+
+
+def padded_bbox(bbox: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """The bbox track_intersects_bbox actually tests against."""
+    lamin, lomin, lamax, lomax = bbox
+    return (
+        lamin - BBOX_FILTER_PADDING_DEGREES, lomin - BBOX_FILTER_PADDING_DEGREES,
+        lamax + BBOX_FILTER_PADDING_DEGREES, lomax + BBOX_FILTER_PADDING_DEGREES,
+    )
 
 
 def track_intersects_bbox(track: list[dict], bbox: tuple[float, float, float, float]) -> bool:
@@ -811,6 +827,7 @@ async def _compute_scan_response(
     events = events_for_current_scan(
         await events_for_window(
             store, conn, key, airport.icao, window, detector_run.detected,
+            pass_geometry_key=pass_geometry_key(p),
         ),
         p,
     )
@@ -876,10 +893,9 @@ def events_for_current_scan(events: list[dict], params: ScanParams) -> list[dict
 
 # --- Two-tier event reads (Redis hot + SQLite operations) -------------------
 
-# `pass_over_user` is deliberately absent: it is scoped to one visitor's
-# coordinates via pass_geometry_key, which `operations` has no column for.
-# Serving those rows from the cold tier would attribute one visitor's
-# overflights to another. They reach wide windows via `detected` instead.
+# Airport-scoped ops: identical for every visitor, so the cold tier serves them
+# to anyone. `pass_over_user` is read separately, filtered to the caller's own
+# pass_geometry_key, so one visitor never sees a neighbour's overflights.
 COLD_EVENT_TYPES = ["circle", "touch_and_go", "low_approach", "landing", "takeoff"]
 
 
@@ -900,6 +916,7 @@ def event_from_operation(row) -> dict:
         "turn_direction": row["turn_direction"],
         "min_altitude_ft_agl": row["min_altitude_ft_agl"],
         "emitter_category": row["emitter_category"],
+        "pass_geometry_key": row["pass_geometry_key"],
     }
 
 
@@ -910,6 +927,7 @@ async def events_for_window(
     airport_icao: str,
     window: WindowRange,
     detected: Iterable[dict] = (),
+    pass_geometry_key: str | None = None,
 ) -> list[dict]:
     """Every event in `window`, merged across the tiers that can hold one.
 
@@ -933,6 +951,13 @@ async def events_for_window(
     ):
         event = event_from_operation(row)
         by_id[event["id"]] = event
+    if pass_geometry_key:
+        for row in db.read_operations(
+            conn, airport_icao, window.start_ts, window.end_ts,
+            types=["pass_over_user"], pass_geometry_key=pass_geometry_key,
+        ):
+            event = event_from_operation(row)
+            by_id[event["id"]] = event
     for event in await store.get_events(monitor_hash, window.start_ts, window.end_ts):
         by_id[event["id"]] = event
     for event in detected:
@@ -1934,7 +1959,9 @@ async def build_description(
         raise KeyError(f"unknown airport {p.airport_icao}")
     key = monitor_hash(p)
     await register_monitor(store, settings, p, airport)
-    all_events = await events_for_window(store, conn, key, airport.icao, window)
+    all_events = await events_for_window(
+        store, conn, key, airport.icao, window, pass_geometry_key=pass_geometry_key(p),
+    )
     events = [
         event for event in events_for_current_scan(all_events, p)
         if event["icao24"] == icao24.lower()
@@ -2041,7 +2068,9 @@ async def build_summary_description(
     # Read once and group, rather than re-reading both tiers per aircraft.
     events_by_icao24: dict[str, list[dict]] = defaultdict(list)
     for event in events_for_current_scan(
-        await events_for_window(store, conn, key, airport.icao, window), p,
+        await events_for_window(
+            store, conn, key, airport.icao, window, pass_geometry_key=pass_geometry_key(p),
+        ), p,
     ):
         events_by_icao24[event["icao24"]].append(event)
 

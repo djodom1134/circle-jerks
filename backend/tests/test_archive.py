@@ -315,3 +315,56 @@ async def test_prune_once_runs(temp_db_path):
     with db.db_session(temp_db_path) as conn:
         remaining = db.read_track_archive(conn, "A1B2C3", 0, now)
     assert len(remaining) == 1
+
+
+# --- bbox prefilter ----------------------------------------------------------
+
+
+def _archive_sample(conn, icao24, ts, lat, lon):
+    conn.execute(
+        "INSERT OR IGNORE INTO track_archive (icao24, timestamp, lat, lon) VALUES (?,?,?,?)",
+        (icao24, ts, lat, lon),
+    )
+
+
+def test_list_archive_aircraft_bbox_prefilter(temp_db_path):
+    """The detector fetched every archived aircraft in the window (1161 at
+    KLMO over 24h), pulled all their samples, then threw most away with a
+    Python bbox filter. Push the filter into SQL."""
+    conn = db.connect(temp_db_path)
+    _archive_sample(conn, "inside1", 1000, 40.16, -105.10)
+    _archive_sample(conn, "inside2", 1001, 40.20, -105.05)
+    _archive_sample(conn, "faraway", 1002, 41.50, -106.50)
+    conn.commit()
+
+    bbox = (40.10, -105.20, 40.25, -105.00)  # lamin, lomin, lamax, lomax
+
+    assert sorted(db.list_archive_aircraft(conn, 0, 2000)) == ["faraway", "inside1", "inside2"]
+    assert sorted(db.list_archive_aircraft(conn, 0, 2000, bbox=bbox)) == ["inside1", "inside2"]
+
+
+def test_list_archive_aircraft_bbox_keeps_aircraft_with_any_sample_inside(temp_db_path):
+    """An aircraft that merely transits the box must still be returned — the
+    prefilter must never be narrower than the Python filter it feeds."""
+    conn = db.connect(temp_db_path)
+    _archive_sample(conn, "transit", 1000, 41.50, -106.50)   # far away
+    _archive_sample(conn, "transit", 1001, 40.16, -105.10)   # ...then inside
+    conn.commit()
+    bbox = (40.10, -105.20, 40.25, -105.00)
+    assert db.list_archive_aircraft(conn, 0, 2000, bbox=bbox) == ["transit"]
+
+
+def test_padded_bbox_matches_the_python_filter():
+    """The SQL prefilter must use exactly the box track_intersects_bbox tests,
+    or the detector silently loses aircraft near the edge."""
+    from app import services
+
+    bbox = (40.0, -105.0, 41.0, -104.0)
+    lamin, lomin, lamax, lomax = services.padded_bbox(bbox)
+    pad = services.BBOX_FILTER_PADDING_DEGREES
+    assert (lamin, lomin, lamax, lomax) == (40.0 - pad, -105.0 - pad, 41.0 + pad, -104.0 + pad)
+
+    # A sample just inside the padding is kept by both.
+    edge = [{"lat": 40.0 - pad / 2, "lon": -105.0 - pad / 2}]
+    assert services.track_intersects_bbox(edge, bbox)
+    assert lamin <= edge[0]["lat"] <= lamax and lomin <= edge[0]["lon"] <= lomax

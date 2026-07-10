@@ -35,7 +35,10 @@ def test_compliance_basic_counts_and_scores(tmp_path):
     _op(conn, "l2", "landing", base + 20, "aa11", turn="left")
     _op(conn, "t1", "takeoff", base + 30, "aa11", turn="left")
     _op(conn, "g1", "touch_and_go", base + 40, "aa11", turn="right")
-    _op(conn, "c1", "circle", base + 50, "aa11", dev=0.0)
+    # tightness needs >= rules.tightness_min_circles ops before a median means
+    # anything; below that the axis is skipped.
+    for i in range(5):
+        _op(conn, f"c{i}", "circle", base + 50 + i, "aa11", dev=0.0)
     # Altitude axis is sourced from pass-over-user ops (real circle rows never
     # carry min_altitude_ft_agl -- see test_altitude_axis_sourced_from_passes_not_circles).
     _op(conn, "p1", "pass_over_user", base + 55, "aa11", min_agl=1000)
@@ -45,8 +48,8 @@ def test_compliance_basic_counts_and_scores(tmp_path):
 
     assert out["axes"] == vnap.AXES
     ac = next(a for a in out["aircraft"] if a["icao24"] == "aa11")
-    assert ac["operations"] == 4          # circle excluded from operations count
-    assert ac["circles"] == 1
+    assert ac["operations"] == 4          # circles excluded from operations count
+    assert ac["circles"] == 5
     assert ac["touch_and_gos"] == 1
     # Scores are VIOLATION scores now: 0 = fully compliant, higher = more infractions.
     assert ac["scores"]["tightness"] == 0.0        # dev 0.0 -> no tightness violation
@@ -122,9 +125,10 @@ def test_vnap_score_gated_until_pattern_work(tmp_path):
     conn = seeded_conn(tmp_path / "t.sqlite3")
     base = 1780000000
     # gate1 clearly violates (low pass = altitude infraction, off-pattern circles)
-    # but only 3 circles + 0 T&G -> UNDER the gate -> score stays 0.
+    # but only 5 circles + 0 T&G -> UNDER the composite gate -> score stays 0.
+    # (5 circles is enough for the tightness axis itself; the composite needs 10.)
     _op(conn, "p0", "pass_over_user", base + 5, "gate1", min_agl=200)
-    for i in range(3):
+    for i in range(5):
         _op(conn, f"c{i}", "circle", base + 10 + i, "gate1", dev=0.9)
     # work1 has the same violations but is doing real pattern work
     # (10 circles + 1 T&G) -> gate passes -> real, non-zero score.
@@ -138,7 +142,7 @@ def test_vnap_score_gated_until_pattern_work(tmp_path):
     gated = next(a for a in out["aircraft"] if a["icao24"] == "gate1")
     worked = next(a for a in out["aircraft"] if a["icao24"] == "work1")
 
-    assert gated["circles"] == 3 and gated["touch_and_gos"] == 0
+    assert gated["circles"] == 5 and gated["touch_and_gos"] == 0
     assert gated["vnap_score"] == 0.0                 # under the gate -> stays 0
     # but its per-axis breakdown is still computed (not zeroed)
     assert gated["scores"]["tightness"] and gated["scores"]["tightness"] > 0

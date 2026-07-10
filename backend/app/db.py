@@ -264,6 +264,9 @@ CREATE TABLE IF NOT EXISTS operations (
   origin_label TEXT,
   operator TEXT,
   flight_school TEXT,
+  -- Scopes a pass_over_user op to one visitor's coordinates. NULL for every
+  -- other op type, and for pass rows written before this column existed.
+  pass_geometry_key TEXT,
   created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
   FOREIGN KEY (icao) REFERENCES airports(icao)
 );
@@ -434,7 +437,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ("origin_label", "TEXT"),
         ],
         "airports": [("timezone", "TEXT")],
-        "operations": [("emitter_category", "TEXT")],
+        "operations": [("emitter_category", "TEXT"), ("pass_geometry_key", "TEXT")],
         "track_archive": [("emitter_category", "TEXT")],
     }
     for table, cols in additions.items():
@@ -518,6 +521,7 @@ def operation_from_event(event: dict) -> dict:
         "turn_direction": event.get("turn_direction"),
         "min_altitude_ft_agl": event.get("min_altitude_ft_agl"),
         "emitter_category": event.get("emitter_category"),
+        "pass_geometry_key": event.get("pass_geometry_key"),
     }
 
 
@@ -527,17 +531,20 @@ def upsert_operation(conn: sqlite3.Connection, op: dict) -> None:
     The event id is a stable sha256 hash of (type, icao24, airport, time-bucket),
     so DO NOTHING gives cross-restart, cross-monitor idempotency without
     clobbering enrichment columns (deviation/wind/origin) filled by later phases.
+
+    Callers that hand-build an op dict may omit the newer optional columns.
     """
+    op = {"emitter_category": None, "pass_geometry_key": None, **op}
     conn.execute(
         """
         INSERT INTO operations
           (id, icao, icao24, callsign, registration, type, timestamp,
            runway_id, runway_heading_deg, turn_direction, min_altitude_ft_agl,
-           emitter_category)
+           emitter_category, pass_geometry_key)
         VALUES
           (:id, :icao, :icao24, :callsign, :registration, :type, :timestamp,
            :runway_id, :runway_heading_deg, :turn_direction, :min_altitude_ft_agl,
-           :emitter_category)
+           :emitter_category, :pass_geometry_key)
         ON CONFLICT(id) DO NOTHING
         """,
         op,
@@ -550,6 +557,7 @@ def read_operations(
     start_ts: int,
     end_ts: int,
     types: list[str] | None = None,
+    pass_geometry_key: str | None = None,
 ) -> list[sqlite3.Row]:
     query = (
         "SELECT * FROM operations "
@@ -560,6 +568,11 @@ def read_operations(
         placeholders = ",".join("?" for _ in types)
         query += f" AND type IN ({placeholders})"
         args.extend(types)
+    if pass_geometry_key is not None:
+        # `= ?` never matches the NULL rows written before the column existed,
+        # which is exactly what we want: legacy passes stay unattributed.
+        query += " AND pass_geometry_key = ?"
+        args.append(pass_geometry_key)
     query += " ORDER BY timestamp ASC"
     return conn.execute(query, args).fetchall()
 
@@ -2070,17 +2083,24 @@ def list_archive_aircraft(
     conn: sqlite3.Connection,
     start_ts: int,
     end_ts: int,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> list[str]:
-    """Distinct icao24s with archived samples in [start_ts, end_ts]."""
-    rows = conn.execute(
-        """
-        SELECT DISTINCT icao24
-        FROM track_archive
-        WHERE timestamp BETWEEN ? AND ?
-        """,
-        (int(start_ts), int(end_ts)),
-    ).fetchall()
-    return [row["icao24"] for row in rows]
+    """Distinct icao24s with archived samples in [start_ts, end_ts].
+
+    `bbox` (lamin, lomin, lamax, lomax) keeps any aircraft with AT LEAST ONE
+    sample inside it. It is a prefilter for the detector, which then applies the
+    authoritative Python bbox test — so it must never be narrower than that one.
+    Pass the padded box. Without it the detector pulled every aircraft archived
+    in the window (1161 over 24h at KLMO) and discarded most after fetching all
+    their samples.
+    """
+    query = "SELECT DISTINCT icao24 FROM track_archive WHERE timestamp BETWEEN ? AND ?"
+    args: list = [int(start_ts), int(end_ts)]
+    if bbox is not None:
+        lamin, lomin, lamax, lomax = bbox
+        query += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
+        args.extend([lamin, lamax, lomin, lomax])
+    return [row["icao24"] for row in conn.execute(query, args).fetchall()]
 
 
 def track_archive_stats(conn: sqlite3.Connection) -> dict:

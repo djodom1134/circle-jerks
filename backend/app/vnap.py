@@ -24,6 +24,12 @@ class VnapRuleset:
     agl_zero_ft: float = 0.0
     # Pattern tightness: typical (median) deviation (nm) at which the score hits 0.
     dev_floor_nm: float = 1.0
+    # ...and the fewest circles needed before that median means anything. Below
+    # this the axis is skipped (None). Transients that fly one wide loop near
+    # the field get matched to a pattern they never flew; on 7d of KLMO data
+    # they were 35% of scored aircraft, all pinned at the 100 ceiling, with a
+    # median of 3 ops against 27 for real pattern flyers.
+    tightness_min_circles: int = 5
     # Per-session limits.
     tg_per_session_limit: int = 10
     circle_per_session_limit: int = 4
@@ -51,7 +57,7 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
-def typical_deviation_nm(devs: list[float]) -> float | None:
+def typical_deviation_nm(devs: list[float], min_circles: int = 1) -> float | None:
     """Median per-op deviation — the aircraft's *typical* tightness.
 
     Per-op deviations are bimodal: a trainer grinding the pattern sits near
@@ -60,8 +66,12 @@ def typical_deviation_nm(devs: list[float]) -> float | None:
     single 3.12 nm op means 0.389), which made genuinely tight flyers score the
     same as loose ones. The altitude axis already summarises with a median for
     the same reason.
+
+    Returns None below `min_circles` ops: a median over one or two circles is
+    noise, and those aircraft are overwhelmingly transients rather than pattern
+    flyers. A skipped axis is honest; a fabricated 100 is not.
     """
-    if not devs:
+    if len(devs) < max(1, min_circles):
         return None
     return round(median(devs), 3)
 
@@ -316,7 +326,7 @@ def _metrics_aircraft(rows, rules: VnapRuleset, tz: str | None) -> dict:
 def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
     # tightness: typical (median) deviation over circle ops that have it.
     devs = [r["dev"] for r in rows if r["type"] == "circle" and r["dev"] is not None]
-    typical_dev = typical_deviation_nm(devs)
+    typical_dev = typical_deviation_nm(devs, rules.tightness_min_circles)
 
     # altitude: how low the aircraft flew over homes/town. Only pass-over-user ops
     # measure altitude over a residence (runway ops carry only touchdown lows; the

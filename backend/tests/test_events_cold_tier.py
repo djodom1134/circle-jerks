@@ -129,13 +129,15 @@ def test_narrow_windows_survive_a_redis_flush(conn):
     assert [e["id"] for e in events] == ["evt-recent"]
 
 
-def test_events_for_window_excludes_pass_over_user_from_the_cold_tier(conn):
-    """`pass_over_user` is scoped to one user's location via pass_geometry_key,
-    which `operations` has no column for. Serving those rows to a different
-    visitor would attribute someone else's overflights to them."""
+def test_pass_over_user_is_served_from_the_cold_tier_for_its_own_geometry(conn):
+    """`pass_over_user` is scoped to one visitor's coordinates. Persisting
+    pass_geometry_key lets the cold tier serve a visitor their OWN overflight
+    history past the 4h Redis TTL — the whole point of this app — without ever
+    attributing a neighbour's overflights to them."""
     now = int(__import__("time").time())
     db.persist_events(conn, [
-        operation_event("evt-pass", now - 12 * 3600, "pass_over_user"),
+        operation_event("mine", now - 12 * 3600, "pass_over_user", pass_geometry_key="me"),
+        operation_event("theirs", now - 12 * 3600, "pass_over_user", pass_geometry_key="neighbour"),
         operation_event("evt-circle", now - 12 * 3600, "circle"),
     ])
     conn.commit()
@@ -143,12 +145,43 @@ def test_events_for_window_excludes_pass_over_user_from_the_cold_tier(conn):
     store = MemoryStore()
     window = resolve_window("today", "America/Denver")
     events = asyncio.run(
-        services.events_for_window(store, conn, "mon", "KLMO", window)
+        services.events_for_window(store, conn, "mon", "KLMO", window, pass_geometry_key="me")
     )
 
     ids = {e["id"] for e in events}
     assert "evt-circle" in ids
-    assert "evt-pass" not in ids
+    assert "mine" in ids, "a visitor must get their own 24h pass history"
+    assert "theirs" not in ids, "never serve another geometry's overflights"
+
+
+def test_pass_over_user_cold_read_is_skipped_without_a_geometry_key(conn):
+    """No key (or a legacy NULL row) must never leak passes to everyone."""
+    now = int(__import__("time").time())
+    db.persist_events(conn, [
+        operation_event("legacy", now - 12 * 3600, "pass_over_user"),  # NULL key
+    ])
+    conn.commit()
+
+    store = MemoryStore()
+    window = resolve_window("today", "America/Denver")
+    assert asyncio.run(services.events_for_window(store, conn, "mon", "KLMO", window)) == []
+    # ...and a real key must not match the legacy NULL row either.
+    events = asyncio.run(
+        services.events_for_window(store, conn, "mon", "KLMO", window, pass_geometry_key="me")
+    )
+    assert events == []
+
+
+def test_read_operations_filters_by_pass_geometry_key(conn):
+    now = 1_700_000_000
+    db.persist_events(conn, [
+        operation_event("mine", now - 60, "pass_over_user", pass_geometry_key="me"),
+        operation_event("theirs", now - 60, "pass_over_user", pass_geometry_key="you"),
+    ])
+    conn.commit()
+    rows = db.read_operations(conn, "KLMO", now - 3600, now,
+                              types=["pass_over_user"], pass_geometry_key="me")
+    assert [r["id"] for r in rows] == ["mine"]
 
 
 def test_complaint_builders_read_events_through_the_two_tier_helper():

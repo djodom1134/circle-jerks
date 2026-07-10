@@ -96,3 +96,24 @@ def test_tightness_uses_the_typical_op_not_the_mean():
 def test_typical_deviation_handles_empty_and_single():
     assert vnap.typical_deviation_nm([]) is None
     assert vnap.typical_deviation_nm([0.25]) == 0.25
+
+
+def test_tightness_needs_enough_circles_to_have_a_typical_value():
+    """A median over one or two ops is noise, not a "typical" tightness.
+
+    On 7 days of real KLMO data, 35% of aircraft saturated the axis at 100.
+    That cohort had a median of 3 circle ops (vs 27 for everyone else) — 14 of
+    them flew exactly one circle. They are transients doing a single wide loop
+    that got matched to a pattern they never flew, not loose pattern flyers.
+    Gating on a minimum op count drops saturation to ~21%; what remains has
+    enough ops to be genuinely, honestly loose.
+    """
+    assert R.tightness_min_circles == 5
+
+    below = [3.0] * (R.tightness_min_circles - 1)   # one wide transient loop
+    at_limit = [0.2] * R.tightness_min_circles
+
+    assert vnap.typical_deviation_nm(below, R.tightness_min_circles) is None
+    assert vnap.typical_deviation_nm(at_limit, R.tightness_min_circles) == 0.2
+    # A skipped axis yields None, exactly like altitude with no pass-over rows.
+    assert vnap.tightness_score(vnap.typical_deviation_nm(below, R.tightness_min_circles), R) is None

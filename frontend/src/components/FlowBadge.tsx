@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import { getAirportFlow, type AirportFlowResponse } from "../lib/api";
-
-function minutesAgo(ts: number): string {
-  const mins = Math.max(0, Math.round((Date.now() / 1000 - ts) / 60));
-  return mins < 1 ? "just now" : `${mins}m ago`;
-}
+import { elapsedLabel } from "../lib/elapsed";
 
 export default function FlowBadge({ airportIcao }: { airportIcao?: string | null }) {
   const [flow, setFlow] = useState<AirportFlowResponse | null>(null);
@@ -31,7 +27,7 @@ export default function FlowBadge({ airportIcao }: { airportIcao?: string | null
       <span className="flow-badge-rwy">RWY {flow.active.active_runway_id}</span>
       {change && (
         <span className="flow-badge-change">
-          changed {minutesAgo(change.changed_at)} by{" "}
+          changed {elapsedLabel(change.changed_at)} by{" "}
           {change.cowboy_callsign ?? change.cowboy_icao24 ?? "unknown"}
           {isCowboy ? " 🤠" : ""}
         </span>
