@@ -16,6 +16,7 @@ export default function StatsPage() {
   const [win, setWin] = useState<StatsWindow>("7d");
   const [data, setData] = useState<AirportStatsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<"aircraft" | "operations">("aircraft");
 
   useEffect(() => {
     setData(null);
@@ -51,10 +52,24 @@ export default function StatsPage() {
             <Tile label="Aircraft" value={data.counters.unique_aircraft} />
             <Tile label="Runway changes" value={data.counters.runway_changes} />
           </section>
-          <OperationsTrends icao={icao} />
-          <AircraftDashboard icao={icao} win={win} />
 
-          <section className="stats-card">
+          <div className="stats-tabs">
+            <button className={`stats-tab${tab === "aircraft" ? " active" : ""}`} onClick={() => setTab("aircraft")}>Aircraft</button>
+            <button className={`stats-tab${tab === "operations" ? " active" : ""}`} onClick={() => setTab("operations")}>Operations</button>
+          </div>
+
+          {tab === "aircraft" && (
+            <div className="stats-tab-panel aircraft-panel">
+              <AircraftDashboard icao={icao} win={win} />
+            </div>
+          )}
+
+          {tab === "operations" && (
+          <div className="stats-tab-panel ops-panel">
+          <OperationsTrends icao={icao} />
+          <div className="ops-grid">
+
+          <section className="stats-card ops-grid-wide">
             <h2>Do they actually stop?</h2>
             {data.stop_classification.all.total === 0 ? (
               <p className="stats-empty">No aircraft in this window.</p>
@@ -102,7 +117,7 @@ export default function StatsPage() {
             )}
           </section>
 
-          <section className="stats-card">
+          <section className="stats-card ops-grid-wide">
             <h2>Operations over time</h2>
             {data.ops_over_time.length === 0 ? <p className="stats-empty">No operations in this window.</p> : (
               <ResponsiveContainer width="100%" height={220}>
@@ -204,6 +219,10 @@ export default function StatsPage() {
               </table>
             )}
           </section>
+
+          </div>
+          </div>
+          )}
         </>
       )}
     </div>

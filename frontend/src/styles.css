@@ -2992,14 +2992,29 @@ input[type="range"] {
 .stats-hero { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 8px; }
 .stats-hero-pct { font-size: 40px; font-weight: 800; color: #b3231f; line-height: 1; }
 .stats-hero-label { font-size: 14px; font-weight: 700; color: var(--muted); }
-/* Break the compliance dashboard out of the 1000px stats-page container so the
-   table + radar get room to breathe; centered on the viewport. */
-.vnap-dashboard {
-  width: min(1680px, calc(100vw - 40px));
-  max-width: none;
+
+.stats-tabs { display: flex; gap: 8px; margin: 4px 0 16px; border-bottom: 1px solid var(--line); }
+.stats-tab { padding: 8px 18px; border: none; background: transparent; font-weight: 700; font-size: 14px;
+  color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.stats-tab.active { color: var(--ink); border-bottom-color: var(--ink); }
+
+/* Both tab panels break out of the 1000px .stats-page container to fill the screen. */
+.stats-tab-panel {
+  width: min(2400px, calc(100vw - 32px));
   position: relative;
   left: 50%;
   transform: translateX(-50%);
+}
+
+.ops-grid { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 16px; }
+@media (min-width: 1100px) { .ops-grid { grid-template-columns: 1fr 1fr; } }
+.ops-grid > .stats-card { margin-bottom: 0; }
+.ops-grid > .ops-grid-wide { grid-column: 1 / -1; }
+
+/* The compliance dashboard now lives inside a .stats-tab-panel which already
+   breaks out full-width, so it just fills its panel — no second breakout. */
+.vnap-dashboard {
+  width: 100%;
 }
 .vnap-dash-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .vnap-dash-head h2 { margin: 0; }
