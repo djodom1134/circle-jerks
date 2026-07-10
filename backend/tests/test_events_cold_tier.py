@@ -184,3 +184,37 @@ def test_events_for_window_includes_events_detected_this_scan(conn):
     assert "evt-pass" in ids
     assert events[0]["pass_geometry_key"] == "k1"
     assert "evt-stale" not in ids, "detected events outside the window must be dropped"
+
+
+# --- scan cost controls -----------------------------------------------------
+
+
+def test_wide_windows_get_a_longer_response_cache():
+    """A 24h scan is seconds of detector CPU and barely changes minute to
+    minute; recomputing it on the 15s cadence of a live 5m window burned the
+    box for nothing."""
+    from app.settings import Settings
+
+    s = Settings(database_path=":memory:")
+    assert services.scan_cache_seconds(s, "5m") == s.scan_response_cache_seconds
+    assert services.scan_cache_seconds(s, "30m") == s.scan_response_cache_seconds
+    # 1h and wider are "wide": the threshold is inclusive.
+    assert services.scan_cache_seconds(s, "1h") == s.wide_window_scan_cache_seconds
+    assert services.scan_cache_seconds(s, "6h") == s.wide_window_scan_cache_seconds
+    assert services.scan_cache_seconds(s, "today") == s.wide_window_scan_cache_seconds
+
+
+def test_detection_runs_off_the_event_loop():
+    """A 24h window is ~11s of pure-CPU detection. Running it on the event loop
+    starved the Redis client's socket reads, timing them out and 500-ing
+    unrelated requests mid-detection."""
+    import inspect
+
+    src = inspect.getsource(services.run_detectors_for_monitor)
+    assert "asyncio.to_thread" in src, "detector CPU must not run on the event loop"
+    assert "_detect_over_tracks" in src
+
+    # The offloaded function must stay pure: no awaits, no store/db handles.
+    pure = inspect.getsource(services._detect_over_tracks)
+    assert "await " not in pure
+    assert "store." not in pure and "db." not in pure

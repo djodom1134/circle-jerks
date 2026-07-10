@@ -101,6 +101,9 @@ interface Props {
   airport?: Airport | null;
   userLocation: { lat: number; lon: number } | null;
   scanData?: ScanResponse | null;
+  /** A wide window is still being rebuilt; the map is showing stale data. */
+  windowLoading?: boolean;
+  windowLoadingLabel?: string;
   selectedIcao24?: string | null;
   autoZoom?: boolean;
   showHeatmap?: boolean;
@@ -620,7 +623,7 @@ function styleForHistoryFeature(feature: Feature, lineAlpha: number) {
   return styleForFeature(feature);
 }
 
-export default function MapView({ airport, userLocation, scanData, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, onSelectAircraft, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2, historyAverage = null, historySigmaK = 1 }: Props) {
+export default function MapView({ airport, userLocation, scanData, windowLoading = false, windowLoadingLabel, selectedIcao24, autoZoom = true, showHeatmap = false, onPickLocation, onSelectAircraft, patterns, editingRunwayId, editingPoints, editingClosed, editSeedKey, onEditingPointsChange, historyTracks = null, historyMode = null, historyLineAlpha = 0.2, historyAverage = null, historySigmaK = 1 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const sourceRef = useRef<VectorSource | null>(null);
@@ -1590,11 +1593,17 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
     };
   }, [mapReady, scanData]);
 
-  // Overlay only blocks the map until the first scan response. After that —
-  // even if `tracks` is empty — the scan has succeeded and the map should be
-  // usable. (Short windows like 5m legitimately come back empty; gating on
-  // backfill progress would otherwise leave the overlay up indefinitely.)
-  const showLoadingOverlay = !scanData;
+  // Overlay blocks the map until the first scan response, and again whenever a
+  // wide window is being rebuilt — those replay a day of archived tracks
+  // through the detectors and take seconds, during which the map would
+  // otherwise silently show the previous window's data. After that — even if
+  // `tracks` is empty — the scan has succeeded and the map should be usable.
+  // (Short windows like 5m legitimately come back empty; gating on backfill
+  // progress would otherwise leave the overlay up indefinitely.)
+  const showLoadingOverlay = !scanData || windowLoading;
+  const loadingText = windowLoading && windowLoadingLabel
+    ? `Building the ${windowLoadingLabel} view — replaying archived tracks…`
+    : "Loading a bunch of data, hold tight…";
 
   return (
     <div className="map-stage">
@@ -1605,7 +1614,7 @@ export default function MapView({ airport, userLocation, scanData, selectedIcao2
         <div className="map-loading-overlay" role="status" aria-live="polite">
           <div className="map-loading-card">
             <div className="map-loading-spinner" aria-hidden="true" />
-            <div className="map-loading-text">Loading a bunch of data, hold tight…</div>
+            <div className="map-loading-text">{loadingText}</div>
           </div>
         </div>
       )}

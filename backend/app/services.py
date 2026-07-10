@@ -33,7 +33,7 @@ from .scoring import event_histogram, offender_rows, quiet_hour
 from .settings import Settings
 from .store import Store
 from .tone import ToneSliders
-from .windows import WindowRange, resolve_window
+from .windows import WINDOW_SECONDS, WindowRange, resolve_window, validate_window
 
 ORIGIN_GROUND_AIRPORT_MAX_NM = 3.0
 ORIGIN_TRACK_START_AIRPORT_MAX_NM = 8.0
@@ -305,6 +305,54 @@ async def params_with_user_elevation(store: Store, settings: Settings, params: S
     return p.model_copy(update={"user_elevation_ft": elevation_ft})
 
 
+def _detect_over_tracks(
+    icao24s: list[str],
+    tracks: list[list[dict]],
+    airport: Airport,
+    runways: list[dict],
+    params: ScanParams,
+    bbox: tuple[float, float, float, float],
+    start_ts: int | None,
+    end_ts: int | None,
+    detector_start: int,
+    detector_end: int,
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """Pure CPU: run the detectors over already-fetched tracks.
+
+    Kept free of `await` and of any Store/DB handle so it can run in a worker
+    thread — see the caller for why that matters.
+    """
+    tracks_by_icao24: dict[str, list[dict]] = {}
+    events_by_icao24: dict[str, list[dict]] = {}
+    for icao24, track in zip(icao24s, tracks):
+        if not track_intersects_bbox(track, bbox):
+            continue
+        tracks_by_icao24[icao24] = track
+        events = (
+            detect_events_over_period(track, airport, runways, params, start_ts, end_ts)
+            if start_ts is not None and end_ts is not None
+            else detect_events(track, airport, runways, params)
+        )
+        if start_ts is None or end_ts is None:
+            # The live detect_events() path can't emit landings — they need a
+            # 5-min settle window. Run a windowed landing pass over the same
+            # already-fetched tracks so the continuous worker detects landings
+            # too; otherwise touch-and-gos accrue continuously but landings only
+            # on the /scan polling path, biasing "% did not stop" high. Takeoffs
+            # share the same rationale — they're only detected on the /scan
+            # over-period path, so backfill them here too or the operations
+            # trends chart under-counts takeoffs. The detectors' stable
+            # per-episode ids keep this idempotent across the worker's
+            # repeated cycles.
+            events = (
+                list(events)
+                + detect_landings_over_period(track, airport, runways, detector_start, detector_end)
+                + detect_takeoffs_over_period(track, airport, runways, detector_start, detector_end)
+            )
+        events_by_icao24[icao24] = list(events)
+    return tracks_by_icao24, events_by_icao24
+
+
 class DetectorRun(NamedTuple):
     """`written` counts events new to Redis this pass (what the worker logs).
     `detected` is every event the detectors derived over the window — including
@@ -366,34 +414,18 @@ async def run_detectors_for_monitor(
     # the whole events set on every call, which was O(events²) per scan.
     existing_ids = await store.existing_event_ids(monitor["hash"])
     new_events: list[dict] = []
-    detected: list[dict] = []
-    tracks_by_icao24: dict[str, list[dict]] = {}
-    for icao24, track in zip(icao24s, tracks):
-        if not track_intersects_bbox(track, tuple(monitor["bbox"])):
-            continue
-        tracks_by_icao24[icao24] = track
-        events = (
-            detect_events_over_period(track, airport, runways, params, start_ts, end_ts)
-            if start_ts is not None and end_ts is not None
-            else detect_events(track, airport, runways, params)
-        )
-        if start_ts is None or end_ts is None:
-            # The live detect_events() path can't emit landings — they need a
-            # 5-min settle window. Run a windowed landing pass over the same
-            # already-fetched tracks so the continuous worker detects landings
-            # too; otherwise touch-and-gos accrue continuously but landings only
-            # on the /scan polling path, biasing "% did not stop" high. Takeoffs
-            # share the same rationale — they're only detected on the /scan
-            # over-period path, so backfill them here too or the operations
-            # trends chart under-counts takeoffs. The detectors' stable
-            # per-episode ids keep this idempotent across the worker's
-            # repeated cycles.
-            events = (
-                list(events)
-                + detect_landings_over_period(track, airport, runways, detector_start, detector_end)
-                + detect_takeoffs_over_period(track, airport, runways, detector_start, detector_end)
-            )
-        detected.extend(events)
+
+    # Detection is pure CPU over every sample of every track. A 24h window is
+    # ~11s of it — long enough that running it on the event loop starved the
+    # Redis client's socket reads, timing them out and 500-ing unrelated
+    # requests (heartbeat, /scan) mid-detection. Offload to a thread.
+    tracks_by_icao24, events_by_icao24 = await asyncio.to_thread(
+        _detect_over_tracks,
+        icao24s, tracks, airport, runways, params, tuple(monitor["bbox"]),
+        start_ts, end_ts, detector_start, detector_end,
+    )
+    detected: list[dict] = [event for events in events_by_icao24.values() for event in events]
+    for events in events_by_icao24.values():
         for event in events:
             if event["id"] not in existing_ids:
                 await store.add_event(monitor["hash"], event, settings.event_ttl_seconds)
@@ -641,6 +673,15 @@ async def backfill_historical_states(
     return result
 
 
+def scan_cache_seconds(settings: Settings, window_code: str | None) -> int:
+    """Wide windows are expensive to compute and slow to change — cache them
+    longer than the live 5m window's 15s refresh cadence."""
+    seconds = WINDOW_SECONDS.get(validate_window(window_code), 0)
+    if seconds >= settings.wide_window_threshold_seconds:
+        return settings.wide_window_scan_cache_seconds
+    return settings.scan_response_cache_seconds
+
+
 def _scan_cache_key(settings: Settings, params: ScanParams) -> str:
     bucket = max(settings.scan_response_cache_bucket_deg, 0.0001)
     lat_b = round(params.user_lat / bucket) * bucket
@@ -686,7 +727,7 @@ async def build_scan_response(
             try:
                 with db.db_session(settings.database_path) as own_conn:
                     resp = await _compute_scan_response(store, settings, own_conn, params)
-                await store.set_cache(cache_key, resp, settings.scan_response_cache_seconds)
+                await store.set_cache(cache_key, resp, scan_cache_seconds(settings, params.window))
                 return resp
             finally:
                 _scan_inflight.pop(cache_key, None)

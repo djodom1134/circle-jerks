@@ -64,3 +64,35 @@ def test_group_sessions():
     ts = [0, 60, 120, 5000, 5060]
     assert vnap.group_sessions(ts, 60) == [[0, 60, 120], [5000, 5060]]
     assert vnap.group_sessions([], 60) == []
+
+
+def test_tightness_uses_the_typical_op_not_the_mean():
+    """The tightness axis summarised an aircraft's per-op deviations with an
+    arithmetic mean. Those deviations are bimodal — a tight-pattern trainer sits
+    around 0.1 nm but throws the occasional 3 nm go-around — so one excursion
+    tripled the mean and made a tight flyer score the same as a loose one.
+
+    Real KLMO data:
+      N971KC: 11 ops in 0.07-0.20 nm + one 3.12  -> median 0.143, mean 0.389
+      N1218S: 48 ops in 0.07-0.57 nm + 14 wide   -> median 0.351, mean 0.772
+    A 2.5x difference in typical tightness collapsed to 0.389 vs 0.42.
+    """
+    tight = [0.07, 0.10, 0.10, 0.12, 0.13, 0.14, 0.14, 0.17, 0.18, 0.19, 0.20, 3.12]
+    loose = [0.30, 0.33, 0.35, 0.35, 0.36, 0.40, 0.42, 2.20, 2.29, 2.56]
+
+    tight_dev = vnap.typical_deviation_nm(tight)
+    loose_dev = vnap.typical_deviation_nm(loose)
+
+    # The single 3.12 outlier must not drag the tight flyer up to the loose one.
+    assert tight_dev == 0.14
+    assert loose_dev == 0.38
+
+    tight_score = vnap.tightness_score(tight_dev, R)
+    loose_score = vnap.tightness_score(loose_dev, R)
+    # Separated by a wide, visible margin on a 0-100 axis.
+    assert tight_score - loose_score >= 20, (tight_score, loose_score)
+
+
+def test_typical_deviation_handles_empty_and_single():
+    assert vnap.typical_deviation_nm([]) is None
+    assert vnap.typical_deviation_nm([0.25]) == 0.25

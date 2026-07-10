@@ -51,6 +51,7 @@ import {
   type TrackHistoryResponse,
   type WindowCode
 } from "./lib/api";
+import { isWindowLoading } from "./lib/windows";
 import { averagePatternLoops, type LoopResult } from "./lib/patternLoops";
 import { formatLocalTime, numberOrDash, titleize } from "./lib/format";
 import {
@@ -83,6 +84,7 @@ const WINDOWS: Array<{ code: WindowCode; label: string }> = [
 function windowLabel(code: string): string {
   return WINDOWS.find((item) => item.code === code)?.label ?? code;
 }
+
 
 function windowFromQuery(): WindowCode {
   const value = new URLSearchParams(window.location.search).get("window");
@@ -670,6 +672,8 @@ export default function App() {
             airport={airport}
             userLocation={userLocation}
             scanData={scanData}
+            windowLoading={isWindowLoading(windowCode, scanData?.window.code)}
+            windowLoadingLabel={windowLabel(windowCode).toLowerCase()}
             selectedIcao24={focusedIcao24}
             autoZoom={autoZoom}
             showHeatmap={showHeatmap}

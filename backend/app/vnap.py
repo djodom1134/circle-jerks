@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from statistics import median
 
 from . import db as _db
 from .flow import headwind_component
@@ -21,7 +22,7 @@ class VnapRuleset:
     # Altitude: >= target AGL over the (whole) area -> 100; scales to 0 at zero.
     agl_target_ft: float = 1000.0
     agl_zero_ft: float = 0.0
-    # Pattern tightness: mean deviation (nm) at which the score hits 0.
+    # Pattern tightness: typical (median) deviation (nm) at which the score hits 0.
     dev_floor_nm: float = 1.0
     # Per-session limits.
     tg_per_session_limit: int = 10
@@ -50,10 +51,25 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
-def tightness_score(avg_dev_nm: float | None, rules: VnapRuleset) -> float | None:
-    if avg_dev_nm is None:
+def typical_deviation_nm(devs: list[float]) -> float | None:
+    """Median per-op deviation — the aircraft's *typical* tightness.
+
+    Per-op deviations are bimodal: a trainer grinding the pattern sits near
+    0.1 nm but throws the occasional multi-nm go-around or wide downwind. An
+    arithmetic mean lets one excursion dominate (11 ops at ~0.14 nm plus a
+    single 3.12 nm op means 0.389), which made genuinely tight flyers score the
+    same as loose ones. The altitude axis already summarises with a median for
+    the same reason.
+    """
+    if not devs:
         return None
-    return round(_clamp(100.0 * (1.0 - avg_dev_nm / rules.dev_floor_nm)), 1)
+    return round(median(devs), 3)
+
+
+def tightness_score(typical_dev_nm: float | None, rules: VnapRuleset) -> float | None:
+    if typical_dev_nm is None:
+        return None
+    return round(_clamp(100.0 * (1.0 - typical_dev_nm / rules.dev_floor_nm)), 1)
 
 
 def altitude_score(typical_agl_ft: float | None, rules: VnapRuleset) -> float | None:
@@ -298,9 +314,9 @@ def _metrics_aircraft(rows, rules: VnapRuleset, tz: str | None) -> dict:
 
 
 def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
-    # tightness: mean deviation over circle ops that have it.
+    # tightness: typical (median) deviation over circle ops that have it.
     devs = [r["dev"] for r in rows if r["type"] == "circle" and r["dev"] is not None]
-    avg_dev = sum(devs) / len(devs) if devs else None
+    typical_dev = typical_deviation_nm(devs)
 
     # altitude: how low the aircraft flew over homes/town. Only pass-over-user ops
     # measure altitude over a residence (runway ops carry only touchdown lows; the
@@ -347,7 +363,7 @@ def _score_aircraft(rows: list, rules: VnapRuleset, tz: str | None) -> dict:
                 on_pref += 1
 
     compliance = {
-        "tightness": tightness_score(avg_dev, rules),
+        "tightness": tightness_score(typical_dev, rules),
         "altitude": altitude_score(float(typical_agl) if typical_agl is not None else None, rules),
         "timeofday": timeofday_score(in_window, total),
         "tg_volume": tg_volume_score(tg_sessions, rules),
