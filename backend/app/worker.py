@@ -75,6 +75,10 @@ async def run_once() -> int:
                     await store.add_track_sample(sample["icao24"], sample, settings.track_ttl_seconds)
                 for monitor in group["monitors"]:
                     written = (await run_detectors_for_monitor(store, settings, conn, monitor)).written
+                    # Never carry a write transaction into the next group's
+                    # HTTP fetch: it holds SQLite's single write lock and 500s
+                    # the api's concurrent writers.
+                    conn.commit()
                     processed += written
                     logger.info(
                         "monitor=%s source=%s states=%s events=%s group_monitors=%s at=%s",
@@ -129,6 +133,7 @@ async def run_forever() -> None:
                                 await store.add_track_sample(sample["icao24"], sample, settings.track_ttl_seconds)
                             for monitor in group["monitors"]:
                                 written = (await run_detectors_for_monitor(store, settings, conn, monitor)).written
+                                conn.commit()
                                 logger.info(
                                     "monitor=%s source=%s states=%s events=%s group_monitors=%s",
                                     monitor["hash"],

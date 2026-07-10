@@ -485,6 +485,12 @@ async def run_detectors_for_monitor(
         except Exception:  # noqa: BLE001 — never let weather break detection
             wind = {}
         flow.process(conn, airport.icao, runways, new_events, wind, now)
+        # Release the write lock here. db_session commits only on exit, and the
+        # callers keep this connection open for seconds afterwards — the worker
+        # across its HTTP fetches, the scan across enrich_offenders and
+        # tracks_for_response. Holding an open write transaction that long
+        # starved every other writer past SQLite's 5s busy_timeout.
+        conn.commit()
     return DetectorRun(written, detected)
 
 
@@ -851,6 +857,7 @@ async def _compute_scan_response(
     tracks = merge_track_rows(offender_tracks, recent_tracks)
     t = lap(f"tracks_for_response tracks={len(tracks)}", t)
     _record_observed_identities(conn, tracks, window.end_ts)
+    conn.commit()  # short write transaction; see run_detectors_for_monitor
     active_now = await active_aircraft_count(store, airport, p)
     log.info(
         "scan TOTAL airport=%s window=%s ms=%d offenders=%d tracks=%d events=%d",
