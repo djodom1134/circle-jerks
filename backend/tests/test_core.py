@@ -134,64 +134,53 @@ def test_circle_detector_detects_closed_loop():
     events = detect_circles(track, ap, ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2))
     assert len(events) == 1
     assert events[0]["type"] == "circle"
+    # Closed-lap events ALWAYS carry a turn direction. This is the discriminator
+    # scripts/prune_crossing_circles.py relies on (crossing artifacts had NULL
+    # turn_direction); if a refactor drops it, the prune would delete real laps.
+    assert events[0]["turn_direction"] in ("left", "right")
 
 
-def test_circle_detector_counts_home_airport_line_crossings():
-    """One 'circle' per CIRCLE_BUCKET_SECONDS (120s) window that a track crosses
-    the home↔airport segment — crossings within the same ~1-lap window collapse
-    to a single event (that's the fix for the per-lap over-count), but crossings
-    in genuinely separate windows still count separately.
+def test_circle_detector_ignores_line_crossings_without_a_closed_lap():
+    """A track that repeatedly crosses the home↔airport chord but never closes a
+    full lap must NOT count as a circle. The old line-crossing counter emitted
+    one 'circle' per crossing (~2 per orbit); circles are now closed pattern
+    laps only, so this zig-zag emits nothing.
 
-    Setup: airport at (39.9088, -105.1172), home at (40.0, -105.1172) directly
-    north of the airport. The home↔airport segment is a vertical north-south
-    line at lon=-105.1172, lat between ~39.91 and 40.0.
-
-    The track flies east → west across that line, then back west → east, then
-    east → west again, with idle (non-crossing) samples inserted between each
-    crossing so the three crossings land >120s apart in wall-clock time while
-    every consecutive sample pair stays within MAX_SEGMENT_GAP_SECONDS (90s).
+    Setup: airport at (39.9088, -105.1172), home ~5.4 nm north. The track flies
+    east → west → east → west across the chord — four crossings, zero closed laps.
     """
     ap = airport()
     home_lat = ap.lat + 0.09  # ~5.4 nm north
     home_lon = ap.lon
-    # Three crossings: E→W, W→E, E→W, each pair of samples 80s apart so the
-    # crossing timestamps land in distinct 120s buckets (~1040, ~1280, ~1520).
     midpoint_lat = (ap.lat + home_lat) / 2
     east = (midpoint_lat, ap.lon + 0.05)
     west = (midpoint_lat, ap.lon - 0.05)
-    points = [
-        east,   # t=1000, east of line
-        west,   # t=1080, west of line   → crossing #1 (mid ~1040, bucket 8)
-        west,   # t=1160, no crossing (idle, keeps gaps <=90s)
-        east,   # t=1240, east of line   → crossing #2 (mid ~1200, bucket 10)
-        east,   # t=1320, no crossing (idle)
-        west,   # t=1400, west of line   → crossing #3 (mid ~1360, bucket 11)
-    ]
-    track = [sample(1000 + index * 80, lat, lon) for index, (lat, lon) in enumerate(points)]
+    points = [east, west, east, west, east]
+    track = [sample(1000 + index * 60, lat, lon) for index, (lat, lon) in enumerate(points)]
     params = ScanParams(airport_icao="KBJC", user_lat=home_lat, user_lon=home_lon, ring_nm=8)
 
     events = detect_circles(track, ap, params)
 
-    assert len({e["id"] for e in events}) == 3
-    assert all(e["type"] == "circle" for e in events)
-    assert all(e["detection_method"] == "home_airport_line_crossing" for e in events)
+    assert events == []
 
 
-def test_circle_detector_skips_high_altitude_overflight():
-    """Airliner crossing the home↔airport line at FL250 isn't pattern work."""
+def test_circle_detector_skips_high_altitude_closed_loop():
+    """A full closed loop flown at FL250 (airliner, not pattern work) is above
+    the closed-lap altitude ceiling (2000 ft AGL) and must NOT emit a circle."""
     ap = airport()
-    home_lat = ap.lat + 0.09
-    midpoint_lat = (ap.lat + home_lat) / 2
-    # Same E→W crossing as above but at 25,000 ft AGL (well above pattern altitude).
     points = [
-        (midpoint_lat, ap.lon + 0.05),
-        (midpoint_lat, ap.lon - 0.05),
+        (39.9238, -105.1172),
+        (39.9194, -105.1013),
+        (39.9088, -105.0950),
+        (39.8982, -105.1013),
+        (39.8938, -105.1172),
+        (39.8982, -105.1331),
+        (39.9088, -105.1394),
+        (39.9194, -105.1331),
+        (39.9238, -105.1172),
     ]
-    track = [
-        sample(1000 + i * 60, lat, lon, alt_agl=25000)
-        for i, (lat, lon) in enumerate(points)
-    ]
-    params = ScanParams(airport_icao="KBJC", user_lat=home_lat, user_lon=ap.lon)
+    track = [sample(1000 + i * 30, lat, lon, alt_agl=25000) for i, (lat, lon) in enumerate(points)]
+    params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2)
 
     events = detect_circles(track, ap, params)
     assert events == []

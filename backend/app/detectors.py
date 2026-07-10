@@ -363,29 +363,14 @@ def _detect_circles_in_samples(
     return events
 
 
-def _merge_circle_events(crossing: list[dict], closed_lap: list[dict]) -> list[dict]:
-    """Union line-crossing and closed-lap circle events by id. Closed-lap events
-    are richer; suppress any line-crossing whose timestamp falls inside a
-    closed-lap's [start, end] window so a single real lap never counts twice."""
-    suppressed: set[str] = set()
-    for lap in closed_lap:
-        start = lap.get("start_timestamp", lap["timestamp"])
-        end = lap.get("end_timestamp", lap["timestamp"])
-        for xing in crossing:
-            if start <= xing["timestamp"] <= end:
-                suppressed.add(xing["id"])
-    by_id: dict[str, dict] = {e["id"]: e for e in crossing if e["id"] not in suppressed}
-    for e in closed_lap:
-        by_id[e["id"]] = e
-    return sorted(by_id.values(), key=lambda e: e["timestamp"])
-
-
 def detect_circles(track: list[dict], airport: Airport, params: ScanParams) -> list[dict]:
+    # A "circle" is a detected closed pattern lap (>= ~340 deg of cumulative
+    # turn, <= 2000 ft AGL, tight closure). The older home<->airport
+    # line-crossing counter was removed: a track orbiting the airport crosses
+    # the home<->airport chord ~twice per revolution, so it counted ~2x per
+    # lap and inflated circle totals.
     recent = samples_in_last(track, 20 * 60)
-    return _merge_circle_events(
-        _detect_home_airport_crossings(recent, airport, params),
-        _detect_circles_in_samples(recent, airport, params),
-    )
+    return _detect_circles_in_samples(recent, airport, params)
 
 
 def detect_circles_over_period(
@@ -399,120 +384,9 @@ def detect_circles_over_period(
         sample for sample in sorted(track, key=lambda row: row["timestamp"])
         if start_ts - 20 * 60 <= sample["timestamp"] <= end_ts
     ]
-    # Both detectors over the period so closed-lap events (which carry the lap
-    # window deviation needs) reach the operations log for backfilled scans too.
-    return _merge_circle_events(
-        _detect_home_airport_crossings(samples, airport, params, start_ts, end_ts),
-        _detect_circles_in_samples(samples, airport, params),
-    )
-
-
-# Altitude cap above which crossings of the home↔airport line don't count as
-# pattern work (airliners passing through at FL200 aren't "circling").
-MAX_CIRCLE_CROSS_ALTITUDE_FT_AGL = 5000
-
-
-def _ccw(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> float:
-    """2D cross product sign — positive if a→b→c is counterclockwise."""
-    return (by - ay) * (cx - ax) - (bx - ax) * (cy - ay)
-
-
-def _segments_cross(
-    a: tuple[float, float],
-    b: tuple[float, float],
-    c: tuple[float, float],
-    d: tuple[float, float],
-) -> bool:
-    """True if segments ab and cd properly intersect (strict, non-collinear)."""
-    d1 = _ccw(c[0], c[1], d[0], d[1], a[0], a[1])
-    d2 = _ccw(c[0], c[1], d[0], d[1], b[0], b[1])
-    d3 = _ccw(a[0], a[1], b[0], b[1], c[0], c[1])
-    d4 = _ccw(a[0], a[1], b[0], b[1], d[0], d[1])
-    return (d1 * d2) < 0 and (d3 * d4) < 0
-
-
-def _detect_home_airport_crossings(
-    samples: list[dict],
-    airport: Airport,
-    params: ScanParams,
-    start_ts: int | None = None,
-    end_ts: int | None = None,
-) -> list[dict]:
-    """Each time an aircraft's track crosses the line segment from the user's
-    home to the airport, count it as one "circle."
-
-    Simpler and more intuitive than the old cumulative-turn detector — a closed
-    pattern around the airport that wraps the airport but not the home crosses
-    this line once per lap. Crossings are bucketed at CIRCLE_BUCKET_SECONDS
-    granularity (>= one physical lap) so GPS jitter or multiple crossings
-    within a single lap don't double-count.
-    """
-    if len(samples) < 2:
-        return []
-
-    # Segment endpoints. Geographic coordinates are fine for short distances —
-    # we never approach the antimeridian or polar regions.
-    home = (params.user_lat, params.user_lon)
-    apt = (airport.lat, airport.lon)
-
-    # Pre-filter samples to those potentially relevant — must have lat/lon,
-    # and must be in the ring around the airport (samples way out at cruise
-    # altitude passing through aren't pattern work).
-    sorted_samples = [
-        s for s in sorted(samples, key=lambda row: row["timestamp"])
-        if s.get("lat") is not None and s.get("lon") is not None
-    ]
-    if len(sorted_samples) < 2:
-        return []
-
-    events: list[dict] = []
-    seen_buckets: set[int] = set()
-    for a, b in zip(sorted_samples, sorted_samples[1:]):
-        gap = int(b["timestamp"] - a["timestamp"])
-        if gap <= 0 or gap > MAX_SEGMENT_GAP_SECONDS:
-            continue
-        if start_ts is not None and b["timestamp"] < start_ts:
-            continue
-        if end_ts is not None and a["timestamp"] > end_ts:
-            continue
-
-        if not _segments_cross(
-            (a["lat"], a["lon"]),
-            (b["lat"], b["lon"]),
-            home,
-            apt,
-        ):
-            continue
-
-        # Altitude filter — overflight at cruise altitude isn't a pattern lap.
-        a_agl = altitude_agl(a, airport)
-        b_agl = altitude_agl(b, airport)
-        agl = min(filter(lambda v: v is not None, [a_agl, b_agl]), default=None)
-        if agl is not None and agl > MAX_CIRCLE_CROSS_ALTITUDE_FT_AGL:
-            continue
-
-        timestamp = int((a["timestamp"] + b["timestamp"]) / 2)
-        if start_ts is not None and timestamp < start_ts:
-            continue
-        if end_ts is not None and timestamp > end_ts:
-            continue
-
-        bucket = int(timestamp // CIRCLE_BUCKET_SECONDS)  # >=1-lap dedup window
-        if bucket in seen_buckets:
-            continue
-        seen_buckets.add(bucket)
-
-        events.append({
-            "id": _event_id("circle", a["icao24"], airport.icao, bucket),
-            "type": "circle",
-            "icao24": a["icao24"],
-            "callsign": a.get("callsign") or a["icao24"].upper(),
-            "timestamp": timestamp,
-            "airport_icao": airport.icao,
-            "alt_band_ft": [int(agl) if agl is not None else None, int(agl) if agl is not None else None],
-            "detection_method": "home_airport_line_crossing",
-        })
-    return events
+    # Closed-lap events carry the lap window that deviation needs, so the
+    # historical/backfill variant runs the same detector as the live path.
+    return _detect_circles_in_samples(samples, airport, params)
 
 
 def _nearest_runway(sample: dict, runways: list[dict]) -> tuple[dict | None, float]:
