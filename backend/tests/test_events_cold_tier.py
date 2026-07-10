@@ -189,21 +189,6 @@ def test_events_for_window_includes_events_detected_this_scan(conn):
 # --- scan cost controls -----------------------------------------------------
 
 
-def test_wide_windows_get_a_longer_response_cache():
-    """A 24h scan is seconds of detector CPU and barely changes minute to
-    minute; recomputing it on the 15s cadence of a live 5m window burned the
-    box for nothing."""
-    from app.settings import Settings
-
-    s = Settings(database_path=":memory:")
-    assert services.scan_cache_seconds(s, "5m") == s.scan_response_cache_seconds
-    assert services.scan_cache_seconds(s, "30m") == s.scan_response_cache_seconds
-    # 1h and wider are "wide": the threshold is inclusive.
-    assert services.scan_cache_seconds(s, "1h") == s.wide_window_scan_cache_seconds
-    assert services.scan_cache_seconds(s, "6h") == s.wide_window_scan_cache_seconds
-    assert services.scan_cache_seconds(s, "today") == s.wide_window_scan_cache_seconds
-
-
 def test_detection_runs_off_the_event_loop():
     """A 24h window is ~11s of pure-CPU detection. Running it on the event loop
     starved the Redis client's socket reads, timing them out and 500-ing
@@ -218,3 +203,60 @@ def test_detection_runs_off_the_event_loop():
     pure = inspect.getsource(services._detect_over_tracks)
     assert "await " not in pure
     assert "store." not in pure and "db." not in pure
+
+
+# --- redundant re-write prevention ------------------------------------------
+
+
+def test_existing_operation_ids_returns_ids_in_range(conn):
+    now = 1_700_000_000
+    db.persist_events(conn, [
+        operation_event("in-a", now - 3600, "circle"),
+        operation_event("in-b", now - 60, "touch_and_go"),
+        operation_event("too-old", now - 40 * 3600, "circle"),
+    ])
+    conn.commit()
+
+    ids = db.existing_operation_ids(conn, "KLMO", now - 24 * 3600, now)
+    assert ids == {"in-a", "in-b"}
+
+
+def test_new_and_hot_events_skips_ids_already_durably_stored():
+    """`existing_ids` came only from Redis, which prunes to event_ttl. So on a
+    24h scan every event older than 4h looked new *forever*: ~1423 of them were
+    re-added to Redis (3 round-trips each, to a remote Valkey) and re-run
+    through persist_events / store_deviations / flow.process on every scan.
+    """
+    now = 1_700_000_000
+    hot_cutoff = now - 4 * 3600
+    detected = [
+        operation_event("old-known", now - 12 * 3600),   # durable, not in Redis
+        operation_event("old-fresh", now - 12 * 3600),   # genuinely new, but cold
+        operation_event("new-hot", now - 60),            # genuinely new, and hot
+    ]
+    existing = {"old-known"}
+
+    new_events, hot_events = services.new_and_hot_events(detected, existing, hot_cutoff)
+
+    assert [e["id"] for e in new_events] == ["old-fresh", "new-hot"]
+    # Writing a cold event to Redis is a guaranteed no-op — add_event prunes
+    # anything older than the TTL in the same call.
+    assert [e["id"] for e in hot_events] == ["new-hot"]
+
+
+def test_new_and_hot_events_dedupes_within_a_single_batch():
+    now = 1_700_000_000
+    detected = [operation_event("dup", now - 60), operation_event("dup", now - 60)]
+    new_events, hot_events = services.new_and_hot_events(detected, set(), now - 3600)
+    assert len(new_events) == 1 and len(hot_events) == 1
+
+
+def test_only_today_gets_the_long_cache():
+    """1h and 6h carry the live aircraft markers; a 90s cache froze them.
+    The threshold must be strictly greater than the windows users watch live."""
+    from app.settings import Settings
+
+    s = Settings(database_path=":memory:")
+    for code in ("5m", "30m", "1h", "6h"):
+        assert services.scan_cache_seconds(s, code) == s.scan_response_cache_seconds, code
+    assert services.scan_cache_seconds(s, "today") == s.wide_window_scan_cache_seconds

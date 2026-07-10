@@ -353,6 +353,37 @@ def _detect_over_tracks(
     return tracks_by_icao24, events_by_icao24
 
 
+def new_and_hot_events(
+    detected: Iterable[dict],
+    existing_ids: set[str],
+    hot_cutoff_ts: int,
+) -> tuple[list[dict], list[dict]]:
+    """Split detected events into (genuinely new, worth writing to Redis).
+
+    `existing_ids` must span BOTH tiers. Deduping against Redis alone — which
+    prunes to `event_ttl_seconds` — made every event older than the TTL look new
+    on every scan: a 24h window re-added ~1423 events per scan (three round
+    trips each, to a remote Valkey) and re-ran them through persist_events,
+    store_deviations and flow.process.
+
+    An event older than `hot_cutoff_ts` is never worth writing to Redis:
+    `add_event` prunes below the TTL in the very same call, so the write is a
+    guaranteed no-op. It still counts as new, so it reaches durable storage.
+
+    Mutates `existing_ids` so a repeated id inside one batch is emitted once.
+    """
+    new_events: list[dict] = []
+    hot_events: list[dict] = []
+    for event in detected:
+        if event["id"] in existing_ids:
+            continue
+        existing_ids.add(event["id"])
+        new_events.append(event)
+        if event["timestamp"] >= hot_cutoff_ts:
+            hot_events.append(event)
+    return new_events, hot_events
+
+
 class DetectorRun(NamedTuple):
     """`written` counts events new to Redis this pass (what the worker logs).
     `detected` is every event the detectors derived over the window — including
@@ -384,7 +415,6 @@ async def run_detectors_for_monitor(
         pass_radius_nm=monitor["pass_radius_nm"],
         pass_ceiling_ft=monitor["pass_ceiling_ft"],
     )
-    written = 0
     now = int(datetime.now(timezone.utc).timestamp())
     detector_end = end_ts or now
     # Tracks are tiered: Redis holds `track_ttl_seconds` of hot data; SQLite
@@ -411,9 +441,13 @@ async def run_detectors_for_monitor(
         detector_start - 20 * 60, detector_end,
     )
     # Fetch existing event IDs ONCE (not per-event) — event_exists re-scanned
-    # the whole events set on every call, which was O(events²) per scan.
+    # the whole events set on every call, which was O(events²) per scan. Union
+    # the hot tier with the durable one: Redis prunes to event_ttl_seconds, so
+    # on its own it makes every older event look new on every single scan.
     existing_ids = await store.existing_event_ids(monitor["hash"])
-    new_events: list[dict] = []
+    existing_ids |= db.existing_operation_ids(
+        conn, airport.icao, detector_start - 20 * 60, detector_end,
+    )
 
     # Detection is pure CPU over every sample of every track. A 24h window is
     # ~11s of it — long enough that running it on the event loop starved the
@@ -425,13 +459,12 @@ async def run_detectors_for_monitor(
         start_ts, end_ts, detector_start, detector_end,
     )
     detected: list[dict] = [event for events in events_by_icao24.values() for event in events]
-    for events in events_by_icao24.values():
-        for event in events:
-            if event["id"] not in existing_ids:
-                await store.add_event(monitor["hash"], event, settings.event_ttl_seconds)
-                existing_ids.add(event["id"])
-                new_events.append(event)
-                written += 1
+    new_events, hot_events = new_and_hot_events(
+        detected, existing_ids, now - settings.event_ttl_seconds,
+    )
+    written = len(new_events)
+    for event in hot_events:
+        await store.add_event(monitor["hash"], event, settings.event_ttl_seconds)
     # Durably log the ops so the KPIs page / deviation / rotation phases have
     # history beyond the ephemeral Redis (~4h) + archive (~24h) windows.
     if new_events:
@@ -674,10 +707,10 @@ async def backfill_historical_states(
 
 
 def scan_cache_seconds(settings: Settings, window_code: str | None) -> int:
-    """Wide windows are expensive to compute and slow to change — cache them
-    longer than the live 5m window's 15s refresh cadence."""
+    """Only `today` is cached long. 1h and 6h carry the live aircraft markers,
+    so caching them froze the map for the cache's lifetime."""
     seconds = WINDOW_SECONDS.get(validate_window(window_code), 0)
-    if seconds >= settings.wide_window_threshold_seconds:
+    if seconds > settings.wide_window_threshold_seconds:
         return settings.wide_window_scan_cache_seconds
     return settings.scan_response_cache_seconds
 

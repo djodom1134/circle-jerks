@@ -113,12 +113,12 @@ class Settings(BaseSettings):
     # Footprint is tiny (a handful of location buckets * one entry each), well
     # within Valkey headroom now that track TTL is bounded + the watchdog trims.
     scan_response_cache_seconds: int = 15
-    # Wide windows cost seconds of detector CPU over a full day of tracks, and
-    # they barely change minute to minute. Recomputing them on the 15s cadence
-    # of a live 5m window burned the box for nothing.
-    wide_window_scan_cache_seconds: int = 90
-    # A window at or above this many seconds counts as "wide".
-    wide_window_threshold_seconds: int = 3600
+    # Wide windows cost detector CPU over a full day of tracks and barely change
+    # minute to minute. Only `today` qualifies: 1h and 6h carry the live aircraft
+    # markers, and caching those froze the map for the cache's lifetime.
+    wide_window_scan_cache_seconds: int = 30
+    # A window STRICTLY LONGER than this counts as "wide" — 6h must not.
+    wide_window_threshold_seconds: int = 21600
     # Lat/lon bucket size (degrees) used to group users for cache sharing.
     # ~0.003° ≈ 330 m at 40° latitude — tight enough that "altitude over user"
     # / "passes over user" don't drift meaningfully between users in the

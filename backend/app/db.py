@@ -564,6 +564,26 @@ def read_operations(
     return conn.execute(query, args).fetchall()
 
 
+def existing_operation_ids(
+    conn: sqlite3.Connection,
+    icao: str,
+    start_ts: int,
+    end_ts: int,
+) -> set[str]:
+    """Ids of operations already durably stored for this airport and window.
+
+    The detector dedupes against Redis, which prunes to `event_ttl_seconds`.
+    Anything older looked new on every scan, so a 24h window re-wrote ~1400
+    events per scan. This is the durable half of that dedupe set.
+    """
+    return {
+        row["id"] for row in conn.execute(
+            "SELECT id FROM operations WHERE icao = ? AND timestamp >= ? AND timestamp <= ?",
+            (icao, int(start_ts), int(end_ts)),
+        )
+    }
+
+
 def airport_timezone(conn: sqlite3.Connection, icao: str) -> str | None:
     row = conn.execute("SELECT timezone FROM airports WHERE icao=?", (icao.upper(),)).fetchone()
     return row["timezone"] if row else None
