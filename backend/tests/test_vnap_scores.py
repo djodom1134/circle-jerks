@@ -120,3 +120,15 @@ def test_tightness_axis_needs_enough_laps(tmp_path):
     out = vnap.compute_aircraft_compliance(conn, "KLMO", base - 10, base + 100)
     ac = next(a for a in out["aircraft"] if a["icao24"] == "yy88")
     assert ac["scores"]["tightness"] is None
+
+
+def test_pattern_work_gate_matches_deinflated_circle_counts():
+    """The VNAP score gate (min circles) was calibrated when circles were
+    over-counted ~2.8x. After the one-row-per-lap fix, 10 circles means 10 real
+    laps — so genuine offenders doing ~6 laps scored 0. The floor must sit at a
+    handful of real laps, not ten."""
+    assert R.score_min_circles <= 6, "gate must judge a ~6-lap offender"
+
+    # An aircraft with a modest number of real laps AND runway pattern work is
+    # judged (non-zero), not gated to 0.
+    assert R.score_min_circles <= 6 and R.score_min_tg <= 1

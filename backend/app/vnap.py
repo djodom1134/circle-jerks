@@ -36,9 +36,12 @@ class VnapRuleset:
     preferred_runway_id: str = "29"
     preferred_runway_heading_deg: float = 290.0
     # A plane isn't "judged" until it's doing real pattern work: the VNAP score
-    # stays 0 until it has at least this many touch-and-gos AND circles.
+    # stays 0 until it has at least this many touch-and-gos AND circles (laps).
+    # The circle floor is in DE-INFLATED laps: a circle is now one physical lap,
+    # so ~3 laps of runway pattern work is enough signal to score. (It was 10
+    # back when circles were over-counted ~2.8x per lap.)
     score_min_tg: int = 1
-    score_min_circles: int = 10
+    score_min_circles: int = 3
 
 
 _KLMO = VnapRuleset()
@@ -268,7 +271,7 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         tgs = sum(1 for r in ac_rows if r["type"] == "touch_and_go")
         devs = [r["dev"] for r in ac_rows if r["type"] == "circle" and r["dev"] is not None]
         # VNAP stays 0 until the aircraft is doing real pattern work (>= 1 T&G AND
-        # >= 10 circles); otherwise there isn't enough signal to judge it.
+        # >= score_min_circles laps); otherwise there isn't enough signal to judge it.
         vnap_score = composite_score(scores, rules)
         if not (tgs >= rules.score_min_tg and circles >= rules.score_min_circles):
             vnap_score = 0.0
