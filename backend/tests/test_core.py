@@ -137,32 +137,42 @@ def test_circle_detector_detects_closed_loop():
 
 
 def test_circle_detector_counts_home_airport_line_crossings():
-    """One 'circle' for each time a track crosses the home↔airport segment.
+    """One 'circle' per CIRCLE_BUCKET_SECONDS (120s) window that a track crosses
+    the home↔airport segment — crossings within the same ~1-lap window collapse
+    to a single event (that's the fix for the per-lap over-count), but crossings
+    in genuinely separate windows still count separately.
 
     Setup: airport at (39.9088, -105.1172), home at (40.0, -105.1172) directly
     north of the airport. The home↔airport segment is a vertical north-south
     line at lon=-105.1172, lat between ~39.91 and 40.0.
 
     The track flies east → west across that line, then back west → east, then
-    east → west again. Each crossing counts as one event.
+    east → west again, with idle (non-crossing) samples inserted between each
+    crossing so the three crossings land >120s apart in wall-clock time while
+    every consecutive sample pair stays within MAX_SEGMENT_GAP_SECONDS (90s).
     """
     ap = airport()
     home_lat = ap.lat + 0.09  # ~5.4 nm north
     home_lon = ap.lon
-    # Three crossings: E→W, W→E, E→W. Sample y = midpoint between home/airport.
+    # Three crossings: E→W, W→E, E→W, each pair of samples 80s apart so the
+    # crossing timestamps land in distinct 120s buckets (~1040, ~1280, ~1520).
     midpoint_lat = (ap.lat + home_lat) / 2
+    east = (midpoint_lat, ap.lon + 0.05)
+    west = (midpoint_lat, ap.lon - 0.05)
     points = [
-        (midpoint_lat, ap.lon + 0.05),   # east of line
-        (midpoint_lat, ap.lon - 0.05),   # west of line  → crossing #1
-        (midpoint_lat, ap.lon + 0.05),   # east of line  → crossing #2
-        (midpoint_lat, ap.lon - 0.05),   # west of line  → crossing #3
+        east,   # t=1000, east of line
+        west,   # t=1080, west of line   → crossing #1 (mid ~1040, bucket 8)
+        west,   # t=1160, no crossing (idle, keeps gaps <=90s)
+        east,   # t=1240, east of line   → crossing #2 (mid ~1200, bucket 10)
+        east,   # t=1320, no crossing (idle)
+        west,   # t=1400, west of line   → crossing #3 (mid ~1360, bucket 11)
     ]
-    track = [sample(1000 + index * 60, lat, lon) for index, (lat, lon) in enumerate(points)]
+    track = [sample(1000 + index * 80, lat, lon) for index, (lat, lon) in enumerate(points)]
     params = ScanParams(airport_icao="KBJC", user_lat=home_lat, user_lon=home_lon, ring_nm=8)
 
     events = detect_circles(track, ap, params)
 
-    assert len(events) == 3
+    assert len({e["id"] for e in events}) == 3
     assert all(e["type"] == "circle" for e in events)
     assert all(e["detection_method"] == "home_airport_line_crossing" for e in events)
 

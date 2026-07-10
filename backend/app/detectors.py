@@ -12,6 +12,10 @@ MAX_SEGMENT_GAP_SECONDS = 90
 MIN_CIRCLE_SAMPLES = 6
 MIN_CIRCLE_PATH_NM = 3.0
 MIN_CIRCLE_DURATION_SECONDS = 120
+# A physical pattern lap is >= MIN_CIRCLE_DURATION_SECONDS; bucket circle event
+# ids at this granularity so multiple line-crossings / GPS jitter within one lap
+# collapse to a single row (via the stable event id + ON CONFLICT idempotency).
+CIRCLE_BUCKET_SECONDS = 120
 MAX_CIRCLE_DURATION_SECONDS = 20 * 60
 # Require ~one full lap of cumulative heading change. 340° (not 360°) leaves
 # slack for ADS-B sampling that drops 1-2 small heading deltas mid-turn.
@@ -275,7 +279,7 @@ def _detect_circles_in_samples(
             for sample in loop_samples
         ]
         return {
-            "id": _event_id("circle", current["icao24"], airport.icao, int(timestamp // 90)),
+            "id": _event_id("circle", current["icao24"], airport.icao, int(timestamp // CIRCLE_BUCKET_SECONDS)),
             "type": "circle",
             "icao24": current["icao24"],
             "callsign": current.get("callsign") or current["icao24"].upper(),
@@ -439,8 +443,9 @@ def _detect_home_airport_crossings(
 
     Simpler and more intuitive than the old cumulative-turn detector — a closed
     pattern around the airport that wraps the airport but not the home crosses
-    this line once per lap. Crossings are bucketed at 90-second granularity so
-    GPS jitter at the crossing point doesn't double-count.
+    this line once per lap. Crossings are bucketed at CIRCLE_BUCKET_SECONDS
+    granularity (>= one physical lap) so GPS jitter or multiple crossings
+    within a single lap don't double-count.
     """
     if len(samples) < 2:
         return []
@@ -492,7 +497,7 @@ def _detect_home_airport_crossings(
         if end_ts is not None and timestamp > end_ts:
             continue
 
-        bucket = timestamp // 30  # ~30s anti-jitter dedup (GPS noise at the line)
+        bucket = int(timestamp // CIRCLE_BUCKET_SECONDS)  # >=1-lap dedup window
         if bucket in seen_buckets:
             continue
         seen_buckets.add(bucket)

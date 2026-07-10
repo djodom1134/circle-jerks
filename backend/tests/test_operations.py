@@ -5,6 +5,8 @@ import pytest
 from app import db
 from app.db import Airport
 from app.detectors import (
+    CIRCLE_BUCKET_SECONDS,
+    _event_id,
     detect_circles,
     detect_events,
     detect_landings_over_period,
@@ -363,3 +365,56 @@ def test_period_circle_detection_includes_closed_lap():
         e.get("detection_method") == "course_turn_closed_lap" and "start_timestamp" in e
         for e in events
     )
+
+
+def test_circle_event_id_bucketing_collapses_within_one_lap_window():
+    # A physical pattern lap is >= MIN_CIRCLE_DURATION_SECONDS (120s). Two
+    # crossing timestamps in the same 120s wall-clock window must produce the
+    # SAME event id (so ON CONFLICT collapses them to one row), while
+    # timestamps in separate windows must produce distinct ids.
+    same_window = [1000, 1005, 1070]  # all fall in bucket 1000//120 == 8 (window [960,1080))
+    ids = {
+        _event_id("circle", "a4c1d8", "KBJC", int(ts // CIRCLE_BUCKET_SECONDS))
+        for ts in same_window
+    }
+    assert len(ids) == 1
+
+    other_window_ts = 1000 + CIRCLE_BUCKET_SECONDS + 5  # next bucket over
+    other_id = _event_id("circle", "a4c1d8", "KBJC", int(other_window_ts // CIRCLE_BUCKET_SECONDS))
+    assert other_id not in ids
+
+
+def test_home_airport_crossings_collapse_within_120s_but_not_across_windows():
+    """Multiple line-crossings within one 120s window (GPS jitter / multiple
+    passes over the home↔airport line during a single lap) must collapse to a
+    single circle event id; a crossing in a later, separate 120s window must
+    still produce a distinct event."""
+    ap = airport_kbjc()
+    home_lat = ap.lat + 0.09  # ~5.4 nm north
+    home_lon = ap.lon
+    midpoint_lat = (ap.lat + home_lat) / 2
+    east = (midpoint_lat, ap.lon + 0.05)
+    west = (midpoint_lat, ap.lon - 0.05)
+    # Three crossings inside one 120s window (t=0..90), then idle samples that
+    # bridge (each gap <= MAX_SEGMENT_GAP_SECONDS=90) out to a crossing in a
+    # clearly separate window.
+    points = [
+        east,   # t=0
+        west,   # t=30   -> crossing #1 (mid=15, bucket 0)
+        east,   # t=60   -> crossing #2 (mid=45, bucket 0)
+        west,   # t=90   -> crossing #3 (mid=75, bucket 0)
+        west,   # t=170  idle (gap 80)
+        west,   # t=250  idle (gap 80)
+        east,   # t=330  -> crossing #4 (mid=290, bucket 2 — separate window)
+    ]
+    offsets = [0, 30, 60, 90, 170, 250, 330]
+    track = [sample(1000 + off, lat, lon) for off, (lat, lon) in zip(offsets, points)]
+    params = ScanParams(airport_icao="KBJC", user_lat=home_lat, user_lon=home_lon, ring_nm=8)
+
+    events = detect_circles(track, ap, params)
+    crossings = [e for e in events if e["detection_method"] == "home_airport_line_crossing"]
+
+    ids = {e["id"] for e in crossings}
+    assert len(ids) == 2  # window [0,120) collapsed to one id; window ~[240,360) is distinct
+    buckets = {int(e["timestamp"] // CIRCLE_BUCKET_SECONDS) for e in crossings}
+    assert len(buckets) == 2
