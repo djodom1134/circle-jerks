@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
+from collections.abc import Iterable
 import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -303,6 +305,16 @@ async def params_with_user_elevation(store: Store, settings: Settings, params: S
     return p.model_copy(update={"user_elevation_ft": elevation_ft})
 
 
+class DetectorRun(NamedTuple):
+    """`written` counts events new to Redis this pass (what the worker logs).
+    `detected` is every event the detectors derived over the window — including
+    ones already stored — so the scan can serve a window wider than the Redis
+    event TTL without waiting for them to round-trip through storage.
+    """
+    written: int
+    detected: list[dict]
+
+
 async def run_detectors_for_monitor(
     store: Store,
     settings: Settings,
@@ -310,10 +322,10 @@ async def run_detectors_for_monitor(
     monitor: dict,
     start_ts: int | None = None,
     end_ts: int | None = None,
-) -> int:
+) -> DetectorRun:
     airport = db.get_airport(conn, monitor["airport_icao"])
     if not airport:
-        return 0
+        return DetectorRun(0, [])
     runways = db.runways_for_airport(conn, airport.icao)
     params = ScanParams(
         airport_icao=airport.icao,
@@ -354,6 +366,7 @@ async def run_detectors_for_monitor(
     # the whole events set on every call, which was O(events²) per scan.
     existing_ids = await store.existing_event_ids(monitor["hash"])
     new_events: list[dict] = []
+    detected: list[dict] = []
     tracks_by_icao24: dict[str, list[dict]] = {}
     for icao24, track in zip(icao24s, tracks):
         if not track_intersects_bbox(track, tuple(monitor["bbox"])):
@@ -380,6 +393,7 @@ async def run_detectors_for_monitor(
                 + detect_landings_over_period(track, airport, runways, detector_start, detector_end)
                 + detect_takeoffs_over_period(track, airport, runways, detector_start, detector_end)
             )
+        detected.extend(events)
         for event in events:
             if event["id"] not in existing_ids:
                 await store.add_event(monitor["hash"], event, settings.event_ttl_seconds)
@@ -399,7 +413,7 @@ async def run_detectors_for_monitor(
         except Exception:  # noqa: BLE001 — never let weather break detection
             wind = {}
         flow.process(conn, airport.icao, runways, new_events, wind, now)
-    return written
+    return DetectorRun(written, detected)
 
 
 def track_intersects_bbox(track: list[dict], bbox: tuple[float, float, float, float]) -> bool:
@@ -716,9 +730,16 @@ async def _compute_scan_response(
     t = lap("monitor_registered", t)
     backfill = await backfill_historical_states(store, settings, monitor, window)
     t = lap("backfill", t)
-    await run_detectors_for_monitor(store, settings, conn, monitor, window.start_ts, window.end_ts)
+    detector_run = await run_detectors_for_monitor(
+        store, settings, conn, monitor, window.start_ts, window.end_ts,
+    )
     t = lap("detectors", t)
-    events = events_for_current_scan(await store.get_events(key, window.start_ts, window.end_ts), p)
+    events = events_for_current_scan(
+        await events_for_window(
+            store, conn, key, airport.icao, window, detector_run.detected,
+        ),
+        p,
+    )
     counts = event_counts(events)
     offenders = await enrich_offenders(
         store,
@@ -777,6 +798,73 @@ def events_for_current_scan(events: list[dict], params: ScanParams) -> list[dict
         if event["type"] != "pass_over_user"
         or event.get("pass_geometry_key") == current_pass_key
     ]
+
+
+# --- Two-tier event reads (Redis hot + SQLite operations) -------------------
+
+# `pass_over_user` is deliberately absent: it is scoped to one visitor's
+# coordinates via pass_geometry_key, which `operations` has no column for.
+# Serving those rows from the cold tier would attribute one visitor's
+# overflights to another. They reach wide windows via `detected` instead.
+COLD_EVENT_TYPES = ["circle", "touch_and_go", "low_approach", "landing", "takeoff"]
+
+
+def event_from_operation(row) -> dict:
+    """Inverse of `db.operation_from_event` — rebuild the detector event dict
+    the scan pipeline (offender_rows, event_histogram, event_counts) consumes.
+    """
+    return {
+        "id": row["id"],
+        "type": row["type"],
+        "icao24": row["icao24"],
+        "callsign": row["callsign"] or (row["icao24"] or "").upper(),
+        "timestamp": int(row["timestamp"]),
+        "airport_icao": row["icao"],
+        "registration": row["registration"],
+        "runway_id": row["runway_id"],
+        "runway_heading_deg": row["runway_heading_deg"],
+        "turn_direction": row["turn_direction"],
+        "min_altitude_ft_agl": row["min_altitude_ft_agl"],
+        "emitter_category": row["emitter_category"],
+    }
+
+
+async def events_for_window(
+    store: Store,
+    conn,
+    monitor_hash: str,
+    airport_icao: str,
+    window: WindowRange,
+    detected: Iterable[dict] = (),
+) -> list[dict]:
+    """Every event in `window`, merged across the tiers that can hold one.
+
+    Redis prunes its event set to `event_ttl_seconds` on every write, so a hot
+    read alone silently truncates any wider window to the TTL — the `6h` and
+    `today` windows both used to return exactly the last 4h. Fall through to the
+    durable `operations` rows for the rest, and fold in whatever the detector
+    just derived from the two-tier track store.
+
+    The cold tier is read for every window, not just wide ones: the query is an
+    indexed range scan costing ~12µs on a 128k-row table, and gating it on the
+    TTL meant a cold Redis served 0 events for `1h` while `6h` served 12.
+
+    Later sources win the id-keyed merge, so a hot or freshly-detected copy
+    overrides the cold row — those carry fields `operations` has no column for
+    (pass_geometry_key, closest_horizontal_nm, ...).
+    """
+    by_id: dict[str, dict] = {}
+    for row in db.read_operations(
+        conn, airport_icao, window.start_ts, window.end_ts, types=COLD_EVENT_TYPES,
+    ):
+        event = event_from_operation(row)
+        by_id[event["id"]] = event
+    for event in await store.get_events(monitor_hash, window.start_ts, window.end_ts):
+        by_id[event["id"]] = event
+    for event in detected:
+        if window.start_ts <= event["timestamp"] <= window.end_ts:
+            by_id[event["id"]] = event
+    return sorted(by_id.values(), key=lambda event: event["timestamp"])
 
 
 # --- Two-tier track reads (Redis hot + SQLite archive) ----------------------
@@ -1772,8 +1860,9 @@ async def build_description(
         raise KeyError(f"unknown airport {p.airport_icao}")
     key = monitor_hash(p)
     await register_monitor(store, settings, p, airport)
+    all_events = await events_for_window(store, conn, key, airport.icao, window)
     events = [
-        event for event in events_for_current_scan(await store.get_events(key, window.start_ts, window.end_ts), p)
+        event for event in events_for_current_scan(all_events, p)
         if event["icao24"] == icao24.lower()
     ]
     track = await store.get_track(icao24.lower(), window.start_ts - 1800, window.end_ts + 1800)
@@ -1875,12 +1964,16 @@ async def build_summary_description(
     contexts: list[ComplaintContext] = []
     all_timestamps = []
 
+    # Read once and group, rather than re-reading both tiers per aircraft.
+    events_by_icao24: dict[str, list[dict]] = defaultdict(list)
+    for event in events_for_current_scan(
+        await events_for_window(store, conn, key, airport.icao, window), p,
+    ):
+        events_by_icao24[event["icao24"]].append(event)
+
     for raw_icao24 in icao24s:
         icao24 = raw_icao24.lower()
-        events = [
-            event for event in events_for_current_scan(await store.get_events(key, window.start_ts, window.end_ts), p)
-            if event["icao24"] == icao24
-        ]
+        events = events_by_icao24.get(icao24, [])
         track = await store.get_track(icao24, window.start_ts - 1800, window.end_ts + 1800)
         if not events and not track:
             continue

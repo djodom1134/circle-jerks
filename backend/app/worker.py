@@ -74,7 +74,7 @@ async def run_once() -> int:
                 for sample in states[: settings.max_aircraft_per_scan]:
                     await store.add_track_sample(sample["icao24"], sample, settings.track_ttl_seconds)
                 for monitor in group["monitors"]:
-                    written = await run_detectors_for_monitor(store, settings, conn, monitor)
+                    written = (await run_detectors_for_monitor(store, settings, conn, monitor)).written
                     processed += written
                     logger.info(
                         "monitor=%s source=%s states=%s events=%s group_monitors=%s at=%s",
@@ -128,7 +128,7 @@ async def run_forever() -> None:
                             for sample in states[: settings.max_aircraft_per_scan]:
                                 await store.add_track_sample(sample["icao24"], sample, settings.track_ttl_seconds)
                             for monitor in group["monitors"]:
-                                written = await run_detectors_for_monitor(store, settings, conn, monitor)
+                                written = (await run_detectors_for_monitor(store, settings, conn, monitor)).written
                                 logger.info(
                                     "monitor=%s source=%s states=%s events=%s group_monitors=%s",
                                     monitor["hash"],

@@ -76,8 +76,26 @@ def offender_rows(events: list[dict], window: WindowRange, tz_name: str) -> list
     return sorted(rows, key=lambda row: (-row["score"], row["callsign"]))
 
 
+def _bucket_start_ts(ts: int, tz_name: str, by_minute: bool) -> int:
+    """Floor a timestamp to the start of its local minute/hour bucket."""
+    local = datetime.fromtimestamp(ts, ZoneInfo(tz_name))
+    floored = (
+        local.replace(second=0, microsecond=0) if by_minute
+        else local.replace(minute=0, second=0, microsecond=0)
+    )
+    return int(floored.timestamp())
+
+
 def event_histogram(events: list[dict], window: WindowRange, tz_name: str) -> list[dict]:
-    by_bucket: dict[str, dict[str, int]] = defaultdict(lambda: {
+    # Bucket on the instant, not the rendered label: labels sorted
+    # lexicographically put "10 AM" before "9 AM", and a rolling 24h window
+    # covers each clock hour twice, collapsing yesterday's 3 PM into today's.
+    by_minute = window.seconds < 3600
+    spans_local_days = (
+        datetime.fromtimestamp(window.start_ts, ZoneInfo(tz_name)).date()
+        != datetime.fromtimestamp(window.end_ts, ZoneInfo(tz_name)).date()
+    )
+    by_bucket: dict[int, dict[str, int]] = defaultdict(lambda: {
         "circle": 0,
         "touch_and_go": 0,
         "low_approach": 0,
@@ -85,11 +103,11 @@ def event_histogram(events: list[dict], window: WindowRange, tz_name: str) -> li
         "pass_over_user": 0,
     })
     for event in events:
-        label = minute_label(event["timestamp"], tz_name) if window.seconds < 3600 else hour_label(event["timestamp"], tz_name)
-        bucket = by_bucket[label]
+        bucket = by_bucket[_bucket_start_ts(event["timestamp"], tz_name, by_minute)]
         # .get keeps an unfamiliar op type from KeyError-ing (and 404-ing /scan).
         bucket[event["type"]] = bucket.get(event["type"], 0) + 1
+    label = minute_label if by_minute else hour_label
     return [
-        {"bucket": bucket, **counts}
-        for bucket, counts in sorted(by_bucket.items())
+        {"bucket": label(bucket_ts, tz_name, spans_local_days), **counts}
+        for bucket_ts, counts in sorted(by_bucket.items())
     ]

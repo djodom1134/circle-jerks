@@ -19,7 +19,7 @@ const STEPS: Step[] = [
   {
     title: "Pick a time window",
     body:
-      "5 min, 30 min, 1 hour, 6 hours, or Today. The site streams live ADS-B every 10 seconds, so wider windows take a few seconds longer to build up. Start with 1 hour while the buffer fills.",
+      "5 min, 30 min, 1 hour, 6 hours, or 24 hours. The site streams live ADS-B every 10 seconds, so wider windows take a few seconds longer to build up. Start with 1 hour while the buffer fills.",
     hint: "Top-left of the toolbar",
   },
   {

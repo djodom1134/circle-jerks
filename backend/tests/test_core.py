@@ -89,11 +89,21 @@ def test_distance_and_heading_delta():
     assert heading_delta_deg(10, 350) == -20
 
 
-def test_today_window_uses_local_midnight():
+def test_today_window_is_a_rolling_24h():
     now = datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC"))
     window = resolve_window("today", "America/Denver", now)
     assert window.code == "today"
-    assert window.seconds == 12 * 3600 + 30 * 60
+    assert window.seconds == 24 * 3600
+    assert window.end_ts - window.start_ts == 24 * 3600
+
+
+def test_today_window_is_24h_even_just_after_local_midnight():
+    """Regression: snapping to local midnight made "today" narrower than the
+    6h button in the small hours — 00:30 local returned a 30-minute window."""
+    now = datetime(2026, 4, 24, 6, 30, tzinfo=ZoneInfo("UTC"))  # 00:30 in Denver
+    window = resolve_window("today", "America/Denver", now)
+    assert window.seconds == 24 * 3600
+    assert window.seconds > resolve_window("6h", "America/Denver", now).seconds
 
 
 def test_local_time_labels_use_am_pm():

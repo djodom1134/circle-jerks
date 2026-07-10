@@ -73,8 +73,16 @@ const WINDOWS: Array<{ code: WindowCode; label: string }> = [
   { code: "30m", label: "30 min" },
   { code: "1h", label: "1 hour" },
   { code: "6h", label: "6 hours" },
-  { code: "today", label: "Today" }
+  // Code stays "today" so saved preferences and shared ?window= links keep
+  // working; the window itself is a rolling 24h, so the label says so.
+  { code: "today", label: "24 hours" }
 ];
+
+// Prose and share cards read the human label, never the wire code — "today"
+// is a rolling 24h, so the code alone would misdescribe the window.
+function windowLabel(code: string): string {
+  return WINDOWS.find((item) => item.code === code)?.label ?? code;
+}
 
 function windowFromQuery(): WindowCode {
   const value = new URLSearchParams(window.location.search).get("window");
@@ -1291,7 +1299,7 @@ function localCombinedComplaint(
       .filter((value): value is string => Boolean(value && value !== "unknown"))
   ));
   const parts = [
-    `In the selected ${scanParams.window} window, I observed ${targets.length} aircraft near ${scanParams.airport_icao}: ${listLabel(callsigns.slice(0, 8))}.`
+    `In the selected ${windowLabel(scanParams.window)} window, I observed ${targets.length} aircraft near ${scanParams.airport_icao}: ${listLabel(callsigns.slice(0, 8))}.`
   ];
   if (messagePrefs.include_all_detail && Number.isFinite(first) && Number.isFinite(last)) {
     parts.push(`The relevant activity was observed from ${formatLocalTime(first)} to ${formatLocalTime(last)} local time.`);
@@ -1330,7 +1338,7 @@ function localSingleComplaint(
 ) {
   const callsign = target.callsign || target.icao24.toUpperCase();
   const parts = [
-    `In the selected ${scanParams.window} window, aircraft ${callsign} (${target.icao24}) was observed near ${scanParams.airport_icao}.`
+    `In the selected ${windowLabel(scanParams.window)} window, aircraft ${callsign} (${target.icao24}) was observed near ${scanParams.airport_icao}.`
   ];
   if (messagePrefs.include_all_detail && target.first_event_at && target.last_event_at) {
     parts.push(`The relevant activity was observed from ${formatLocalTime(target.first_event_at)} to ${formatLocalTime(target.last_event_at)} local time.`);
@@ -1471,7 +1479,7 @@ function defaultShareText(
   return [
     "Share on social media!",
     "",
-    `Circle Jerks tracked ${stats} near ${airportLabel} in the selected ${scanParams.window} window.`,
+    `Circle Jerks tracked ${stats} near ${airportLabel} in the selected ${windowLabel(scanParams.window)} window.`,
     "",
     complaintText,
     "",
@@ -1533,7 +1541,7 @@ async function makeShareImage(input: {
 
   ctx.fillStyle = "#6b7185";
   ctx.font = "800 20px Inter, Arial, sans-serif";
-  ctx.fillText(`${airportLabel} | ${input.scanParams.window}`, 66, 218);
+  ctx.fillText(`${airportLabel} | ${windowLabel(input.scanParams.window)}`, 66, 218);
 
   ctx.save();
   ctx.beginPath();
