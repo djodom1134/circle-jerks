@@ -69,3 +69,22 @@ def test_event_histogram_separates_same_hour_on_different_days():
     assert hist[0]["bucket"] != hist[1]["bucket"]
     # Chronological, and the day is disambiguated in the label.
     assert "07-08" in hist[0]["bucket"] and "07-09" in hist[1]["bucket"]
+
+
+def test_runway_breakdown_counts_only_touch_and_gos():
+    """The offenders row shows a T&G count with a per-runway breakdown beneath
+    it; the breakdown must sum to the T&G count, not silently fold in low
+    approaches (which made 4 T&G render as '5x11 1x29' = 6)."""
+    from app.scoring import offender_rows
+
+    events = [
+        {"type": "touch_and_go", "icao24": "aa", "callsign": "N", "timestamp": 100, "runway_id": "11"},
+        {"type": "touch_and_go", "icao24": "aa", "callsign": "N", "timestamp": 200, "runway_id": "11"},
+        {"type": "touch_and_go", "icao24": "aa", "callsign": "N", "timestamp": 300, "runway_id": "29"},
+        {"type": "low_approach", "icao24": "aa", "callsign": "N", "timestamp": 400, "runway_id": "11"},
+        {"type": "low_approach", "icao24": "aa", "callsign": "N", "timestamp": 500, "runway_id": "11"},
+    ]
+    row = offender_rows(events, _win(3600), "America/Denver")[0]
+    assert row["touch_and_gos"] == 3
+    assert row["runway_breakdown"] == {"11": 2, "29": 1}
+    assert sum(row["runway_breakdown"].values()) == row["touch_and_gos"]

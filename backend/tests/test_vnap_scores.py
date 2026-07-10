@@ -132,3 +132,30 @@ def test_pattern_work_gate_matches_deinflated_circle_counts():
     # An aircraft with a modest number of real laps AND runway pattern work is
     # judged (non-zero), not gated to 0.
     assert R.score_min_circles <= 6 and R.score_min_tg <= 1
+
+
+def test_score_gate_uses_lap_count_robust_to_tg_over_circles():
+    """A lap over the runway is both a circle and a T&G, so T&G should never
+    exceed circles. Historical episode T&G rows break that, leaving e.g. 2
+    circles + 4 T&G. The pattern-work gate must judge such an aircraft (4 laps
+    over the runway is clearly pattern work), not zero it on circles<3."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app import db, vnap
+
+    conn = db.connect(":memory:"); conn.executescript(db.SCHEMA); db.seed_db(conn); conn.commit()
+    # 3 AM Denver -> a quiet-hours (time-of-day) violation, so a judged aircraft
+    # scores > 0 and the test isolates the GATE from mere compliance.
+    base = int(datetime(2026, 5, 28, 3, 0, tzinfo=ZoneInfo("America/Denver")).timestamp())
+    for i in range(2):   # only 2 circles...
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": f"c{i}", "type": "circle", "icao24": "zz", "callsign": "N738BJ",
+            "timestamp": base + i, "airport_icao": "KLMO", "turn_direction": "left"}))
+    for i in range(4):   # ...but 4 touch-and-gos over the runway
+        db.upsert_operation(conn, db.operation_from_event({
+            "id": f"t{i}", "type": "touch_and_go", "icao24": "zz", "callsign": "N738BJ",
+            "timestamp": base + 10 + i, "airport_icao": "KLMO", "runway_id": "11"}))
+    conn.commit()
+    ac = next(a for a in vnap.compute_aircraft_compliance(conn, "KLMO", base - 5, base + 100)["aircraft"]
+              if a["icao24"] == "zz")
+    assert ac["vnap_score"] is not None and ac["vnap_score"] > 0.0, "pattern work must be judged, not gated"

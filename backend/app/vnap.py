@@ -270,10 +270,15 @@ def compute_aircraft_compliance(conn: sqlite3.Connection, icao: str,
         circles = sum(1 for r in ac_rows if r["type"] == "circle")
         tgs = sum(1 for r in ac_rows if r["type"] == "touch_and_go")
         devs = [r["dev"] for r in ac_rows if r["type"] == "circle" and r["dev"] is not None]
-        # VNAP stays 0 until the aircraft is doing real pattern work (>= 1 T&G AND
-        # >= score_min_circles laps); otherwise there isn't enough signal to judge it.
+        # VNAP stays 0 until the aircraft is doing real pattern work: >= 1 lap
+        # over the runway (T&G) AND >= score_min_circles laps total. A lap over
+        # the runway is both a circle and a T&G, so they should agree — but
+        # legacy episode-based T&G rows can leave T&G > circles, so gate on
+        # max(circles, tgs) rather than circles alone, or a clear offender (few
+        # circles, many T&G) would wrongly score 0.
+        lap_count = max(circles, tgs)
         vnap_score = composite_score(scores, rules)
-        if not (tgs >= rules.score_min_tg and circles >= rules.score_min_circles):
+        if not (tgs >= rules.score_min_tg and lap_count >= rules.score_min_circles):
             vnap_score = 0.0
         aircraft.append({
             "icao24": icao24,
