@@ -16,6 +16,11 @@ MIN_CIRCLE_DURATION_SECONDS = 120
 # ids at this granularity so multiple line-crossings / GPS jitter within one lap
 # collapse to a single row (via the stable event id + ON CONFLICT idempotency).
 CIRCLE_BUCKET_SECONDS = 120
+# Identity bucket for the closest-approach (runway-pass) anchor. Must be larger
+# than sample-to-sample jitter in which point is "closest" (~10-20s) yet smaller
+# than the minimum spacing between two pattern laps (~200s+), so re-detections of
+# one lap collapse while distinct laps stay distinct.
+CIRCLE_LAP_ANCHOR_SECONDS = 150
 MAX_CIRCLE_DURATION_SECONDS = 20 * 60
 # Require ~one full lap of cumulative heading change. 340° (not 360°) leaves
 # slack for ADS-B sampling that drops 1-2 small heading deltas mid-turn.
@@ -278,8 +283,17 @@ def _detect_circles_in_samples(
             distance_nm(Point(sample["lat"], sample["lon"]), airport_point)
             for sample in loop_samples
         ]
+        # Anchor the event id on the lap's closest approach to the field — the
+        # physical "pass over the runway". That point is a stable feature of the
+        # lap, so every re-detection across the sliding scan window resolves to
+        # the same id and collapses (via ON CONFLICT) to one row. The old anchor
+        # was the lap-END sample, which drifts as the window slides and smeared
+        # one lap across ~3 buckets (2.8x over-count on real KLMO pattern work).
+        closest_idx = min(range(len(loop_samples)), key=lambda i: radius_values[i])
+        pass_ts = int(loop_samples[closest_idx]["timestamp"])
         return {
-            "id": _event_id("circle", current["icao24"], airport.icao, int(timestamp // CIRCLE_BUCKET_SECONDS)),
+            "id": _event_id("circle", current["icao24"], airport.icao,
+                            round(pass_ts / CIRCLE_LAP_ANCHOR_SECONDS)),
             "type": "circle",
             "icao24": current["icao24"],
             "callsign": current.get("callsign") or current["icao24"].upper(),
@@ -467,19 +481,29 @@ def _runway_low_episodes(
         if agl is not None and agl <= 200 and runway_dist <= 1.5:
             low_by_bucket[int(sample["timestamp"] // 180)].append((sample, agl, runway, speed))
 
-    low_buckets = set(low_by_bucket.keys())
+    # Merge CONSECUTIVE low buckets into one episode. A single touchdown whose
+    # low samples straddle a 180 s boundary otherwise became two episodes (two
+    # rows ~10-30 s apart); merging the run and taking its overall lowest sample
+    # yields one event per physical runway contact without merging two genuinely
+    # separate touchdowns (those are always >= a full lap, i.e. many buckets,
+    # apart). The run's first bucket seeds the id so it is stable across scans.
     episodes = []
-    for bucket, low_samples in sorted(low_by_bucket.items()):
-        if not low_samples:
-            continue
-        lowest_sample, lowest_agl, runway, speed = min(low_samples, key=lambda row: row[1])
+    for bucket in sorted(low_by_bucket):
+        if (bucket - 1) in low_by_bucket:
+            continue  # continuation of the previous run — folded in below
+        run_samples: list[tuple[dict, float, dict | None, float | None]] = []
+        b = bucket
+        while b in low_by_bucket:
+            run_samples.extend(low_by_bucket[b])
+            b += 1
+        lowest_sample, lowest_agl, runway, speed = min(run_samples, key=lambda row: row[1])
         episodes.append({
             "bucket": bucket,
             "lowest_sample": lowest_sample,
             "lowest_agl": lowest_agl,
             "runway": runway,
             "speed": speed,
-            "is_first_low": (bucket - 1) not in low_buckets,
+            "is_first_low": True,
         })
     return recent, episodes
 
