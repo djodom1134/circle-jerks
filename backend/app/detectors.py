@@ -44,6 +44,13 @@ MAX_CIRCLE_ALTITUDE_FT_AGL = 2000
 RUNWAY_OVERLAP_NM = 0.25
 
 # --- Runway-contact / landing classification ---
+# Bucket a runway-contact event's id on this grid, anchored on the DEEPEST
+# sample of the touchdown. `_runway_low_episodes` groups low samples into these
+# same buckets, so the deepest sample's bucket is a stable physical feature of
+# one touchdown — unlike the merged low-run's FIRST bucket, which grows earlier
+# as the sliding window feeds in more of the descent, drifting the id and
+# smearing one touchdown across several rows.
+RUNWAY_CONTACT_ANCHOR_SECONDS = 180
 # Look this far past a touchdown to decide touch-and-go vs. landing. Widened
 # from the old 120s so touch-and-go and landing are exact complements over the
 # same 5-minute window.
@@ -548,7 +555,7 @@ def _runway_low_episodes(
         runway, runway_dist = _nearest_runway(sample, runways)
         speed = sample.get("velocity_kt")
         if agl is not None and agl <= 200 and runway_dist <= 1.5:
-            low_by_bucket[int(sample["timestamp"] // 180)].append((sample, agl, runway, speed))
+            low_by_bucket[int(sample["timestamp"] // RUNWAY_CONTACT_ANCHOR_SECONDS)].append((sample, agl, runway, speed))
 
     # Merge CONSECUTIVE low buckets into one episode. A single touchdown whose
     # low samples straddle a 180 s boundary otherwise became two episodes (two
@@ -614,7 +621,8 @@ def _build_runway_event(event_type: str, ep: dict, airport: Airport, runways: li
     used_runway = directional or ep["runway"]
     runway_heading = used_runway.get("heading_deg") if used_runway else None
     return {
-        "id": _event_id(event_type, lowest_sample["icao24"], airport.icao, ep["bucket"]),
+        "id": _event_id(event_type, lowest_sample["icao24"], airport.icao,
+                        int(lowest_sample["timestamp"]) // RUNWAY_CONTACT_ANCHOR_SECONDS),
         "type": event_type,
         "icao24": lowest_sample["icao24"],
         "callsign": lowest_sample.get("callsign") or lowest_sample["icao24"].upper(),

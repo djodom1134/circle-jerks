@@ -82,3 +82,25 @@ def test_one_circle_row_per_physical_lap(conn, track):
     # One row per real lap, allowing at most one straddle-boundary duplicate.
     assert passes <= circles <= passes + 1, f"circle over-count: {circles} rows for {passes} laps"
     assert tgs <= passes + 1, f"touch-and-go over-count: {tgs} rows for {passes} laps"
+
+
+def test_one_low_approach_row_per_physical_touchdown(conn, track):
+    """A low approach's id must anchor on the touchdown's deepest sample, not on
+    the merged low-run's FIRST bucket. The first bucket grows earlier as the
+    sliding window feeds in more of the descent, so a first-bucket id smears one
+    physical touchdown across several rows (measured 11 rows for 8 touchdowns)."""
+    airport = db.get_airport(conn, "KLMO")
+    runways = db.runways_for_airport(conn, "KLMO")
+    params = ScanParams(airport_icao="KLMO", user_lat=40.1672, user_lon=-105.0997, ring_nm=8.0)
+
+    _replay_scans(conn, track, airport, runways, params)
+
+    rows = conn.execute(
+        "SELECT icao24, timestamp FROM operations WHERE type='low_approach'"
+    ).fetchall()
+    keys = [(r["icao24"], r["timestamp"]) for r in rows]
+    # One deepest sample per touchdown -> one stable id -> one row. No two rows
+    # for one aircraft may share a timestamp.
+    assert len(keys) == len(set(keys)), (
+        f"low_approach over-count: {len(keys)} rows for {len(set(keys))} distinct touchdowns"
+    )
