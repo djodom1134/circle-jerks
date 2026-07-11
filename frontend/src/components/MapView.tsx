@@ -18,6 +18,7 @@ import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from "
 import { directionArrows, projectedPath } from "../lib/patternGeometry";
 import type { Airport, HistoricalTrack, Offender, RunwayPattern, ScanResponse, TrackSample } from "../lib/api";
 import { smoothSegment } from "../lib/spline";
+import { createRenderClock, fleetNewestTimestamp } from "../lib/renderClock";
 import type { LoopResult } from "../lib/patternLoops";
 
 // Aircraft climbing under full power are MUCH louder than the same aircraft
@@ -203,12 +204,17 @@ function clamp01(value: number): number {
   return value;
 }
 
-const AIRCRAFT_DISPLAY_DELAY_SECONDS = 15;
+// The map renders aircraft slightly in the PAST via an adaptive render clock
+// anchored to the freshest live sample — see lib/renderClock. This keeps planes
+// animating at whatever ADS-B ingest lag is present instead of freezing when a
+// fixed delay is exceeded. The extrapolation window below covers planes a little
+// staler than the freshest (dead-reckoning is kept short: these are pattern
+// aircraft that turn, so long straight-line extrapolation would mislead).
 // Only paint an aircraft marker if we have a sample inside this window. Older
 // tracks come from the ADS-B history / backfill and should NOT show a moving
 // icon — they're just past trails, not live aircraft.
 const LIVE_AIRCRAFT_FRESHNESS_SECONDS = 60;
-const AIRCRAFT_EXTRAPOLATE_SECONDS = 8;
+const AIRCRAFT_EXTRAPOLATE_SECONDS = 12;
 
 interface AircraftTrack {
   icao24: string;
@@ -636,6 +642,9 @@ export default function MapView({ airport, userLocation, scanData, windowLoading
   onEditChangeRef.current = onEditingPointsChange;
   const aircraftFeaturesRef = useRef<globalThis.Map<string, Feature<Point>>>(new globalThis.Map());
   const aircraftTracksRef = useRef<globalThis.Map<string, AircraftTrack>>(new globalThis.Map());
+  // Adaptive render clock shared by the marker-placement effect (feeds it fresh
+  // data) and the per-frame tick (reads displayTime). See lib/renderClock.
+  const renderClockRef = useRef(createRenderClock());
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const heatmapOffscreenRef = useRef<HTMLCanvasElement | null>(null);
   const historyCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1447,7 +1456,9 @@ export default function MapView({ airport, userLocation, scanData, windowLoading
       }
     }
 
-    const displayTime = Date.now() / 1000 - AIRCRAFT_DISPLAY_DELAY_SECONDS;
+    const nowSeconds = Date.now() / 1000;
+    renderClockRef.current.onData(fleetNewestTimestamp(aircraftTracks), nowSeconds);
+    const displayTime = renderClockRef.current.displayTime(nowSeconds);
     for (const track of aircraftTracks) {
       const current = positionAt(track.samples, displayTime);
       if (!current) continue;
@@ -1471,7 +1482,7 @@ export default function MapView({ airport, userLocation, scanData, windowLoading
   useEffect(() => {
     if (!mapReady) return;
     const tick = () => {
-      const displayTime = Date.now() / 1000 - AIRCRAFT_DISPLAY_DELAY_SECONDS;
+      const displayTime = renderClockRef.current.displayTime(Date.now() / 1000);
       for (const [icao24, feature] of aircraftFeaturesRef.current) {
         const track = aircraftTracksRef.current.get(icao24);
         if (!track) continue;
