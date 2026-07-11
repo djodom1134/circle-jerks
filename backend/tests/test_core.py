@@ -844,9 +844,11 @@ def test_deterministic_description_respects_message_preferences():
     )
     text = deterministic_description(context)
     assert "previously reported this same aircraft 2 complaints" in text
-    assert "circling 4 times" in text
-    assert "950 ft" not in text
+    assert "touch-and-go" in text
+    assert "circling" not in text
+    assert "circles" not in text
     assert "5673" not in text
+    assert "elevation" not in text.lower()
 
 
 def test_score_suppresses_bonuses_for_short_window():

@@ -168,76 +168,52 @@ def violates_guardrails(text: str) -> bool:
 
 
 def deterministic_description(context: ComplaintContext) -> str:
-    prefs = context.message_preferences
     parts = [
-        f"{context.time_window_label.capitalize()}, aircraft {context.callsign} ({context.icao24}) was observed near {context.airport_name} ({context.airport_icao}).",
+        f"{context.time_window_label.capitalize()}, aircraft {context.callsign} was observed conducting "
+        f"repetitive pattern work near {context.airport_name} ({context.airport_icao}).",
     ]
     if context.previous_report_count > 0:
         plural = "complaint" if context.previous_report_count == 1 else "complaints"
         parts.append(f"I have previously reported this same aircraft {context.previous_report_count} {plural}.")
-    if prefs.include_all_detail:
-        activity = []
-        if prefs.include_circles:
-            activity.append(f"{context.circles} circles")
-        activity.extend([
-            f"{context.touch_and_gos} touch-and-go operations",
-            f"{context.low_approaches} low approaches",
-            f"{context.passes} direct overflights of my location",
-        ])
-        parts.append(f"The activity included {', '.join(activity)}.")
-    elif prefs.include_circles:
-        parts.append(f"The aircraft was detected circling {context.circles} times.")
-    if prefs.include_elevation and context.airport_elevation_ft is not None:
-        parts.append(f"The reference airport field elevation is {context.airport_elevation_ft} ft MSL.")
-    if prefs.include_altitude_over_house and context.avg_altitude_user is not None:
-        parts.append(f"The average observed altitude over my location was {context.avg_altitude_user} ft AGL.")
-    elif prefs.include_altitude_over_house and context.min_altitude_user is not None:
-        parts.append(f"The lowest observed overflight altitude was {context.min_altitude_user} ft AGL.")
-    if prefs.include_db_at_home and context.peak_db_at_home is not None:
+    parts.append(
+        f"It performed {context.touch_and_gos} touch-and-go operations and made "
+        f"{context.passes} direct overflights of my location."
+    )
+    if context.min_altitude_user is not None:
+        parts.append(f"The lowest overflight of my home was about {context.min_altitude_user} ft above ground.")
+    elif context.avg_altitude_user is not None:
+        parts.append(f"The average overflight of my home was about {context.avg_altitude_user} ft above ground.")
+    if context.peak_db_at_home is not None:
         parts.append(
-            f"Based on the recorded altitudes and aircraft positions, the peak estimated noise at my home "
-            f"during this incident reached {context.peak_db_at_home:.1f} dB."
+            f"Based on the recorded altitudes and positions, the peak estimated noise at my home reached "
+            f"{context.peak_db_at_home:.1f} dB."
         )
-    if prefs.include_all_detail and context.observed_from != "unknown" and context.observed_to != "unknown":
-        parts.append(f"The relevant activity was observed from {context.observed_from} to {context.observed_to} local time.")
-    if prefs.include_all_detail and context.peak_hours != "none":
-        parts.append(f"Peak activity occurred around {context.peak_hours}.")
-    parts.append("Please review this activity and consider whether additional noise-abatement outreach is appropriate.")
+    if context.observed_from != "unknown" and context.observed_to != "unknown":
+        parts.append(f"The activity ran from {context.observed_from} to {context.observed_to} local time.")
+    parts.append("Please review this repetitive low-altitude activity and consider noise-abatement outreach.")
     return " ".join(parts)
 
 
 def deterministic_aggregate_description(context: AggregateComplaintContext) -> str:
-    prefs = context.message_preferences
     callsigns = ", ".join(context.callsigns[:8])
     parts = [
-        f"{context.time_window_label.capitalize()}, I observed {context.aircraft_count} aircraft near {context.airport_name} ({context.airport_icao}): {callsigns}.",
+        f"{context.time_window_label.capitalize()}, I observed {context.aircraft_count} aircraft conducting "
+        f"repetitive pattern work near {context.airport_name} ({context.airport_icao}): {callsigns}.",
     ]
     if context.previous_report_total > 0:
         plural = "complaint" if context.previous_report_total == 1 else "complaints"
         parts.append(f"My browser records show {context.previous_report_total} prior {plural} for aircraft in this group.")
-    if prefs.include_all_detail:
-        activity = []
-        if prefs.include_circles:
-            activity.append(f"{context.total_circles} total circles")
-        activity.extend([
-            f"{context.total_touch_and_gos} touch-and-go operations",
-            f"{context.total_low_approaches} low approaches",
-            f"{context.total_passes} direct overflights of my location",
-        ])
-        parts.append(f"The combined activity included {', '.join(activity)}.")
-    elif prefs.include_circles:
-        parts.append(f"Together, these aircraft were detected circling {context.total_circles} times.")
-    if prefs.include_elevation and context.airport_elevation_ft is not None:
-        parts.append(f"The reference airport field elevation is {context.airport_elevation_ft} ft MSL.")
-    if prefs.include_altitude_over_house and context.avg_altitude_user is not None:
-        parts.append(f"The average observed altitude over my location was {context.avg_altitude_user} ft AGL, with a lowest observed pass of {context.min_altitude_user} ft AGL.")
-    if prefs.include_db_at_home and context.peak_db_at_home is not None:
-        parts.append(
-            f"Across these aircraft the peak estimated noise at my home reached {context.peak_db_at_home:.1f} dB."
-        )
-    if prefs.include_all_detail and context.observed_from != "unknown" and context.observed_to != "unknown":
-        parts.append(f"The relevant activity was observed from {context.observed_from} to {context.observed_to} local time.")
-    parts.append("Please review this combined aircraft activity and consider appropriate noise-abatement follow-up.")
+    parts.append(
+        f"Together they made {context.total_touch_and_gos} touch-and-go operations and "
+        f"{context.total_passes} direct overflights of my location."
+    )
+    if context.min_altitude_user is not None:
+        parts.append(f"The lowest overflight of my home was about {context.min_altitude_user} ft above ground.")
+    if context.peak_db_at_home is not None:
+        parts.append(f"Across these aircraft the peak estimated noise at my home reached {context.peak_db_at_home:.1f} dB.")
+    if context.observed_from != "unknown" and context.observed_to != "unknown":
+        parts.append(f"The activity ran from {context.observed_from} to {context.observed_to} local time.")
+    parts.append("Please review this combined low-altitude activity and consider noise-abatement follow-up.")
     return " ".join(parts)
 
 
