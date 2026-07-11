@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sortAircraft, radarData, toCsv } from "./vnapDashboard";
+import { sortAircraft, radarData, toCsv, resolveHighlight } from "./vnapDashboard";
 import type { VnapAircraft } from "./api";
 
 function acOwner(icao24: string, owner_class: string): VnapAircraft {
@@ -92,5 +92,26 @@ describe("toCsv", () => {
     );
     // comma-containing tail is quoted; metrics values (not scores) render, no tightness column
     expect(row).toBe('"N1, Jr",C172,flight_school,inferred,42.5,3,10,4,1,0.5,8,12.5,8.3,-3,2.86,60,70,40');
+  });
+});
+
+describe("resolveHighlight", () => {
+  const rows = [
+    { icao24: "a23a01" },
+    { icao24: "acbc30" },
+  ] as unknown as import("./api").VnapAircraft[];
+
+  it("matches case-insensitively and returns the row's icao24", () => {
+    expect(resolveHighlight(rows, "A23A01")).toBe("a23a01");
+  });
+  it("returns null when no row matches", () => {
+    expect(resolveHighlight(rows, "ffffff")).toBeNull();
+  });
+  it("returns null for a null or empty param", () => {
+    expect(resolveHighlight(rows, null)).toBeNull();
+    expect(resolveHighlight(rows, "")).toBeNull();
+  });
+  it("returns null for empty rows", () => {
+    expect(resolveHighlight([], "a23a01")).toBeNull();
   });
 });

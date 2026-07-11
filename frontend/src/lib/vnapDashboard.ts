@@ -89,3 +89,13 @@ export function radarData(
     averageNull: averages[axis] == null,
   }));
 }
+
+export function resolveHighlight(
+  rows: VnapAircraft[],
+  param: string | null,
+): string | null {
+  if (!param) return null;
+  const target = param.toLowerCase();
+  const match = rows.find((a) => a.icao24.toLowerCase() === target);
+  return match ? match.icao24 : null;
+}
