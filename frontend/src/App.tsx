@@ -54,7 +54,7 @@ import {
 import { isWindowLoading } from "./lib/windows";
 import { averagePatternLoops, type LoopResult } from "./lib/patternLoops";
 import { formatLocalTime, numberOrDash, titleize } from "./lib/format";
-import { habitLabel } from "./lib/reportTargets";
+import { habitLabel, worstOffenderTargets } from "./lib/reportTargets";
 import {
   readPreferences,
   writePreferences,
@@ -1752,9 +1752,10 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
   const [shareOpen, setShareOpen] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const targets = useMemo(() => {
-    if (complaintMode === "all") return offenders;
+    if (complaintMode === "all") return worstOffenderTargets(offenders, 10);
     return offender ? [offender] : [];
   }, [complaintMode, offender, offenders]);
+  const truncatedFrom = complaintMode === "all" && offenders.length > targets.length ? offenders.length : 0;
   // Intentionally keyed on icao24 only (not live metrics) so polling refreshes
   // of scanData don't re-trigger Groq calls. Use the Regenerate button to
   // rebuild the draft against the latest observations.
@@ -1769,7 +1770,11 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
     }
     let cancelled = false;
     setComplaint(null);
-    setDetailStatus(complaintMode === "all" ? `Generating one complaint for ${targets.length} offenders` : "Generating description");
+    setDetailStatus(
+      complaintMode === "all"
+        ? `Generating one complaint for ${targets.length}${truncatedFrom ? ` of ${truncatedFrom}` : ""} offenders`
+        : "Generating description",
+    );
     const id = window.setTimeout(() => {
       if (complaintMode === "all") {
         complaintSummary(
@@ -1783,7 +1788,7 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
           .then((result) => {
             if (cancelled) return;
             setComplaint({ text: result.text, source: result.source });
-            setDetailStatus(`Generated one complaint for ${targets.length} offenders`);
+            setDetailStatus(`Generated one complaint for ${targets.length}${truncatedFrom ? ` of ${truncatedFrom}` : ""} offenders`);
           })
           .catch((error) => {
             if (cancelled) return;
@@ -1817,12 +1822,12 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
           });
           setDetailStatus(complaintErrorLabel(error));
         });
-    }, 300);
+    }, 600);
     return () => {
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [complaintMode, targetIdsKey, targetCountKey, refreshNonce, scanParams, sliders, messagePrefs]);
+  }, [complaintMode, targetIdsKey, targetCountKey, refreshNonce, scanParams, sliders, messagePrefs, systemPrompt]);
 
   function updateSlider(name: keyof ToneSliders, value: number) {
     onPreferencesChange((current) => ({
