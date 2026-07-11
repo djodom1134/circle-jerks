@@ -2033,7 +2033,9 @@ async def build_description(
         source = "cache"
         text = cached
     else:
-        prompt = build_prompt(context, sliders) + "\n" + rwy_note + "\n"
+        prompt = build_prompt(context, sliders)
+        if rwy_note:
+            prompt += "\n" + rwy_note + "\n"
         text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt)
         source = "groq"
         if not text:
@@ -2188,7 +2190,9 @@ async def build_summary_description(
         source = "cache"
         text = cached
     else:
-        prompt = build_aggregate_prompt(aggregate, sliders) + "\n" + rwy_note + "\n"
+        prompt = build_aggregate_prompt(aggregate, sliders)
+        if rwy_note:
+            prompt += "\n" + rwy_note + "\n"
         text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt)
         source = "groq"
         if not text:

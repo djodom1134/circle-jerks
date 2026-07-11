@@ -76,3 +76,16 @@ def test_build_aggregate_prompt_omits_forbidden_facts():
     assert "total_circles" not in text
     assert "5055" not in text
     assert "total_touch_and_go_count: 14" in text
+
+
+from app.llm import runway_change_note
+
+
+def test_runway_change_note_empty_when_no_changes():
+    assert runway_change_note([]) == ""
+
+
+def test_runway_change_note_present_when_unwarranted():
+    note = runway_change_note([{"to_runway_id": "11", "cowboy_callsign": "N9AB"}])
+    assert note.startswith("runway_changes_against_the_wind:")
+    assert "11" in note

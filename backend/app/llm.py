@@ -259,7 +259,7 @@ def runway_change_note(changes: list[dict]) -> str:
     """One-line prompt context about runway changes the wind did NOT favor
     (cowboy moves). `changes` are runway_changes rows (wind_favored_new=0), newest first."""
     if not changes:
-        return "runway_changes_against_the_wind: none recorded in this window"
+        return ""
     recent = changes[0]
     who = recent.get("cowboy_callsign") or recent.get("cowboy_icao24") or "an aircraft"
     to_rwy = recent.get("to_runway_id") or "?"
