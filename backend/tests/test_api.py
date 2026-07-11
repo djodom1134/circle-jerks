@@ -30,6 +30,27 @@ def test_healthz_and_airport_search(tmp_path, monkeypatch):
         assert bad_window.status_code == 422
 
 
+def test_health_metrics_endpoint_reports_loop_and_source_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        resp = client.get("/health/metrics")
+        assert resp.status_code == 200
+        body = resp.json()
+        # Shape the external monitor depends on.
+        assert set(body) >= {
+            "server_time", "healthy", "loops", "sources",
+            "sources_healthy_count", "sources_total", "live_update_latency_seconds",
+        }
+        assert set(body["loops"]) == {"ingest", "detect"}
+        # No worker running against this fresh store -> loops not alive.
+        assert body["loops"]["ingest"]["alive"] is False
+        assert body["healthy"] is False
+
+
 def test_positions_endpoint_is_cheap_and_scoped_to_known_airports(tmp_path, monkeypatch):
     monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
     monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")

@@ -32,6 +32,7 @@ from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
 from .geo import bbox_for_radius
 from .llm import MessagePreferences
+from .monitoring import build_health_metrics
 from .services import build_description, build_positions_response, build_scan_response, build_summary_description, build_worst_offenders
 from .settings import Settings, get_settings
 from .store import Store, make_store
@@ -320,6 +321,18 @@ async def healthz(settings: Annotated[Settings, Depends(settings_dep)]):
         "airports": airport_count,
         "complaint_forms": form_count,
     }
+
+
+@app.get("/health/metrics")
+async def health_metrics(
+    store: Annotated[Store, Depends(store_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Independent production monitor: data-source uptime, worker loop liveness
+    (ingest + detect heartbeats), and live-update latency. Cheap — a few cache
+    reads, no DB or detectors — so it can be polled frequently by an external
+    uptime monitor."""
+    return await build_health_metrics(store, settings)
 
 
 def _demo_aircraft_for_airport(airport_icao: str) -> list[dict]:

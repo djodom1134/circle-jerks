@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from . import db
@@ -164,28 +165,56 @@ async def _detect_tick(store, settings) -> None:
                 )
 
 
+async def _record_heartbeat(store, settings, name: str, *, ok: bool, started: float, error: str | None = None) -> None:
+    """Publish a loop liveness heartbeat to the store so an INDEPENDENT monitor
+    (the /health/metrics endpoint, a separate process) can tell whether this
+    loop is still ticking — a stale/absent heartbeat is itself the alarm — and
+    how long its last tick took. Never lets a monitoring write break the loop."""
+    payload = {
+        "ts": int(time.time()),
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "ok": ok,
+        "error": error,
+    }
+    # TTL comfortably exceeds a healthy cadence so a MISSING key means "the loop
+    # died", distinct from a present-but-stale one that reports its own age.
+    ttl = max(60, settings.detector_interval_seconds * 6, settings.live_poll_interval_seconds * 6)
+    try:
+        await store.set_cache(f"worker:heartbeat:{name}", payload, ttl)
+    except Exception:
+        logger.exception("failed to write %s heartbeat", name)
+
+
 async def _ingest_loop(store, settings, live_sources) -> None:
     while True:
+        started = time.monotonic()
         try:
             await _ingest_tick(store, settings, live_sources)
+            await _record_heartbeat(store, settings, "ingest", ok=True, started=started)
             await asyncio.sleep(effective_poll_interval_seconds(settings, live_sources))
         except LiveSourceRateLimited as exc:
+            await _record_heartbeat(store, settings, "ingest", ok=False, started=started, error=f"rate_limited:{exc.retry_after_seconds}s")
             logger.warning("live sources rate limited; backing off for %ss", exc.retry_after_seconds)
             await asyncio.sleep(exc.retry_after_seconds)
         except LiveSourceUnavailable as exc:
+            await _record_heartbeat(store, settings, "ingest", ok=False, started=started, error=str(exc)[:200])
             logger.warning("live sources unavailable: %s", exc)
             await asyncio.sleep(max(10, settings.live_poll_interval_seconds))
-        except Exception:
+        except Exception as exc:
+            await _record_heartbeat(store, settings, "ingest", ok=False, started=started, error=repr(exc)[:200])
             logger.exception("ingest tick failed")
             await asyncio.sleep(max(10, settings.live_poll_interval_seconds))
 
 
 async def _detect_loop(store, settings) -> None:
     while True:
+        started = time.monotonic()
         try:
             await _detect_tick(store, settings)
+            await _record_heartbeat(store, settings, "detect", ok=True, started=started)
             await asyncio.sleep(max(5, settings.detector_interval_seconds))
-        except Exception:
+        except Exception as exc:
+            await _record_heartbeat(store, settings, "detect", ok=False, started=started, error=repr(exc)[:200])
             logger.exception("detect tick failed")
             await asyncio.sleep(max(5, settings.detector_interval_seconds))
 
