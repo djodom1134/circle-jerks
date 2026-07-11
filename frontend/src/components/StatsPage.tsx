@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import { getAirportStats, type AirportStatsResponse, type StatsWindow } from "../lib/api";
+import { windowFromUrl } from "../lib/statsLinks";
 import OperationsTrends from "./OperationsTrends";
 import AircraftDashboard from "./AircraftDashboard";
 
@@ -13,7 +14,7 @@ function airportFromUrl(): string {
 
 export default function StatsPage() {
   const icao = airportFromUrl();
-  const [win, setWin] = useState<StatsWindow>("7d");
+  const [win, setWin] = useState<StatsWindow>(() => windowFromUrl(window.location.search));
   const [data, setData] = useState<AirportStatsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"aircraft" | "operations">("aircraft");
