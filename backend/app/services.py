@@ -14,6 +14,7 @@ import httpx
 
 from . import adsbdb, archive, db, deviation, flow, vnap, weather
 from .db import Airport
+from .registry.normalize import resolve_display_tail
 from .detectors import closest_over_user_rows, detect_events, detect_events_over_period, detect_landings_over_period, detect_takeoffs_over_period, event_counts, pass_geometry_key
 from .domain import ScanParams, hour_label, local_time_label, location_hash, monitor_hash
 from .geo import Point, bbox_for_radius, bbox_union, distance_nm, sq_degrees
@@ -1893,10 +1894,11 @@ def complaint_context(
     origin_info: dict | None = None,
 ) -> ComplaintContext:
     counts = event_counts(events)
-    callsign = next(
+    raw_callsign = next(
         (sample.get("callsign") for sample in reversed(track) if sample.get("callsign")),
-        next((event.get("callsign") for event in reversed(events) if event.get("callsign")), icao24.upper()),
+        next((event.get("callsign") for event in reversed(events) if event.get("callsign")), None),
     )
+    callsign = resolve_display_tail(raw_callsign, (aircraft or {}).get("registration"), icao24)
     alt_bands = [
         band for event in events
         if event["type"] == "circle"

@@ -377,3 +377,19 @@ def test_importer_parses_sample_zip(temp_db):
     assert by_n["N123AB"]["owner_type"] == "llc"
     assert by_n["N999XY"]["owner_type"] == "individual"
     assert by_n["N999XY"]["registration_expiration_date"] == "2028-06-30"
+
+
+from app.registry.normalize import resolve_display_tail
+
+
+def test_resolve_display_tail_prefers_n_number_callsign():
+    assert resolve_display_tail("N4632F", None, "a5a764") == "N4632F"
+
+
+def test_resolve_display_tail_drops_airline_callsign_uses_registration():
+    assert resolve_display_tail("UAL237", "N123AB", "abc123") == "N123AB"
+
+
+def test_resolve_display_tail_falls_back_to_hex_when_nothing_valid():
+    assert resolve_display_tail("UAL237", None, "abc123") == "ABC123"
+    assert resolve_display_tail(None, None, "abc123") == "ABC123"

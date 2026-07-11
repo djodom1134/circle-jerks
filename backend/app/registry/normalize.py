@@ -70,3 +70,13 @@ def extract_n_number_from_callsign(callsign: str | None) -> str | None:
     if not candidate.startswith("N"):
         return None
     return normalize_n_number(candidate)
+
+
+def resolve_display_tail(callsign: str | None, registration: str | None, icao24: str) -> str:
+    """The identifier to show in a complaint: an N-number when we have one,
+    else the uppercase ICAO hex. Never a raw airline/flight-ID callsign."""
+    return (
+        extract_n_number_from_callsign(callsign)
+        or normalize_n_number(registration)
+        or icao24.upper()
+    )
