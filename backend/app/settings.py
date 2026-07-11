@@ -47,6 +47,10 @@ class Settings(BaseSettings):
 
     live_source_priority: str = "adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky"
     live_poll_interval_seconds: int = 10
+    # Detection (4h event-detection pass per monitor) runs on its own slower
+    # cadence, decoupled from live position ingestion above — see
+    # worker._detect_loop. Heavy detector runs must never starve ingestion.
+    detector_interval_seconds: int = 30
     live_source_timeout_seconds: float = 12.0
     live_source_backoff_seconds: int = 60
     live_source_rate_limit_backoff_seconds: int = 300
