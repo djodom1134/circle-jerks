@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   Tooltip, Legend, ResponsiveContainer,
   type TooltipValueType, type TooltipPayloadEntry,
 } from "recharts";
 import { getVnapCompliance, setOwnerClass, type VnapComplianceResponse, type VnapAircraft, type StatsWindow } from "../lib/api";
-import { sortAircraft, radarData, toCsv, OWNER_LABELS, OWNER_OPTIONS } from "../lib/vnapDashboard";
+import { sortAircraft, radarData, toCsv, OWNER_LABELS, OWNER_OPTIONS, resolveHighlight } from "../lib/vnapDashboard";
 import { getVisitorId } from "../lib/visitor";
 
 const COLUMNS: { key: string; label: string; numeric: boolean }[] = [
@@ -33,6 +33,12 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
   const [sortKey, setSortKey] = useState("vnap_score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc"); // worst (highest VNAP violations) first
   const [selected, setSelected] = useState<string | null>(null);
+  const [pulseIcao, setPulseIcao] = useState<string | null>(null);
+  const deepLinkApplied = useRef(false);
+  const deepLinkParam = useMemo(
+    () => new URLSearchParams(window.location.search).get("aircraft"),
+    [],
+  );
 
   useEffect(() => {
     setData(null); setError(null); setSelected(null);
@@ -64,6 +70,23 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
     () => (data ? radarData(data.axes, selectedAc, data.averages) : []),
     [data, selectedAc],
   );
+
+  useEffect(() => {
+    if (deepLinkApplied.current || !data) return;
+    const target = resolveHighlight(sorted, deepLinkParam);
+    if (!target) return;
+    deepLinkApplied.current = true;
+    setSelected(target);
+    document
+      .getElementById(`vnap-row-${target}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setPulseIcao(target);
+    const t = window.setTimeout(
+      () => setPulseIcao((cur) => (cur === target ? null : cur)),
+      1200,
+    );
+    return () => window.clearTimeout(t);
+  }, [data, sorted, deepLinkParam]);
 
   if (error) return <div className="stats-error">{error}</div>;
   if (!data) return <div className="stats-loading">Loading aircraft…</div>;
@@ -125,7 +148,8 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
             <tbody>
               {sorted.map((a) => (
                 <tr key={a.icao24}
-                    className={`vnap-row${a.icao24 === selectedAc?.icao24 ? " selected" : ""}`}
+                    id={`vnap-row-${a.icao24}`}
+                    className={`vnap-row${a.icao24 === selectedAc?.icao24 ? " selected" : ""}${a.icao24 === pulseIcao ? " pulse" : ""}`}
                     onClick={() => setSelected(a.icao24)}>
                   <td>{a.tail}</td>
                   <td onClick={(e) => e.stopPropagation()}>

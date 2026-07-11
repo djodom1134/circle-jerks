@@ -3030,5 +3030,10 @@ input[type="range"] {
 .vnap-th { cursor: pointer; user-select: none; white-space: nowrap; }
 .vnap-row { cursor: pointer; }
 .vnap-row.selected { background: rgba(27, 58, 107, 0.12); }
+@keyframes vnap-row-pulse {
+  0%   { background: rgba(179, 35, 31, 0.35); }
+  100% { background: rgba(27, 58, 107, 0.12); }
+}
+.vnap-row.pulse { animation: vnap-row-pulse 1.2s ease-out; }
 .vnap-radar-title { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 6px; }
 .vnap-owner-select { font-size: 12px; padding: 2px 4px; }
