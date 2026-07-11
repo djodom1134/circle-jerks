@@ -2063,6 +2063,15 @@ async def build_description(
     }
 
 
+MAX_SUMMARY_AIRCRAFT = 10
+
+
+def cap_summary_aircraft(icao24s: list[str]) -> list[str]:
+    """Groq gets confused by too many aircraft; keep at most MAX_SUMMARY_AIRCRAFT.
+    The frontend sends them worst-first, so the kept ones are the worst offenders."""
+    return list(icao24s)[:MAX_SUMMARY_AIRCRAFT]
+
+
 async def build_summary_description(
     store: Store,
     settings: Settings,
@@ -2082,6 +2091,8 @@ async def build_summary_description(
     key = monitor_hash(p)
     await register_monitor(store, settings, p, airport)
     prefs = message_preferences or MessagePreferences()
+    requested_count = len(icao24s)
+    icao24s = cap_summary_aircraft(icao24s)
     counts_by_aircraft = {icao.lower(): max(0, int(count)) for icao, count in (report_counts or {}).items()}
     contexts: list[ComplaintContext] = []
     all_timestamps = []
@@ -2208,6 +2219,8 @@ async def build_summary_description(
             "airport": airport.icao,
             "window": window.model_dump(),
             "aircraft_count": aggregate.aircraft_count,
+            "requested_aircraft_count": requested_count,
+            "truncated": requested_count > MAX_SUMMARY_AIRCRAFT,
             "callsigns": aggregate.callsigns,
             "event_counts": {
                 "circles": aggregate.total_circles,

@@ -89,3 +89,11 @@ def test_runway_change_note_present_when_unwarranted():
     note = runway_change_note([{"to_runway_id": "11", "cowboy_callsign": "N9AB"}])
     assert note.startswith("runway_changes_against_the_wind:")
     assert "11" in note
+
+
+def test_cap_summary_aircraft_keeps_first_ten():
+    assert services.MAX_SUMMARY_AIRCRAFT == 10
+    ids = [f"h{i}" for i in range(25)]
+    assert services.cap_summary_aircraft(ids) == ids[:10]
+    assert services.cap_summary_aircraft(["a", "b"]) == ["a", "b"]
+    assert services.cap_summary_aircraft([]) == []
