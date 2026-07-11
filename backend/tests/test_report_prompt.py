@@ -21,8 +21,21 @@ from app.llm import (
     DEFAULT_SYSTEM_PROMPT,
     build_prompt,
     build_aggregate_prompt,
+    violates_guardrails,
 )
 from app.tone import ToneSliders
+
+
+def test_guardrail_allows_benign_trying_to_but_blocks_profanity():
+    # "trying to rest/sleep" is the resident's own benign phrasing about themselves,
+    # not an accusation about the pilot -- it must NOT nuke the whole complaint.
+    assert violates_guardrails("The noise wakes me when I am trying to sleep.") is False
+    assert violates_guardrails("I am trying to rest during the quiet morning hours.") is False
+    # genuine profanity / insults are still blocked
+    assert violates_guardrails("This pilot is an idiot.") is True
+    assert violates_guardrails("What an asshole move by the pilot.") is True
+    # intent-accusation guards remain
+    assert violates_guardrails("The pilot intentionally buzzed my house.") is True
 
 
 def _ctx(**over):

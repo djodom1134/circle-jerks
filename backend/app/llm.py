@@ -17,7 +17,6 @@ FORBIDDEN_PATTERNS = [
         r"\bjerk\b",
         r"\bmalicious\b",
         r"\bintentionally\b",
-        r"\btrying to\b",
         r"\basshole\b",
         r"\bfuck\b",
         r"\bshit\b",
