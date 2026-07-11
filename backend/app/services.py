@@ -1879,6 +1879,38 @@ def system_prompt_fingerprint(system_prompt: str | None) -> str:
     return hashlib.sha1((system_prompt or "default").encode("utf-8")).hexdigest()[:16]
 
 
+def rank_worst_offenders(aircraft: list[dict], meta: dict[str, dict], limit: int) -> list[dict]:
+    """Top-N offenders by VNAP violation score x circles, each with its worst axis.
+
+    Aircraft with a zero product (below the VNAP scoring gate, or no circles) drop out."""
+    ranked = []
+    for ac in aircraft:
+        vnap = ac.get("vnap_score") or 0.0
+        circles = ac.get("circles") or 0
+        product = vnap * circles
+        if product <= 0:
+            continue
+        scores = ac.get("scores") or {}
+        scored = [(axis, val) for axis, val in scores.items() if val is not None]
+        worst_axis, worst_val = max(scored, key=lambda kv: kv[1]) if scored else (None, None)
+        m = meta.get(ac["icao24"], {})
+        ranked.append({
+            "icao24": ac["icao24"],
+            "tail": resolve_display_tail(ac.get("callsign"), ac.get("registration"), ac["icao24"]),
+            "total_circles": circles,
+            "vnap_score": round(vnap, 1),
+            "product": round(product, 1),
+            "report_count": m.get("report_count", 0) or 0,
+            "last_reported_at": m.get("last_reported_at"),
+            "worst_axis": worst_axis,
+            "worst_axis_score": round(worst_val, 1) if worst_val is not None else None,
+            "aircraft_type": ac.get("aircraft_type"),
+            "owner_class": ac.get("owner_class"),
+        })
+    ranked.sort(key=lambda o: o["product"], reverse=True)
+    return ranked[: max(1, int(limit))]
+
+
 def complaint_context(
     settings: Settings,
     airport: Airport,
