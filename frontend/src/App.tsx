@@ -61,6 +61,7 @@ import {
   type StoredPreferences
 } from "./lib/preferences";
 import { getVisitorId } from "./lib/visitor";
+import { statsHighlightHref } from "./lib/statsLinks";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
 const APP_TITLE = "Automated Noise Complaint Generator";
@@ -779,13 +780,6 @@ export default function App() {
       <RepeatOffendersSection
         offenders={repeatOffenders}
         airportIcao={airport?.icao}
-        onSelect={(icao24) => {
-          const match = scanData?.offenders.find((row) => row.icao24 === icao24);
-          if (match) {
-            setSelected(match);
-            document.getElementById("complaint-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
-          }
-        }}
       />
 
       <MovementSection
@@ -804,11 +798,9 @@ export default function App() {
 function RepeatOffendersSection({
   offenders,
   airportIcao,
-  onSelect,
 }: {
   offenders: RepeatOffender[];
   airportIcao?: string;
-  onSelect: (icao24: string) => void;
 }) {
   if (offenders.length === 0) {
     return (
@@ -837,10 +829,10 @@ function RepeatOffendersSection({
           const origin = row.origin_label || row.origin_airport_icao;
           return (
             <li key={row.icao24}>
-              <button
+              <a
                 className="offender-card"
-                onClick={() => onSelect(row.icao24)}
-                title="Open complaint panel for this aircraft (if currently active)"
+                href={statsHighlightHref(airportIcao, row.icao24)}
+                title="Open this aircraft in the airport stats (VNAP compliance)"
               >
                 <div className="offender-rank" aria-hidden="true">#{index + 1}</div>
                 <div className="offender-body">
@@ -866,7 +858,7 @@ function RepeatOffendersSection({
                     last reported {formatLocalTime(row.last_reported_at)}
                   </div>
                 </div>
-              </button>
+              </a>
             </li>
           );
         })}

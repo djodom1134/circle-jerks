@@ -1711,6 +1711,8 @@ input[type="range"] {
   align-items: start;
   gap: 10px;
   transition: border-color 120ms, transform 120ms, box-shadow 120ms;
+  text-decoration: none;
+  color: inherit;
 }
 .repeat-offenders .offender-card:hover {
   border-color: #d64b2c;
