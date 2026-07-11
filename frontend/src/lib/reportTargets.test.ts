@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { worstOffenderTargets, habitLabel } from "./reportTargets";
+import { worstOffenderTargets, habitLabel, displayTail } from "./reportTargets";
 
 describe("worstOffenderTargets", () => {
   it("keeps the worst N by vnap_score * circles", () => {
@@ -25,5 +25,28 @@ describe("habitLabel", () => {
     expect(habitLabel("timeofday")).toMatch(/quiet/i);
     expect(habitLabel(null)).toBe("Repeat pattern flyer");
     expect(habitLabel("unknown_axis")).toBe("Repeat pattern flyer");
+  });
+});
+
+describe("displayTail", () => {
+  it("returns the N-number as-is when the callsign is a valid N-number", () => {
+    expect(displayTail("N4632F", "a5a764")).toBe("N4632F");
+    expect(displayTail("n123ab", "a5a764")).toBe("N123AB");
+    expect(displayTail("  N42AB  ", "a5a764")).toBe("N42AB");
+  });
+
+  it("falls back to the uppercased hex for airline-style callsigns", () => {
+    expect(displayTail("UAL237", "a5a764")).toBe("A5A764");
+    expect(displayTail("AAL100", "abc123")).toBe("ABC123");
+  });
+
+  it("falls back to the uppercased hex for empty or undefined callsigns", () => {
+    expect(displayTail("", "abc123")).toBe("ABC123");
+    expect(displayTail(undefined, "abc123")).toBe("ABC123");
+    expect(displayTail(null, "abc123")).toBe("ABC123");
+  });
+
+  it("never returns a raw hex suffix in parentheses", () => {
+    expect(displayTail("UAL237", "abc123")).not.toMatch(/\(/);
   });
 });

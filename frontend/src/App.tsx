@@ -53,7 +53,7 @@ import {
 import { isWindowLoading } from "./lib/windows";
 import { averagePatternLoops, type LoopResult } from "./lib/patternLoops";
 import { formatLocalTime, numberOrDash, titleize } from "./lib/format";
-import { habitLabel, worstOffenderTargets } from "./lib/reportTargets";
+import { displayTail, habitLabel, worstOffenderTargets } from "./lib/reportTargets";
 import {
   readPreferences,
   writePreferences,
@@ -1246,17 +1246,12 @@ function localCombinedComplaint(
   messagePrefs: MessagePreferences,
   reportCounts: Record<string, number>
 ) {
-  const callsigns = targets.map((target) => target.callsign || target.icao24.toUpperCase());
+  const callsigns = targets.map((target) => displayTail(target.callsign, target.icao24));
   const first = Math.min(...targets.map((target) => target.first_event_at).filter(Boolean));
   const last = Math.max(...targets.map((target) => target.last_event_at).filter(Boolean));
-  const totalCircles = targets.reduce((sum, target) => sum + target.circles, 0);
   const totalTouchAndGos = targets.reduce((sum, target) => sum + target.touch_and_gos, 0);
-  const totalLowApproaches = targets.reduce((sum, target) => sum + target.low_approaches, 0);
   const totalPasses = targets.reduce((sum, target) => sum + target.passes, 0);
   const previousReports = targets.reduce((sum, target) => sum + (reportCounts[target.icao24] ?? 0), 0);
-  const avgAltitudes = targets
-    .map((target) => target.avg_altitude_over_user_ft_agl)
-    .filter((value): value is number => value != null);
   const minAltitudes = targets
     .map((target) => target.min_altitude_over_user_ft_agl)
     .filter((value): value is number => value != null);
@@ -1278,20 +1273,11 @@ function localCombinedComplaint(
     const plural = previousReports === 1 ? "prior complaint" : "prior complaints";
     parts.push(`My browser records show ${previousReports} ${plural} for aircraft in this group.`);
   }
-  if (messagePrefs.include_all_detail) {
-    const activity = [];
-    if (messagePrefs.include_circles) activity.push(`${totalCircles} total circles`);
-    activity.push(`${totalTouchAndGos} touch-and-go operations`);
-    activity.push(`${totalLowApproaches} low approaches`);
-    activity.push(`${totalPasses} direct overflights of my location`);
-    parts.push(`The combined activity included ${activity.join(", ")}.`);
-  } else if (messagePrefs.include_circles) {
-    parts.push(`Together, these aircraft were detected circling ${totalCircles} times.`);
-  }
-  if (messagePrefs.include_altitude_over_house && avgAltitudes.length > 0) {
-    const avg = Math.round(avgAltitudes.reduce((sum, value) => sum + value, 0) / avgAltitudes.length);
-    const lowest = minAltitudes.length > 0 ? `, with the lowest observed pass at ${Math.min(...minAltitudes)} ft AGL` : "";
-    parts.push(`The average observed altitude over my location was ${avg} ft AGL${lowest}.`);
+  parts.push(
+    `Together they made ${totalTouchAndGos} touch-and-go operations and ${totalPasses} direct overflights of my location.`
+  );
+  if (minAltitudes.length > 0) {
+    parts.push(`The lowest overflight of my home was about ${Math.min(...minAltitudes)} ft above ground.`);
   }
   parts.push("Please review this combined aircraft activity and consider appropriate noise-abatement follow-up.");
   return parts.join(" ");
@@ -1303,9 +1289,9 @@ function localSingleComplaint(
   messagePrefs: MessagePreferences,
   reportCount: number
 ) {
-  const callsign = target.callsign || target.icao24.toUpperCase();
+  const callsign = displayTail(target.callsign, target.icao24);
   const parts = [
-    `In the selected ${windowLabel(scanParams.window)} window, aircraft ${callsign} (${target.icao24}) was observed near ${scanParams.airport_icao}.`
+    `In the selected ${windowLabel(scanParams.window)} window, aircraft ${callsign} was observed near ${scanParams.airport_icao}.`
   ];
   if (messagePrefs.include_all_detail && target.first_event_at && target.last_event_at) {
     parts.push(`The relevant activity was observed from ${formatLocalTime(target.first_event_at)} to ${formatLocalTime(target.last_event_at)} local time.`);
@@ -1317,21 +1303,13 @@ function localSingleComplaint(
     const plural = reportCount === 1 ? "prior complaint" : "prior complaints";
     parts.push(`My browser records show ${reportCount} ${plural} for this aircraft.`);
   }
-  if (messagePrefs.include_all_detail) {
-    const activity = [];
-    if (messagePrefs.include_circles) activity.push(`${target.circles} circles`);
-    activity.push(`${target.touch_and_gos} touch-and-go operations`);
-    activity.push(`${target.low_approaches} low approaches`);
-    activity.push(`${target.passes} direct overflights of my location`);
-    parts.push(`The activity included ${activity.join(", ")}.`);
-  } else if (messagePrefs.include_circles) {
-    parts.push(`The aircraft was detected circling ${target.circles} times.`);
-  }
-  if (messagePrefs.include_altitude_over_house && target.avg_altitude_over_user_ft_agl != null) {
-    const lowest = target.min_altitude_over_user_ft_agl != null
-      ? `, with the lowest observed pass at ${target.min_altitude_over_user_ft_agl} ft AGL`
-      : "";
-    parts.push(`The average observed altitude over my location was ${target.avg_altitude_over_user_ft_agl} ft AGL${lowest}.`);
+  parts.push(
+    `It performed ${target.touch_and_gos} touch-and-go operations and made ${target.passes} direct overflights of my location.`
+  );
+  if (target.min_altitude_over_user_ft_agl != null) {
+    parts.push(`The lowest overflight of my home was about ${target.min_altitude_over_user_ft_agl} ft above ground.`);
+  } else if (target.avg_altitude_over_user_ft_agl != null) {
+    parts.push(`The average overflight of my home was about ${target.avg_altitude_over_user_ft_agl} ft above ground.`);
   }
   parts.push("Please review this activity and consider appropriate noise-abatement follow-up.");
   return parts.join(" ");
