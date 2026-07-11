@@ -1779,6 +1779,24 @@ input[type="range"] {
   margin-top: 2px;
 }
 
+.offender-clown {
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.offender-habit {
+  margin-top: 4px;
+  font-weight: 600;
+  color: var(--red-dark);
+}
+
+.worst-offenders-fallback {
+  display: block;
+  margin-top: 4px;
+  font-style: italic;
+  color: var(--muted);
+}
+
 /* --- Sponsors --- */
 .sponsors header a {
   color: #d64b2c;

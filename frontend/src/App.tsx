@@ -25,9 +25,9 @@ import {
   getAirportRunways,
   getConfig,
   getLiveStatus,
-  getRepeatOffenders,
   getSponsors,
   getTrackHistory,
+  getWorstOffenders,
   nearestAirport,
   recordHeartbeat,
   recordSubmission,
@@ -41,7 +41,6 @@ import {
   type MessagePreferences,
   type Offender,
   type PatternPoint,
-  type RepeatOffender,
   type RunwayInfo,
   type RunwayPattern,
   type ScanParams,
@@ -49,11 +48,13 @@ import {
   type SponsorsResponse,
   type ToneSliders,
   type TrackHistoryResponse,
-  type WindowCode
+  type WindowCode,
+  type WorstOffendersResponse
 } from "./lib/api";
 import { isWindowLoading } from "./lib/windows";
 import { averagePatternLoops, type LoopResult } from "./lib/patternLoops";
 import { formatLocalTime, numberOrDash, titleize } from "./lib/format";
+import { habitLabel } from "./lib/reportTargets";
 import {
   readPreferences,
   writePreferences,
@@ -132,7 +133,7 @@ export default function App() {
   const showHeatmap = mapOverlay === "noise";
   const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
-  const [repeatOffenders, setRepeatOffenders] = useState<RepeatOffender[]>([]);
+  const [worstOffenders, setWorstOffenders] = useState<WorstOffendersResponse | null>(null);
   const [liveStatus, setLiveStatus] = useState<LiveStatusResponse | null>(null);
   const [sosaUrl, setSosaUrl] = useState<string>("https://www.saveourskiesalliance.org/");
   const [patternEditing, setPatternEditing] = useState(false);
@@ -210,10 +211,9 @@ export default function App() {
     let cancelled = false;
     async function refresh() {
       try {
-        const [s, r, ls] = await Promise.all([getSponsors(), getRepeatOffenders(10), getLiveStatus()]);
+        const [s, ls] = await Promise.all([getSponsors(), getLiveStatus()]);
         if (cancelled) return;
         setSponsors(s);
-        setRepeatOffenders(r.aircraft);
         setLiveStatus(ls);
       } catch {
         // silent: these are decorative sections
@@ -423,6 +423,18 @@ export default function App() {
     const id = window.setInterval(sendHeartbeat, 30000);
     return () => window.clearInterval(id);
   }, [scanParams]);
+
+  useEffect(() => {
+    if (!airport?.icao) {
+      setWorstOffenders(null);
+      return;
+    }
+    let cancelled = false;
+    getWorstOffenders(airport.icao, 5)
+      .then((data) => { if (!cancelled) setWorstOffenders(data); })
+      .catch(() => { if (!cancelled) setWorstOffenders(null); });
+    return () => { cancelled = true; };
+  }, [airport?.icao]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -777,10 +789,7 @@ export default function App() {
         onPreferencesChange={setPreferences}
       />
 
-      <RepeatOffendersSection
-        offenders={repeatOffenders}
-        airportIcao={airport?.icao}
-      />
+      <WorstOffenderCards data={worstOffenders} />
 
       <MovementSection
         supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL}
@@ -795,73 +804,55 @@ export default function App() {
   );
 }
 
-function RepeatOffendersSection({
-  offenders,
-  airportIcao,
-}: {
-  offenders: RepeatOffender[];
-  airportIcao?: string;
-}) {
-  if (offenders.length === 0) {
+function WorstOffenderCards({ data }: { data: WorstOffendersResponse | null }) {
+  if (!data || data.offenders.length === 0) {
     return (
       <section className="bottom-section repeat-offenders empty">
-        <h2>Worst offenders</h2>
-        <p>
-          No aircraft has been reported more than once {airportIcao ? `near ${airportIcao}` : "yet"}. As complaints
-          come in, the worst offenders will show up here, ranked by total circles flown.
-        </p>
+        <h2>Hall of Shame</h2>
+        <p>No aircraft has flown enough abusive patterns here yet. As offenders rack up circles, the worst five show up here.</p>
       </section>
     );
   }
   return (
     <section className="bottom-section repeat-offenders">
       <header>
-        <h2>Worst offenders</h2>
-        <p>Ranked by total circles flown — the biggest jerks in the area.</p>
+        <h2>Hall of Shame</h2>
+        <p>
+          The five worst offenders{data.is_fallback ? "" : " at this airport"}, ranked by VNAP violations × circles flown.
+          {data.is_fallback && (
+            <span className="worst-offenders-fallback"> No data here yet — showing the nearest airport, {data.resolved_label} ({data.resolved_icao}).</span>
+          )}
+        </p>
       </header>
       <ol className="offender-leaderboard">
-        {offenders.map((row, index) => {
-          const label =
-            row.registration || row.callsign?.trim() || row.icao24.toUpperCase();
-          const subtitle = [row.type_description || row.type_icao, row.operator]
-            .filter(Boolean)
-            .join(" · ");
-          const origin = row.origin_label || row.origin_airport_icao;
-          return (
-            <li key={row.icao24}>
-              <a
-                className="offender-card"
-                href={statsHighlightHref(airportIcao, row.icao24)}
-                title="Open this aircraft in the airport stats (VNAP compliance)"
-              >
-                <div className="offender-rank" aria-hidden="true">#{index + 1}</div>
-                <div className="offender-body">
-                  <div className="offender-card-head">
-                    <strong>{label}</strong>
-                    <span className="offender-circles" title="Total circles flown — the biggest jerk signal">
-                      {row.total_circles}× circles
-                    </span>
-                  </div>
-                  {subtitle && <div className="offender-subtitle">{subtitle}</div>}
-                  {origin && (
-                    <div className="offender-origin">
-                      Based at <strong>{origin}</strong>
-                    </div>
-                  )}
-                  <div className="offender-stats">
-                    <span title="Low approaches">{row.total_low_approaches} low</span>
-                    <span title="Passes over reporters' houses">{row.total_passes_over_user} over homes</span>
-                    <span title="Touch-and-gos">{row.total_touch_and_gos} t&amp;g</span>
-                    <span title="Times reported by neighbors">{row.report_count}× reported</span>
-                  </div>
-                  <div className="offender-meta">
-                    last reported {formatLocalTime(row.last_reported_at)}
-                  </div>
+        {data.offenders.map((row, index) => (
+          <li key={row.icao24}>
+            <a
+              className="offender-card"
+              href={statsHighlightHref(data.resolved_icao, row.icao24)}
+              title="Open this aircraft in the airport stats (VNAP compliance)"
+            >
+              <div className="offender-rank" aria-hidden="true">
+                {index === 0 ? <span className="offender-clown">🤡</span> : `#${index + 1}`}
+              </div>
+              <div className="offender-body">
+                <div className="offender-card-head">
+                  <strong>{row.tail}</strong>
+                  <span className="offender-circles" title="Total circles flown at this airport">
+                    {row.total_circles}× circles
+                  </span>
                 </div>
-              </a>
-            </li>
-          );
-        })}
+                <div className="offender-habit" title={`Worst VNAP axis: ${row.worst_axis ?? "n/a"} (${row.worst_axis_score ?? 0})`}>
+                  {habitLabel(row.worst_axis)}
+                </div>
+                <div className="offender-meta">
+                  {row.report_count}× reported
+                  {row.last_reported_at ? ` · last reported ${formatLocalTime(row.last_reported_at)}` : ""}
+                </div>
+              </div>
+            </a>
+          </li>
+        ))}
       </ol>
     </section>
   );
