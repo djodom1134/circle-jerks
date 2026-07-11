@@ -402,24 +402,87 @@ def _runway_segments(runways: list[dict]) -> list[tuple[str, Point, Point, float
     return segments
 
 
+def _course_at_index(samples: list[dict], idx: int) -> float | None:
+    """Aircraft direction of travel at samples[idx]: prefer the reported
+    heading, else the bearing between the nearest neighbouring samples."""
+    reported = samples[idx].get("heading_deg")
+    if reported is not None:
+        try:
+            return float(reported) % 360
+        except (TypeError, ValueError):
+            pass
+    prev_i = idx - 1
+    while prev_i >= 0 and (samples[prev_i].get("lat") is None or samples[prev_i].get("lon") is None):
+        prev_i -= 1
+    if prev_i >= 0:
+        a = Point(samples[prev_i]["lat"], samples[prev_i]["lon"])
+        b = Point(samples[idx]["lat"], samples[idx]["lon"])
+        if (a.lat, a.lon) != (b.lat, b.lon):
+            return bearing_deg(a, b)
+    next_i = idx + 1
+    while next_i < len(samples) and (samples[next_i].get("lat") is None or samples[next_i].get("lon") is None):
+        next_i += 1
+    if next_i < len(samples):
+        a = Point(samples[idx]["lat"], samples[idx]["lon"])
+        b = Point(samples[next_i]["lat"], samples[next_i]["lon"])
+        if (a.lat, a.lon) != (b.lat, b.lon):
+            return bearing_deg(a, b)
+    return None
+
+
 def _loop_over_runway(loop_samples: list[dict], runways: list[dict]) -> tuple[str, float | None] | None:
     """The (runway_id, heading) whose segment the loop passes over, or None.
 
     A loop flies "over the runway" when any of its samples come within
-    RUNWAY_OVERLAP_NM of the runway segment.
+    RUNWAY_OVERLAP_NM of the runway segment. A physical runway is stored as two
+    reciprocal rows (e.g. "11"/"29") whose segments coincide along the same
+    centreline, so nearest-segment distance alone can't tell the two ends apart
+    — it picks between them almost at random, which showed up as a MIX of
+    runway 11/29 T&G labels for laps that were all flown to the same end.
+    Resolve the end from the aircraft's DIRECTION of travel across the runway so
+    "over runway 29" reflects the way the aircraft actually flew.
     """
     if not runways:
         return None
     segments = _runway_segments(runways)
-    best: tuple[str, float | None] | None = None
     best_d = RUNWAY_OVERLAP_NM
-    for sample in loop_samples:
+    pass_idx: int | None = None
+    for i, sample in enumerate(loop_samples):
+        if sample.get("lat") is None or sample.get("lon") is None:
+            continue
         point = Point(sample["lat"], sample["lon"])
-        for rid, a, b, hdg in segments:
+        for _rid, a, b, _hdg in segments:
             d = closest_segment_approach_nm(a, b, point)[0]
             if d < best_d:
-                best_d, best = d, (rid, hdg)
-    return best
+                best_d, pass_idx = d, i
+    if pass_idx is None:
+        return None
+    # Candidate rows: every runway whose segment this pass point overlaps —
+    # i.e. both reciprocal ends of the strip that was flown over.
+    pass_point = Point(loop_samples[pass_idx]["lat"], loop_samples[pass_idx]["lon"])
+    overlap_limit = max(best_d, RUNWAY_OVERLAP_NM)
+    candidates = [
+        (rid, hdg)
+        for rid, a, b, hdg in segments
+        if closest_segment_approach_nm(a, b, pass_point)[0] <= overlap_limit
+    ]
+    if not candidates:
+        return None
+    course = _course_at_index(loop_samples, pass_idx)
+    directional = [(rid, hdg) for rid, hdg in candidates if hdg is not None]
+    if course is not None and directional:
+        rid, hdg = min(
+            directional,
+            key=lambda c: abs(heading_delta_deg(course, float(c[1]))),
+        )
+        return (rid, hdg)
+    # Direction unknown (no heading, single-point pass): fall back to the
+    # nearest segment so behaviour matches the pre-directional detector.
+    nearest = min(
+        segments,
+        key=lambda seg: closest_segment_approach_nm(seg[1], seg[2], pass_point)[0],
+    )
+    return (nearest[0], nearest[3])
 
 
 def touch_and_gos_from_circles(circles: list[dict]) -> list[dict]:

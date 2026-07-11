@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Route, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Route, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import StatsPage from "./components/StatsPage";
@@ -514,7 +514,6 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
-          <BackfillStatusIcon backfill={scanData?.historical_backfill} />
           <span
             className="count-badge"
             data-tooltip="Aircraft flying repetitive patterns near this airport right now"
@@ -1035,62 +1034,6 @@ function SponsorsSection({
         </>
       )}
     </section>
-  );
-}
-
-function backfillStatus(backfill?: ScanResponse["historical_backfill"]) {
-  if (!backfill) return null;
-  const retryMinutes = backfill.retry_after_seconds ? Math.ceil(backfill.retry_after_seconds / 60) : null;
-  if (backfill.enabled === false) {
-    return {
-      tone: "info",
-      icon: History,
-      message: backfill.reason ?? "Historical coverage is built from live polling for this airport."
-    };
-  }
-  if (backfill.available === false) {
-    return {
-      tone: "error",
-      icon: CloudOff,
-      message: backfill.reason ?? "Historical coverage is unavailable."
-    };
-  }
-  if (backfill.backing_off) {
-    return {
-      tone: "warning",
-      icon: AlertTriangle,
-      message: `OpenSky historical backfill is backing off after rate limiting${retryMinutes ? `; retry in about ${retryMinutes} min.` : "."}`
-    };
-  }
-  if (backfill.complete_for_requested_window) {
-    return {
-      tone: "ok",
-      icon: CheckCircle2,
-      message: "Historical coverage is complete for this window."
-    };
-  }
-  return {
-    tone: "pending",
-    icon: Clock3,
-    message: `Historical coverage is still filling at ${backfill.resolution_seconds ?? "?"}s resolution.`
-  };
-}
-
-function BackfillStatusIcon({ backfill }: { backfill?: ScanResponse["historical_backfill"] }) {
-  const status = backfillStatus(backfill);
-  if (!status) return null;
-  const Icon = status.icon;
-  return (
-    <span
-      className={`status-icon ${status.tone}`}
-      title={status.message}
-      data-tooltip={status.message}
-      role="status"
-      tabIndex={0}
-      aria-label={status.message}
-    >
-      <Icon size={18} aria-hidden="true" />
-    </span>
   );
 }
 

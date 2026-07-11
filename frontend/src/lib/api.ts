@@ -324,10 +324,14 @@ async function putJson<T>(path: string, body: unknown, timeoutMs?: number): Prom
   return response.json() as Promise<T>;
 }
 
-// Complaint generation has a tight timeout — if Groq doesn't answer fast,
-// the caller falls back to the deterministic browser-side draft instead of
-// leaving the user staring at a spinner.
-const COMPLAINT_TIMEOUT_MS = 5000;
+// Complaint generation legitimately takes several seconds: the "report all"
+// summary path resolves each aircraft's origin (a chain of sequential HTTP
+// lookups) for up to ten offenders and then makes a Groq call. The old 5s
+// budget aborted that mid-flight on nearly every real report, so users always
+// saw the "Server unreachable" browser draft even though the server was fine
+// and about to answer. Give it room; a genuine outage still trips the fallback,
+// just at a realistic threshold.
+const COMPLAINT_TIMEOUT_MS = 30000;
 
 async function adminJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, {
