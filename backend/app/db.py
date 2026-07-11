@@ -1078,6 +1078,32 @@ def nearest_airport(conn: sqlite3.Connection, lat: float, lon: float) -> dict | 
     return None
 
 
+def nearest_airport_excluding(conn: sqlite3.Connection, lat: float, lon: float, exclude_icao: str) -> dict | None:
+    """Nearest seeded airport to (lat, lon) that is NOT `exclude_icao`.
+
+    Same coarse bbox prefilter as nearest_airport(); used for the worst-offenders
+    fallback where the source airport has no scored aircraft."""
+    exclude = exclude_icao.upper()
+    point = Point(lat, lon)
+    for box_deg in (0.6, 2.0, 8.0, 180.0):
+        rows = conn.execute(
+            """
+            SELECT * FROM airports
+            WHERE lat BETWEEN ? AND ?
+              AND lon BETWEEN ? AND ?
+              AND icao != ?
+            """,
+            (lat - box_deg, lat + box_deg, lon - box_deg, lon + box_deg, exclude),
+        ).fetchall()
+        if rows:
+            candidates = [row_to_airport(row) for row in rows]
+            nearest = min(candidates, key=lambda a: distance_nm(point, Point(a.lat, a.lon)))
+            data = airport_to_dict(nearest)
+            data["distance_nm"] = round(distance_nm(point, Point(nearest.lat, nearest.lon)), 2)
+            return data
+    return None
+
+
 def search_airports(conn: sqlite3.Connection, q: str, limit: int = 10) -> list[dict]:
     like = f"%{q.strip()}%"
     rows = conn.execute(
