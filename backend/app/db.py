@@ -1566,6 +1566,22 @@ def top_repeat_offenders(conn: sqlite3.Connection, *, min_reports: int, limit: i
     return [dict(row) for row in rows]
 
 
+def report_meta(conn: sqlite3.Connection, icao24s: list[str]) -> dict[str, dict]:
+    """Lifetime report_count + last_reported_at for each icao24 (lowercased)."""
+    ids = [i.lower() for i in icao24s]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT icao24, report_count, last_reported_at FROM aircraft_report_counts WHERE icao24 IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {
+        r["icao24"]: {"report_count": r["report_count"], "last_reported_at": r["last_reported_at"]}
+        for r in rows
+    }
+
+
 def _aircraft_for_submissions(conn: sqlite3.Connection, submission_ids: list[int]) -> dict[int, list[dict]]:
     if not submission_ids:
         return {}
