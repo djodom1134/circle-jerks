@@ -399,6 +399,40 @@ export function getRepeatOffenders(limit = 10) {
   return getJson<RepeatOffendersResponse>(`/repeat_offenders?limit=${limit}`);
 }
 
+export interface WorstOffender {
+  icao24: string;
+  tail: string;
+  total_circles: number;
+  vnap_score: number;
+  product: number;
+  report_count: number;
+  last_reported_at: number | null;
+  worst_axis: string | null;
+  worst_axis_score: number | null;
+  aircraft_type?: string | null;
+  owner_class?: string | null;
+}
+
+export interface WorstOffendersResponse {
+  source_icao: string;
+  resolved_icao: string;
+  resolved_label: string;
+  is_fallback: boolean;
+  offenders: WorstOffender[];
+}
+
+export function getWorstOffenders(icao: string, limit = 5) {
+  return getJson<WorstOffendersResponse>(`/airports/${icao}/worst_offenders?limit=${limit}`);
+}
+
+export interface OnlineResponse {
+  count: number;
+}
+
+export function getOnlineCount() {
+  return getJson<OnlineResponse>("/activity/online");
+}
+
 export interface AtcFeed {
   id: string;
   label: string;
