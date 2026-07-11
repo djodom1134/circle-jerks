@@ -2100,7 +2100,7 @@ async def build_description(
         prompt = build_prompt(context, sliders)
         if rwy_note:
             prompt += "\n" + rwy_note + "\n"
-        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt)
+        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt, fallback_model=settings.groq_fallback_model)
         source = "groq"
         if not text:
             text = deterministic_description(context)
@@ -2268,7 +2268,7 @@ async def build_summary_description(
         prompt = build_aggregate_prompt(aggregate, sliders)
         if rwy_note:
             prompt += "\n" + rwy_note + "\n"
-        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt)
+        text = await generate_with_groq(settings.groq_api_key, settings.groq_model, prompt, system_prompt=system_prompt, fallback_model=settings.groq_fallback_model)
         source = "groq"
         if not text:
             text = deterministic_aggregate_description(aggregate)

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 
 import httpx
 
 from .tone import ToneSliders, prompt_bands
+
+logger = logging.getLogger(__name__)
 
 FORBIDDEN_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
@@ -247,29 +250,51 @@ def runway_change_note(changes: list[dict]) -> str:
 
 
 async def generate_with_groq(
-    api_key: str | None, model: str, prompt: str, system_prompt: str | None = None
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    fallback_model: str | None = None,
 ) -> str | None:
     if not api_key:
         return None
+    # De-duplicated, order-preserving list of models to try. The fallback
+    # model lives in a separate Groq quota bucket, so when the primary model's
+    # daily token cap is exhausted (HTTP 429) we still have a shot at a real
+    # generated report instead of silently dropping to the deterministic
+    # template.
+    models = [m for m in dict.fromkeys([model, fallback_model]) if m]
     # Timeout so the API endpoint still falls through to the deterministic
     # local draft instead of leaving the user staring at a spinner, now at 8s
     # to give custom system prompts a real chance to reach the model.
     async with httpx.AsyncClient(timeout=8.0) as client:
-        response = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": (system_prompt or DEFAULT_SYSTEM_PROMPT)},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.35,
-                "max_tokens": 450,
-            },
-        )
-        if response.status_code >= 400:
-            return None
-        payload = response.json()
-        text = payload["choices"][0]["message"]["content"].strip()
-        return None if violates_guardrails(text) else text
+        for m in models:
+            try:
+                response = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": m,
+                        "messages": [
+                            {"role": "system", "content": (system_prompt or DEFAULT_SYSTEM_PROMPT)},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.35,
+                        "max_tokens": 450,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("groq request failed model=%s error=%s", m, exc)
+                continue
+            if response.status_code >= 400:
+                logger.warning(
+                    "groq non-2xx model=%s status=%s body=%s", m, response.status_code, response.text[:300]
+                )
+                continue
+            payload = response.json()
+            text = payload["choices"][0]["message"]["content"].strip()
+            if violates_guardrails(text):
+                logger.info("groq response from model=%s violated guardrails; not trying fallback", m)
+                return None
+            return text
+    return None

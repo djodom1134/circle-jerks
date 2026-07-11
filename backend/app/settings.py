@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     groq_api_key: str | None = Field(default=None, validation_alias="GROQ_API_KEY")
     groq_model: str = "llama-3.3-70b-versatile"
+    groq_fallback_model: str = "llama-3.1-8b-instant"
 
     opensky: str | None = Field(default=None, validation_alias="OPENSKY")
     opensky_client_id: str | None = Field(default=None, validation_alias="OPENSKY_CLIENT_ID")
