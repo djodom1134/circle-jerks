@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 import asyncio
+import hashlib
 import logging
 import time
 from datetime import datetime, timezone
@@ -1868,6 +1869,15 @@ async def active_aircraft_count(store: Store, airport: Airport, params: ScanPara
     return count
 
 
+def system_prompt_fingerprint(system_prompt: str | None) -> str:
+    """Stable 16-char hash of the FULL system prompt for cache keying.
+
+    The old key used only the first 120 chars, so two prompts sharing a prefix
+    collided and edits past char 120 returned stale cached text.
+    """
+    return hashlib.sha1((system_prompt or "default").encode("utf-8")).hexdigest()[:16]
+
+
 def complaint_context(
     settings: Settings,
     airport: Airport,
@@ -2014,7 +2024,7 @@ async def build_description(
         origin_info.get("origin_source") or "unknown",
         str(max(0, previous_report_count)),
         str(len(against_wind)),
-        (system_prompt or "default")[:120],
+        system_prompt_fingerprint(system_prompt),
     ])
     cached = await store.get_description(cache_key)
     if cached:
@@ -2169,7 +2179,7 @@ async def build_summary_description(
         "dbhome" if prefs.include_db_at_home else "nodbhome",
         str(aggregate.previous_report_total),
         str(len(against_wind)),
-        (system_prompt or "default")[:120],
+        system_prompt_fingerprint(system_prompt),
     ])
     cached = await store.get_description(cache_key)
     if cached:
