@@ -797,6 +797,50 @@ async def build_scan_response(
     return response
 
 
+def _positions_cache_key(params: ScanParams, window: WindowRange, bbox: tuple[float, float, float, float]) -> str:
+    return f"positions:{params.airport_icao.upper()}:{window.code}:{bbox}"
+
+
+async def build_positions_response(
+    store: Store,
+    settings: Settings,
+    conn,
+    params: ScanParams,
+) -> dict:
+    """Cheap live-position read for the map's fast poll.
+
+    Deliberately skips detector runs, offender enrichment, and monitor
+    registration — those stay on the slow /scan path. This only reads the
+    hot (Redis) track buffer so the map never freezes waiting on a ~15s
+    detector pass or the 15-30s scan-response cache.
+    """
+    p = params.normalized()
+    window = resolve_window(p.window, settings.timezone)
+    airport = db.get_airport(conn, p.airport_icao)
+    if not airport:
+        raise KeyError(f"unknown airport {p.airport_icao}")
+    bbox = tuple(monitor_for_params(p, airport)["bbox"])
+
+    cache_key = _positions_cache_key(p, window, bbox)
+    if settings.scan_response_cache_seconds > 0:
+        cached = await store.get_cache(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
+    tracks = await recent_tracks_for_response(store, window, bbox, conn=conn, settings=settings)
+    active_now = await active_aircraft_count(store, airport, p)
+    response = {
+        "airport_icao": airport.icao,
+        "window": window.model_dump(),
+        "tracks": tracks,
+        "active_now": active_now,
+        "updated_at": int(time.time()),
+    }
+    if settings.scan_response_cache_seconds > 0:
+        await store.set_cache(cache_key, response, 2)
+    return response
+
+
 async def _compute_scan_response(
     store: Store,
     settings: Settings,

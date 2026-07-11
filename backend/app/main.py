@@ -32,7 +32,7 @@ from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
 from .geo import bbox_for_radius
 from .llm import MessagePreferences
-from .services import build_description, build_scan_response, build_summary_description, build_worst_offenders
+from .services import build_description, build_positions_response, build_scan_response, build_summary_description, build_worst_offenders
 from .settings import Settings, get_settings
 from .store import Store, make_store
 from .tone import PRESETS, sliders_from_request
@@ -1236,6 +1236,37 @@ async def scan(
         )
         with db_session(settings.database_path) as conn:
             return await build_scan_response(store, settings, conn, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/positions")
+async def positions(
+    airport_icao: str,
+    user_lat: float,
+    user_lon: float,
+    store: Annotated[Store, Depends(store_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    ring_nm: float = 8.0,
+    pass_radius_nm: float = 0.5,
+    pass_ceiling_ft: int = 5000,
+    window: str = "1h",
+):
+    try:
+        validate_window(window)
+        params = ScanParams(
+            airport_icao=airport_icao,
+            user_lat=user_lat,
+            user_lon=user_lon,
+            ring_nm=ring_nm,
+            pass_radius_nm=pass_radius_nm,
+            pass_ceiling_ft=pass_ceiling_ft,
+            window=window,
+        )
+        with db_session(settings.database_path) as conn:
+            return await build_positions_response(store, settings, conn, params)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:

@@ -616,6 +616,33 @@ export function scan(params: ScanParams) {
   return getJson<ScanResponse>(`/scan?${query.toString()}`);
 }
 
+export interface PositionsResponse {
+  airport_icao: string;
+  window: ScanResponse["window"];
+  tracks: Track[];
+  active_now: number;
+  updated_at: number;
+}
+
+export function positions(
+  params: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window"> & {
+    ring_nm?: number;
+    pass_radius_nm?: number;
+    pass_ceiling_ft?: number;
+  }
+) {
+  const q = new URLSearchParams({
+    airport_icao: params.airport_icao,
+    user_lat: String(params.user_lat),
+    user_lon: String(params.user_lon),
+    window: params.window
+  });
+  if (params.ring_nm !== undefined) q.set("ring_nm", String(params.ring_nm));
+  if (params.pass_radius_nm !== undefined) q.set("pass_radius_nm", String(params.pass_radius_nm));
+  if (params.pass_ceiling_ft !== undefined) q.set("pass_ceiling_ft", String(params.pass_ceiling_ft));
+  return getJson<PositionsResponse>(`/positions?${q.toString()}`);
+}
+
 export function complaintForm(airportIcao: string) {
   return getJson<{ airport: Airport; form: { form_url?: string | null; notes?: string | null } }>(
     `/complaint_form?airport_icao=${airportIcao}`

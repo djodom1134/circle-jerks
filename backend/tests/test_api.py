@@ -30,6 +30,43 @@ def test_healthz_and_airport_search(tmp_path, monkeypatch):
         assert bad_window.status_code == 422
 
 
+def test_positions_endpoint_is_cheap_and_scoped_to_known_airports(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        ok = client.get("/positions", params={
+            "airport_icao": "KBJC",
+            "user_lat": 40,
+            "user_lon": -105,
+            "window": "1h",
+        })
+        assert ok.status_code == 200
+        body = ok.json()
+        assert "tracks" in body
+        assert body["airport_icao"] == "KBJC"
+        assert "active_now" in body
+        assert "updated_at" in body
+
+        unknown = client.get("/positions", params={
+            "airport_icao": "ZZZZ",
+            "user_lat": 40,
+            "user_lon": -105,
+            "window": "1h",
+        })
+        assert unknown.status_code == 404
+
+        bad_window = client.get("/positions", params={
+            "airport_icao": "KBJC",
+            "user_lat": 40,
+            "user_lon": -105,
+            "window": "week",
+        })
+        assert bad_window.status_code == 422
+
+
 def test_admin_dashboard_requires_login_and_tracks_submissions(tmp_path, monkeypatch):
     monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
     monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")

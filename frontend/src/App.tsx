@@ -29,6 +29,7 @@ import {
   getTrackHistory,
   getWorstOffenders,
   nearestAirport,
+  positions,
   recordHeartbeat,
   recordSubmission,
   scan,
@@ -39,6 +40,7 @@ import {
   type ConfigResponse,
   type Offender,
   type PatternPoint,
+  type PositionsResponse,
   type RunwayInfo,
   type RunwayPattern,
   type ScanParams,
@@ -109,6 +111,7 @@ export default function App() {
   const [userLocation, setUserLocation] = useState(() => storedLocation(preferences));
   const [windowCode, setWindowCode] = useState<WindowCode>(windowFromQuery());
   const [scanData, setScanData] = useState<ScanResponse | null>(null);
+  const [positionsData, setPositionsData] = useState<PositionsResponse | null>(null);
   const [selected, setSelected] = useState<Offender | null>(null);
   const [focusedIcao24, setFocusedIcao24] = useState<string | null>(null);
   const onSelectAircraft = useCallback((icao24: string | null) => setFocusedIcao24(icao24), []);
@@ -364,6 +367,29 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [refreshScan]);
 
+  // Fast poll of live positions only (no detector run, no cache freeze) so
+  // the map keeps moving between the slower /scan refreshes above.
+  const refreshPositions = useCallback(async () => {
+    if (!scanParams) {
+      setPositionsData(null);
+      return;
+    }
+    try {
+      const result = await positions(scanParams);
+      setPositionsData(result);
+    } catch {
+      // Swallow errors; the slow scan poll still keeps offenders/events fresh.
+    }
+  }, [scanParams]);
+
+  useEffect(() => {
+    setPositionsData(null);
+    if (!scanParams) return;
+    refreshPositions();
+    const id = window.setInterval(refreshPositions, 2500);
+    return () => window.clearInterval(id);
+  }, [scanParams, refreshPositions]);
+
   useEffect(() => {
     if (mapOverlay !== "history" || !airport?.icao) {
       setHistoryData(null);
@@ -469,7 +495,10 @@ export default function App() {
   const averageLapTotal = historyAverage
     ? historyAverage.classes.reduce((a, c) => a + c.count, 0)
     : 0;
-  const activeNow = scanData?.counters.offenders_active_now ?? 0;
+  const activeNow = positionsData?.active_now ?? scanData?.counters.offenders_active_now ?? 0;
+  // The map reads fast-polled positions for live aircraft movement while
+  // keeping offenders/selection/window/counters from the slower /scan data.
+  const mapScanData = scanData ? { ...scanData, tracks: positionsData?.tracks ?? scanData.tracks } : null;
 
   return (
     <div className="app-shell">
@@ -704,7 +733,7 @@ export default function App() {
           <MapView
             airport={airport}
             userLocation={userLocation}
-            scanData={scanData}
+            scanData={mapScanData}
             windowLoading={isWindowLoading(windowCode, scanData?.window.code)}
             windowLoadingLabel={windowLabel(windowCode).toLowerCase()}
             selectedIcao24={focusedIcao24}

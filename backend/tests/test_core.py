@@ -29,6 +29,7 @@ from app.services import (
     airport_label_for_icao,
     altitude_over_user_summary,
     backfill_historical_states,
+    build_positions_response,
     build_summary_description,
     events_for_current_scan,
     historical_snapshot_times,
@@ -807,6 +808,39 @@ async def test_track_response_merges_non_offender_recent_tracks():
 
     assert [row["icao24"] for row in rows] == ["abc123", "def456"]
     assert rows[1]["callsign"] == "N456CD"
+
+
+async def test_build_positions_response_reads_hot_tracks_only(tmp_path):
+    conn = seeded_conn(tmp_path / "positions.sqlite3")
+    try:
+        store = MemoryStore()
+        settings = Settings(database_path=str(tmp_path / "positions.sqlite3"))
+        klmo = db.get_airport(conn, "KLMO")
+        now = int(datetime.now(ZoneInfo("UTC")).timestamp())
+
+        first = sample(now - 20, klmo.lat + 0.01, klmo.lon - 0.01, 900, "pos111")
+        second = sample(now - 10, klmo.lat - 0.01, klmo.lon + 0.01, 900, "pos222")
+        second["callsign"] = "N222XY"
+        await store.add_track_sample("pos111", first, 300)
+        await store.add_track_sample("pos222", second, 300)
+
+        params = ScanParams(airport_icao="klmo", user_lat=klmo.lat, user_lon=klmo.lon, window="1h")
+        response = await build_positions_response(store, settings, conn, params)
+
+        assert response["airport_icao"] == "KLMO"
+        assert "window" in response and response["window"]["code"] == "1h"
+        assert isinstance(response["updated_at"], int)
+        assert isinstance(response["active_now"], int)
+        icao24s = {track["icao24"] for track in response["tracks"]}
+        assert {"pos111", "pos222"} <= icao24s
+
+        with pytest.raises(KeyError):
+            await build_positions_response(
+                store, settings, conn,
+                ScanParams(airport_icao="ZZZZ", user_lat=klmo.lat, user_lon=klmo.lon, window="1h"),
+            )
+    finally:
+        conn.close()
 
 
 def test_deterministic_description_respects_message_preferences():
