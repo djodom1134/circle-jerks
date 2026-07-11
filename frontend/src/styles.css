@@ -257,6 +257,56 @@ h2 {
   transform: translateY(0);
 }
 
+.count-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-warm);
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 700;
+  outline: none;
+}
+
+.count-badge.square {
+  border-radius: 8px;
+}
+
+.count-badge::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  z-index: 20;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 9px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 30px rgba(27, 58, 107, 0.18);
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.35;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.count-badge:hover::after,
+.count-badge:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .live-pill span {
   width: 8px;
   height: 8px;

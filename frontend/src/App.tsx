@@ -24,7 +24,7 @@ import {
   getAtcFeeds,
   getAirportRunways,
   getConfig,
-  getLiveStatus,
+  getOnlineCount,
   getSponsors,
   getTrackHistory,
   getWorstOffenders,
@@ -37,7 +37,6 @@ import {
   type AtcFeedsResponse,
   type ComplaintResponse,
   type ConfigResponse,
-  type LiveStatusResponse,
   type MessagePreferences,
   type Offender,
   type PatternPoint,
@@ -63,10 +62,10 @@ import {
 } from "./lib/preferences";
 import { getVisitorId } from "./lib/visitor";
 import { statsHighlightHref } from "./lib/statsLinks";
+import { buildTaglines, pickTagline } from "./lib/taglines";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
 const APP_TITLE = "Automated Noise Complaint Generator";
-const APP_TAGLINE = "Small engines, big egos. The 0.0001% who control the sky and cause 80% of the noise pollution.";
 const FAA_ANCIR_URL = "https://ancir.faa.gov/ancir?id=ancir_sc_cat_item&sys_id=6149ade187a1f550b0d987b9cebb357e";
 const BUY_ME_COFFEE_URL = "https://buymeacoffee.com/djodom";
 const GITHUB_ISSUES_URL = "https://github.com/djodom1134/circle-jerks/issues";
@@ -116,6 +115,8 @@ export default function App() {
   const onSelectAircraft = useCallback((icao24: string | null) => setFocusedIcao24(icao24), []);
   const [formUrl, setFormUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading configuration");
+  const [tagline, setTagline] = useState<string>(() => pickTagline(buildTaglines(null)));
+  const taglineChosen = useRef(false);
   const [airportQuery, setAirportQuery] = useState(
     () => preferences.airport_query ?? preferences.airport_icao ?? ""
   );
@@ -134,7 +135,7 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
   const [worstOffenders, setWorstOffenders] = useState<WorstOffendersResponse | null>(null);
-  const [liveStatus, setLiveStatus] = useState<LiveStatusResponse | null>(null);
+  const [onlineCount, setOnlineCount] = useState<number | null>(null);
   const [sosaUrl, setSosaUrl] = useState<string>("https://www.saveourskiesalliance.org/");
   const [patternEditing, setPatternEditing] = useState(false);
   const [editingRunwayId, setEditingRunwayId] = useState<string | null>(null);
@@ -159,6 +160,14 @@ export default function App() {
       .then(setConfig)
       .catch((error) => setStatus(`Configuration failed: ${error.message}`));
   }, []);
+
+  useEffect(() => {
+    if (taglineChosen.current) return;
+    if (scanData) {
+      setTagline(pickTagline(buildTaglines(scanData.counters.circles)));
+      taglineChosen.current = true;
+    }
+  }, [scanData]);
 
   // Suppress browser-level zoom (Ctrl/Cmd + wheel, Ctrl/Cmd + +/-/0, pinch
   // trackpad). The map has its own zoom controls; page zoom just breaks the
@@ -211,28 +220,17 @@ export default function App() {
     let cancelled = false;
     async function refresh() {
       try {
-        const [s, ls] = await Promise.all([getSponsors(), getLiveStatus()]);
-        if (cancelled) return;
-        setSponsors(s);
-        setLiveStatus(ls);
+        const s = await getSponsors();
+        if (!cancelled) setSponsors(s);
       } catch {
-        // silent: these are decorative sections
+        // silent: decorative section
       }
     }
     refresh();
     const sectionsHandle = window.setInterval(refresh, 5 * 60 * 1000);
-    // Live status polls more frequently so the topbar reflects real state.
-    const statusHandle = window.setInterval(() => {
-      getLiveStatus()
-        .then((ls) => {
-          if (!cancelled) setLiveStatus(ls);
-        })
-        .catch(() => undefined);
-    }, 30 * 1000);
     return () => {
       cancelled = true;
       window.clearInterval(sectionsHandle);
-      window.clearInterval(statusHandle);
     };
   }, []);
 
@@ -346,7 +344,6 @@ export default function App() {
 
   const refreshScan = useCallback(async () => {
     if (!scanParams) return;
-    setStatus("Scanning current aircraft buffer");
     try {
       const result = await scan(scanParams);
       setScanData(result);
@@ -425,6 +422,15 @@ export default function App() {
   }, [scanParams]);
 
   useEffect(() => {
+    const poll = () => {
+      getOnlineCount().then((d) => setOnlineCount(d.count)).catch(() => undefined);
+    };
+    poll();
+    const id = window.setInterval(poll, 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     if (!airport?.icao) {
       setWorstOffenders(null);
       return;
@@ -476,16 +482,31 @@ export default function App() {
           <div className="brand-copy">
             <div className="eyebrow">{airport ? `${airport.city} | Airport: ${airport.icao}` : "Select airport"}</div>
             <h1>{APP_TITLE}</h1>
-            <p className="tagline">{APP_TAGLINE}</p>
+            <p className="tagline">{tagline}</p>
           </div>
         </div>
         <div className="topbar-actions">
           <BackfillStatusIcon backfill={scanData?.historical_backfill} />
-          <FeedStatusIcon liveStatus={liveStatus} />
-          <div className="live-pill">
-            <span aria-hidden="true" />
-            live · tracking {activeNow} {activeNow === 1 ? "plane" : "planes"}
-          </div>
+          <span
+            className="count-badge"
+            data-tooltip="Aircraft flying repetitive patterns near this airport right now"
+            title="Aircraft flying repetitive patterns near this airport right now"
+            tabIndex={0}
+            role="status"
+            aria-label={`${activeNow} aircraft in the pattern right now`}
+          >
+            {activeNow}
+          </span>
+          <span
+            className="count-badge square"
+            data-tooltip="People viewing circlejerks.live right now"
+            title="People viewing circlejerks.live right now"
+            tabIndex={0}
+            role="status"
+            aria-label={`${onlineCount ?? 0} people online right now`}
+          >
+            {onlineCount ?? "–"}
+          </span>
           <div className="status">{status}</div>
         </div>
       </header>
@@ -1025,47 +1046,6 @@ function backfillStatus(backfill?: ScanResponse["historical_backfill"]) {
     icon: Clock3,
     message: `Historical coverage is still filling at ${backfill.resolution_seconds ?? "?"}s resolution.`
   };
-}
-
-function FeedStatusIcon({ liveStatus }: { liveStatus: LiveStatusResponse | null }) {
-  if (!liveStatus) return null;
-  const labelFor: Record<string, string> = {
-    adsbx: "ADSBExchange (paid)",
-    adsb_lol: "adsb.lol (free)",
-    adsb_fi: "adsb.fi (free)",
-    airplanes_live: "airplanes.live (free)",
-    opensky: "OpenSky (free)",
-    self_hosted: "Self-hosted feeder",
-  };
-  const serving = liveStatus.serving_source ? labelFor[liveStatus.serving_source] ?? liveStatus.serving_source : "no live source";
-  let tone: "ok" | "warning" | "error" | "pending" = "ok";
-  let Icon = CheckCircle2;
-  let message = `Live data: ${serving} — primary feed healthy.`;
-  if (liveStatus.overall === "degraded") {
-    tone = "warning";
-    Icon = AlertTriangle;
-    message = `Live data: paid feed is down, falling back to ${serving}. Quality may dip.`;
-  } else if (liveStatus.overall === "down") {
-    tone = "error";
-    Icon = CloudOff;
-    message = "Live data feeds are all unhealthy right now.";
-  } else if (liveStatus.overall === "unknown") {
-    tone = "pending";
-    Icon = Clock3;
-    message = "Live data status pending — the worker hasn't reported yet.";
-  }
-  return (
-    <span
-      className={`status-icon ${tone}`}
-      title={message}
-      data-tooltip={message}
-      role="status"
-      tabIndex={0}
-      aria-label={message}
-    >
-      <Icon size={18} aria-hidden="true" />
-    </span>
-  );
 }
 
 function BackfillStatusIcon({ backfill }: { backfill?: ScanResponse["historical_backfill"] }) {
