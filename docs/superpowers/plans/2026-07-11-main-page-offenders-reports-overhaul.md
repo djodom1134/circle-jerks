@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Backend tests run from `backend/`: `python -m pytest` (config: `testpaths=["tests"]`, `pythonpath=["."]`, `asyncio_mode=auto`). Seed a DB in tests with `conn = db.connect(str(path)); conn.executescript(db.SCHEMA); db.seed_db(conn); conn.commit()`.
+- Backend tests run from `backend/`: **`.venv/bin/python -m pytest`** (the bare `python` and the repo-root `.venv` are broken — always use `backend/.venv/bin/python`). Config: `testpaths=["tests"]`, `pythonpath=["."]`, `asyncio_mode=auto`. Seed a DB in tests with `conn = db.connect(str(path)); conn.executescript(db.SCHEMA); db.seed_db(conn); conn.commit()`.
 - Frontend tests run from `frontend/`: `npm test` (= `vitest run`). Typecheck/build: `npm run build` (= `tsc && vite build`).
 - `getJson`/`postJson` in `frontend/src/lib/api.ts` prepend `/api` to the path — pass paths like `/airports/...`, never `/api/...`.
 - The report provider is **Groq** (not xAI). Model + key come from `settings.groq_model` / `settings.groq_api_key`.
@@ -58,7 +58,7 @@ def test_system_prompt_fingerprint_stable_and_default():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q`
 Expected: FAIL with `AttributeError: module 'app.services' has no attribute 'system_prompt_fingerprint'`
 
 - [ ] **Step 3: Add `import hashlib` and the helper**
@@ -90,7 +90,7 @@ In `build_summary_description`, replace the identical line (~2172) the same way.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q`
 Expected: PASS (2 passed)
 
 - [ ] **Step 6: Commit**
@@ -138,7 +138,7 @@ def test_resolve_display_tail_falls_back_to_hex_when_nothing_valid():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_registry.py -q -k resolve_display_tail`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_registry.py -q -k resolve_display_tail`
 Expected: FAIL with `ImportError: cannot import name 'resolve_display_tail'`
 
 - [ ] **Step 3: Implement the resolver**
@@ -158,7 +158,7 @@ def resolve_display_tail(callsign: str | None, registration: str | None, icao24:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd backend && python -m pytest tests/test_registry.py -q -k resolve_display_tail`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_registry.py -q -k resolve_display_tail`
 Expected: PASS (3 passed)
 
 - [ ] **Step 5: Use it in `complaint_context`**
@@ -186,7 +186,7 @@ with:
 
 - [ ] **Step 6: Run the report smoke test to verify nothing broke**
 
-Run: `cd backend && python -m pytest tests/test_core.py -q -k "summary or deterministic"`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_core.py -q -k "summary or deterministic"`
 Expected: PASS (existing report tests still pass — `complaint_context` still returns a string callsign)
 
 - [ ] **Step 7: Commit**
@@ -280,7 +280,7 @@ def test_build_aggregate_prompt_omits_forbidden_facts():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q -k "system_prompt_carries or omits"`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q -k "system_prompt_carries or omits"`
 Expected: FAIL (asserts don't hold against current prompt/persona)
 
 - [ ] **Step 3: Rewrite `DEFAULT_SYSTEM_PROMPT`**
@@ -396,7 +396,7 @@ In `generate_with_groq` change line 302 `timeout=4.0` to `timeout=8.0` (custom p
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q`
 Expected: PASS (all)
 
 - [ ] **Step 8: Commit**
@@ -437,7 +437,7 @@ def test_runway_change_note_present_when_unwarranted():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q -k runway_change_note`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q -k runway_change_note`
 Expected: FAIL (`runway_change_note([])` currently returns the "none recorded" string)
 
 - [ ] **Step 3: Return empty for no changes**
@@ -479,7 +479,7 @@ with:
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q -k runway_change_note`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q -k runway_change_note`
 Expected: PASS (2 passed)
 
 - [ ] **Step 6: Commit**
@@ -522,7 +522,7 @@ with:
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_core.py -q -k deterministic_description`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_core.py -q -k deterministic_description`
 Expected: FAIL (current output contains "circling" / "circles")
 
 - [ ] **Step 3: Trim `deterministic_description`**
@@ -587,7 +587,7 @@ def deterministic_aggregate_description(context: AggregateComplaintContext) -> s
 
 - [ ] **Step 5: Run the report tests to verify they pass**
 
-Run: `cd backend && python -m pytest tests/test_core.py -q -k "deterministic or summary"`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_core.py -q -k "deterministic or summary"`
 Expected: PASS (updated deterministic test + the `build_summary_description` fallback test both green)
 
 - [ ] **Step 6: Commit**
@@ -608,35 +608,43 @@ Sending >10 aircraft confuses Groq. Cap the incoming list to 10 at the top of `b
 - Test: `backend/tests/test_report_prompt.py` (append — pure helper)
 
 **Interfaces:**
-- Produces: `services.MAX_SUMMARY_AIRCRAFT = 10`
+- Produces: `services.MAX_SUMMARY_AIRCRAFT = 10`; `services.cap_summary_aircraft(icao24s: list[str]) -> list[str]`.
 
 - [ ] **Step 1: Write the failing test**
 
 Append to `backend/tests/test_report_prompt.py`:
 
 ```python
-def test_max_summary_aircraft_is_ten():
+def test_cap_summary_aircraft_keeps_first_ten():
     assert services.MAX_SUMMARY_AIRCRAFT == 10
-    sample = [f"h{i}" for i in range(25)]
-    assert sample[: services.MAX_SUMMARY_AIRCRAFT] == sample[:10]
+    ids = [f"h{i}" for i in range(25)]
+    assert services.cap_summary_aircraft(ids) == ids[:10]
+    assert services.cap_summary_aircraft(["a", "b"]) == ["a", "b"]
+    assert services.cap_summary_aircraft([]) == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q -k max_summary`
-Expected: FAIL (`AttributeError: ... 'MAX_SUMMARY_AIRCRAFT'`)
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q -k cap_summary`
+Expected: FAIL (`AttributeError: ... 'cap_summary_aircraft'`)
 
-- [ ] **Step 3: Add the constant and cap the list**
+- [ ] **Step 3: Add the constant + helper and cap the list**
 
 In `backend/app/services.py`, add near the other report top-level definitions (just above `def build_summary_description`):
 ```python
 MAX_SUMMARY_AIRCRAFT = 10
+
+
+def cap_summary_aircraft(icao24s: list[str]) -> list[str]:
+    """Groq gets confused by too many aircraft; keep at most MAX_SUMMARY_AIRCRAFT.
+    The frontend sends them worst-first, so the kept ones are the worst offenders."""
+    return list(icao24s)[:MAX_SUMMARY_AIRCRAFT]
 ```
 
 Inside `build_summary_description`, right after `prefs = message_preferences or MessagePreferences()` (line ~2070) add:
 ```python
     requested_count = len(icao24s)
-    icao24s = list(icao24s)[:MAX_SUMMARY_AIRCRAFT]
+    icao24s = cap_summary_aircraft(icao24s)
 ```
 
 In the returned `metadata` dict (after `"aircraft_count": aggregate.aircraft_count,` ~2194) add (compare against the cap, not `aircraft_count`, which also shrinks when aircraft are skipped for having no activity):
@@ -647,7 +655,7 @@ In the returned `metadata` dict (after `"aircraft_count": aggregate.aircraft_cou
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd backend && python -m pytest tests/test_report_prompt.py -q -k max_summary && cd backend && python -m pytest tests/test_core.py -q -k summary`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_report_prompt.py -q -k cap_summary && .venv/bin/python -m pytest tests/test_core.py -q -k summary`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -701,7 +709,7 @@ def test_nearest_airport_excluding_skips_source(tmp_path):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q -k nearest`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q -k nearest`
 Expected: FAIL (`AttributeError: ... 'nearest_airport_excluding'`)
 
 - [ ] **Step 3: Implement**
@@ -737,7 +745,7 @@ def nearest_airport_excluding(conn: sqlite3.Connection, lat: float, lon: float, 
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q -k nearest`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q -k nearest`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -786,7 +794,7 @@ def test_report_meta_empty_list(tmp_path):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q -k report_meta`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q -k report_meta`
 Expected: FAIL (`AttributeError: ... 'report_meta'`)
 
 - [ ] **Step 3: Implement**
@@ -812,7 +820,7 @@ def report_meta(conn: sqlite3.Connection, icao24s: list[str]) -> dict[str, dict]
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q -k report_meta`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q -k report_meta`
 Expected: PASS (2 passed)
 
 - [ ] **Step 5: Commit**
@@ -877,7 +885,7 @@ def test_rank_worst_offenders_respects_limit():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q -k rank_worst`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q -k rank_worst`
 Expected: FAIL (`AttributeError: ... 'rank_worst_offenders'`)
 
 - [ ] **Step 3: Implement**
@@ -919,7 +927,7 @@ def rank_worst_offenders(aircraft: list[dict], meta: dict[str, dict], limit: int
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q -k rank_worst`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q -k rank_worst`
 Expected: PASS (2 passed)
 
 - [ ] **Step 5: Commit**
@@ -1017,7 +1025,7 @@ def test_worst_offenders_endpoint_and_fallback(tmp_path, monkeypatch):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q -k "build_worst or endpoint"`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q -k "build_worst or endpoint"`
 Expected: FAIL (`AttributeError: ... 'build_worst_offenders'` / 404 route)
 
 - [ ] **Step 3: Implement the builder**
@@ -1085,7 +1093,7 @@ async def get_worst_offenders(
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd backend && python -m pytest tests/test_worst_offenders.py -q`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_worst_offenders.py -q`
 Expected: PASS (all)
 
 - [ ] **Step 6: Commit**
@@ -1133,7 +1141,7 @@ def test_activity_online_counts_recent_visitors(tmp_path, monkeypatch):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && python -m pytest tests/test_api.py -q -k activity_online`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_api.py -q -k activity_online`
 Expected: FAIL (404 — route missing)
 
 - [ ] **Step 3: Add the DB helper**
@@ -1167,12 +1175,12 @@ async def activity_online(settings: Annotated[Settings, Depends(settings_dep)]):
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `cd backend && python -m pytest tests/test_api.py -q -k activity_online`
+Run: `cd backend && .venv/bin/python -m pytest tests/test_api.py -q -k activity_online`
 Expected: PASS
 
 - [ ] **Step 6: Run the whole backend suite (guard against regressions)**
 
-Run: `cd backend && python -m pytest -q`
+Run: `cd backend && .venv/bin/python -m pytest -q`
 Expected: PASS (no failures). If any pre-existing report test asserts removed content, fix it to match the new rules.
 
 - [ ] **Step 7: Commit**
@@ -1920,7 +1928,7 @@ git commit -m "feat(ui): randomized tagline; circle/online count badges; drop fe
 
 ## Final verification
 
-- [ ] Backend: `cd backend && python -m pytest -q` → all pass.
+- [ ] Backend: `cd backend && .venv/bin/python -m pytest -q` → all pass.
 - [ ] Frontend: `cd frontend && npm test && npm run build` → all pass, build clean.
 - [ ] Dogfood the full flow against a running stack: select an airport → reports omit elevation/circles/runway-change and use the N-number; edit the system prompt and watch the draft update; the Hall of Shame shows 5 cards with 🤡 on #1 and a worst-habit line; an airport with no data shows the nearest-airport fallback caption; the top bar badges and randomized tagline behave.
 
