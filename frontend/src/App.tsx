@@ -64,6 +64,7 @@ import {
 import { getVisitorId } from "./lib/visitor";
 import { statsHighlightHref } from "./lib/statsLinks";
 import { buildTaglines, pickTagline } from "./lib/taglines";
+import { mergeLiveTracks } from "./lib/liveTracks";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
 const APP_TITLE = "Automated Noise Complaint Generator";
@@ -498,7 +499,21 @@ export default function App() {
   const activeNow = positionsData?.active_now ?? scanData?.counters.offenders_active_now ?? 0;
   // The map reads fast-polled positions for live aircraft movement while
   // keeping offenders/selection/window/counters from the slower /scan data.
-  const mapScanData = scanData ? { ...scanData, tracks: positionsData?.tracks ?? scanData.tracks } : null;
+  // MERGE (not replace) the fast live positions into the full-history scan
+  // tracks: keep the historical trails and extend live planes' tails between
+  // scan refreshes, instead of dropping history when the first /positions lands.
+  const mapScanData = useMemo(
+    () =>
+      scanData
+        ? {
+            ...scanData,
+            tracks: positionsData
+              ? mergeLiveTracks(scanData.tracks, positionsData.tracks)
+              : scanData.tracks,
+          }
+        : null,
+    [scanData, positionsData],
+  );
 
   return (
     <div className="app-shell">
