@@ -37,7 +37,6 @@ import {
   type AtcFeedsResponse,
   type ComplaintResponse,
   type ConfigResponse,
-  type MessagePreferences,
   type Offender,
   type PatternPoint,
   type RunwayInfo,
@@ -1243,7 +1242,6 @@ function complaintErrorLabel(error: unknown) {
 function localCombinedComplaint(
   targets: Offender[],
   scanParams: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
-  messagePrefs: MessagePreferences,
   reportCounts: Record<string, number>
 ) {
   const callsigns = targets.map((target) => displayTail(target.callsign, target.icao24));
@@ -1263,7 +1261,7 @@ function localCombinedComplaint(
   const parts = [
     `In the selected ${windowLabel(scanParams.window)} window, I observed ${targets.length} aircraft near ${scanParams.airport_icao}: ${listLabel(callsigns.slice(0, 8))}.`
   ];
-  if (messagePrefs.include_all_detail && Number.isFinite(first) && Number.isFinite(last)) {
+  if (Number.isFinite(first) && Number.isFinite(last)) {
     parts.push(`The relevant activity was observed from ${formatLocalTime(first)} to ${formatLocalTime(last)} local time.`);
   }
   if (origins.length > 0) {
@@ -1286,14 +1284,13 @@ function localCombinedComplaint(
 function localSingleComplaint(
   target: Offender,
   scanParams: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
-  messagePrefs: MessagePreferences,
   reportCount: number
 ) {
   const callsign = displayTail(target.callsign, target.icao24);
   const parts = [
     `In the selected ${windowLabel(scanParams.window)} window, aircraft ${callsign} was observed near ${scanParams.airport_icao}.`
   ];
-  if (messagePrefs.include_all_detail && target.first_event_at && target.last_event_at) {
+  if (target.first_event_at && target.last_event_at) {
     parts.push(`The relevant activity was observed from ${formatLocalTime(target.first_event_at)} to ${formatLocalTime(target.last_event_at)} local time.`);
   }
   if (target.origin_label && target.origin_label !== "unknown") {
@@ -1701,7 +1698,6 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
   onPreferencesChange: Dispatch<SetStateAction<StoredPreferences>>;
 }) {
   const sliders = preferences.sliders;
-  const messagePrefs = preferences.message;
   const complaintMode = preferences.complaint_mode;
   const reportCounts = preferences.report_counts;
   const systemPrompt = preferences.system_prompt;
@@ -1739,7 +1735,6 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
           targets.map((target) => target.icao24),
           scanParams,
           sliders,
-          messagePrefs,
           reportCounts,
           systemPrompt
         )
@@ -1751,7 +1746,7 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
           .catch((error) => {
             if (cancelled) return;
             setComplaint({
-              text: localCombinedComplaint(targets, scanParams, messagePrefs, reportCounts),
+              text: localCombinedComplaint(targets, scanParams, reportCounts),
               source: "local fallback"
             });
             setDetailStatus(complaintErrorLabel(error));
@@ -1762,7 +1757,6 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
         target.icao24,
         scanParams,
         sliders,
-        messagePrefs,
         reportCounts[target.icao24] ?? 0,
         systemPrompt
       )))
@@ -1775,7 +1769,7 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
           if (cancelled) return;
           const target = targets[0];
           setComplaint({
-            text: localSingleComplaint(target, scanParams, messagePrefs, reportCounts[target.icao24] ?? 0),
+            text: localSingleComplaint(target, scanParams, reportCounts[target.icao24] ?? 0),
             source: "local fallback"
           });
           setDetailStatus(complaintErrorLabel(error));
@@ -1785,19 +1779,12 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [complaintMode, targetIdsKey, targetCountKey, refreshNonce, scanParams, sliders, messagePrefs, systemPrompt]);
+  }, [complaintMode, targetIdsKey, targetCountKey, refreshNonce, scanParams, sliders, systemPrompt]);
 
   function updateSlider(name: keyof ToneSliders, value: number) {
     onPreferencesChange((current) => ({
       ...current,
       sliders: { ...current.sliders, [name]: value }
-    }));
-  }
-
-  function updateMessagePreference(name: keyof MessagePreferences, value: boolean) {
-    onPreferencesChange((current) => ({
-      ...current,
-      message: { ...current.message, [name]: value }
     }));
   }
 
@@ -1941,49 +1928,6 @@ function DetailPanel({ offender, offenders, scanParams, scanData, config, formUr
               <b>{sliders[name]}</b>
             </label>
           ))}
-          <div className="section-title message-title">Message includes</div>
-          <div className="preference-grid">
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_all_detail}
-                onChange={(event) => updateMessagePreference("include_all_detail", event.target.checked)}
-              />
-              <span>Full detail</span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_elevation}
-                onChange={(event) => updateMessagePreference("include_elevation", event.target.checked)}
-              />
-              <span>Elevation</span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_circles}
-                onChange={(event) => updateMessagePreference("include_circles", event.target.checked)}
-              />
-              <span>Number of circles</span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_altitude_over_house}
-                onChange={(event) => updateMessagePreference("include_altitude_over_house", event.target.checked)}
-              />
-              <span>Altitude over house</span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_db_at_home}
-                onChange={(event) => updateMessagePreference("include_db_at_home", event.target.checked)}
-              />
-              <span>dB at home (avg + peak)</span>
-            </label>
-          </div>
         </div>
 
         <div className="complaint-output">

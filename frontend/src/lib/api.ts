@@ -130,14 +130,6 @@ export interface ToneSliders {
   local: number;
 }
 
-export interface MessagePreferences {
-  include_all_detail: boolean;
-  include_elevation: boolean;
-  include_circles: boolean;
-  include_altitude_over_house: boolean;
-  include_db_at_home: boolean;
-}
-
 export interface ComplaintResponse {
   icao24: string;
   sliders: ToneSliders;
@@ -634,7 +626,6 @@ export function aircraftDetail(
   icao24: string,
   params: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
   sliders: ToneSliders,
-  message: MessagePreferences,
   reportCount = 0,
   systemPrompt?: string | null
 ) {
@@ -648,11 +639,6 @@ export function aircraftDetail(
     respect: String(sliders.respect),
     detail: String(sliders.detail),
     local: String(sliders.local),
-    include_all_detail: String(message.include_all_detail),
-    include_elevation: String(message.include_elevation),
-    include_circles: String(message.include_circles),
-    include_altitude_over_house: String(message.include_altitude_over_house),
-    include_db_at_home: String(message.include_db_at_home),
     previous_report_count: String(reportCount)
   });
   if (systemPrompt) query.set("system_prompt", systemPrompt);
@@ -663,7 +649,6 @@ export function complaintSummary(
   icao24s: string[],
   params: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
   sliders: ToneSliders,
-  message: MessagePreferences,
   reportCounts: Record<string, number>,
   systemPrompt?: string | null
 ) {
@@ -676,7 +661,6 @@ export function complaintSummary(
       window: params.window,
       icao24s,
       sliders,
-      message_preferences: message,
       report_counts: reportCounts,
       system_prompt: systemPrompt ?? null
     },

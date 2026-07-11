@@ -2,14 +2,6 @@ import type { ToneSliders, WindowCode } from "./api";
 
 export type ComplaintMode = "one" | "all";
 
-export interface MessagePreferences {
-  include_all_detail: boolean;
-  include_elevation: boolean;
-  include_circles: boolean;
-  include_altitude_over_house: boolean;
-  include_db_at_home: boolean;
-}
-
 export interface StoredPreferences {
   airport_icao?: string;
   airport_query?: string;
@@ -18,7 +10,6 @@ export interface StoredPreferences {
   user_address?: string;
   window?: WindowCode;
   complaint_mode: ComplaintMode;
-  message: MessagePreferences;
   sliders: ToneSliders;
   report_counts: Record<string, number>;
   /** Optional per-user override for the AI complaint system prompt (stored client-side only). */
@@ -28,17 +19,8 @@ export interface StoredPreferences {
 const COOKIE_NAME = "circlejerks_preferences";
 const YEAR_SECONDS = 60 * 60 * 24 * 365;
 
-export const DEFAULT_MESSAGE_PREFS: MessagePreferences = {
-  include_all_detail: true,
-  include_elevation: true,
-  include_circles: true,
-  include_altitude_over_house: true,
-  include_db_at_home: true
-};
-
 export const DEFAULT_STORED_PREFS: StoredPreferences = {
   complaint_mode: "one",
-  message: DEFAULT_MESSAGE_PREFS,
   sliders: { anger: 3, niceness: 6, respect: 7, detail: 6, local: 3 },
   report_counts: {}
 };
@@ -71,7 +53,6 @@ export function readPreferences(): StoredPreferences {
     return {
       ...DEFAULT_STORED_PREFS,
       ...parsed,
-      message: { ...DEFAULT_MESSAGE_PREFS, ...(parsed.message ?? {}) },
       sliders: { ...DEFAULT_STORED_PREFS.sliders, ...(parsed.sliders ?? {}) },
       report_counts: normalizeReportCounts(parsed.report_counts),
       complaint_mode: parsed.complaint_mode === "all" ? "all" : "one"
