@@ -1911,6 +1911,38 @@ def rank_worst_offenders(aircraft: list[dict], meta: dict[str, dict], limit: int
     return ranked[: max(1, int(limit))]
 
 
+def _worst_offenders_for(conn, icao: str, now: int, limit: int) -> list[dict]:
+    vnap_result = vnap.compute_aircraft_compliance(conn, icao, 0, now)
+    aircraft = vnap_result.get("aircraft", [])
+    meta = db.report_meta(conn, [a["icao24"] for a in aircraft])
+    return rank_worst_offenders(aircraft, meta, limit)
+
+
+def build_worst_offenders(conn, icao: str, *, now: int, limit: int = 5) -> dict:
+    icao = icao.upper()
+    airport = db.get_airport(conn, icao)
+    if not airport:
+        raise KeyError(f"unknown airport {icao}")
+    offenders = _worst_offenders_for(conn, icao, now, limit)
+    resolved_icao = icao
+    resolved_label = airport.city or airport.name or icao
+    is_fallback = False
+    if not offenders:
+        alt = db.nearest_airport_excluding(conn, airport.lat, airport.lon, icao)
+        if alt:
+            resolved_icao = alt["icao"]
+            resolved_label = alt.get("city") or alt.get("name") or alt["icao"]
+            is_fallback = True
+            offenders = _worst_offenders_for(conn, resolved_icao, now, limit)
+    return {
+        "source_icao": icao,
+        "resolved_icao": resolved_icao,
+        "resolved_label": resolved_label,
+        "is_fallback": is_fallback,
+        "offenders": offenders,
+    }
+
+
 def complaint_context(
     settings: Settings,
     airport: Airport,

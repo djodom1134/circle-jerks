@@ -32,7 +32,7 @@ from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
 from .geo import bbox_for_radius
 from .llm import MessagePreferences
-from .services import build_description, build_scan_response, build_summary_description
+from .services import build_description, build_scan_response, build_summary_description, build_worst_offenders
 from .settings import Settings, get_settings
 from .store import Store, make_store
 from .tone import PRESETS, sliders_from_request
@@ -1378,6 +1378,20 @@ async def get_airport_stats(
         "window": {"code": window, "start_ts": start_ts, "end_ts": now, "bucket_seconds": bucket},
         **stats,
     }
+
+
+@app.get("/airports/{icao}/worst_offenders")
+async def get_worst_offenders(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    limit: Annotated[int, Query(ge=1, le=10)] = 5,
+):
+    now = int(time.time())
+    try:
+        with db_session(settings.database_path) as conn:
+            return build_worst_offenders(conn, icao, now=now, limit=limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/airports/{icao}/operations-trends")
