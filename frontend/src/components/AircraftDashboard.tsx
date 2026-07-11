@@ -77,21 +77,31 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
     if (!target) return;
     deepLinkApplied.current = true;
     setSelected(target);
-    // Defer to the next frame and jump instantly: a "smooth" scroll on this
-    // long (1000+ row) table animates for ~1s, during which the selection/pulse
-    // re-renders cancel it — leaving the row off-screen. An rAF'd instant scroll
-    // lands reliably; the pulse still draws the eye.
-    requestAnimationFrame(() =>
-      document
-        .getElementById(`vnap-row-${target}`)
-        ?.scrollIntoView({ behavior: "auto", block: "center" }),
-    );
+    // Scroll the row into view with an INSTANT jump (a ~1s "smooth" scroll on
+    // this 1000+ row table gets cancelled by the re-renders that follow). A
+    // single rAF still races the initial mount + the radar's async recharts
+    // measure, which shift layout a frame later and strand the scroll at the
+    // top (seen on prod). So fire next frame, then retry once after layout
+    // settles; the retry no-ops when the row is already visible, so it never
+    // yanks a page the user has since scrolled.
+    const scrollToRow = () => {
+      const el = document.getElementById(`vnap-row-${target}`);
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      if (r.top >= 0 && r.bottom <= window.innerHeight) return;
+      el.scrollIntoView({ behavior: "auto", block: "center" });
+    };
+    requestAnimationFrame(scrollToRow);
+    const scrollRetry = window.setTimeout(scrollToRow, 300);
     setPulseIcao(target);
     const t = window.setTimeout(
       () => setPulseIcao((cur) => (cur === target ? null : cur)),
       1200,
     );
-    return () => window.clearTimeout(t);
+    return () => {
+      window.clearTimeout(t);
+      window.clearTimeout(scrollRetry);
+    };
   }, [data, sorted, deepLinkParam]);
 
   if (error) return <div className="stats-error">{error}</div>;
