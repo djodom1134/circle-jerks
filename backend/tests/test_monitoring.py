@@ -131,3 +131,71 @@ async def test_worker_loop_writes_a_heartbeat_the_monitor_can_read():
     metrics = await build_health_metrics(store, settings)
     assert metrics["loops"]["ingest"]["alive"] is True
     assert metrics["loops"]["ingest"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_record_heartbeat_survives_store_failure():
+    """The single most safety-critical property: a failing monitoring write must
+    NEVER propagate out of _record_heartbeat and break the worker loop."""
+    import app.worker as worker
+
+    class _RaisingStore(MemoryStore):
+        async def set_cache(self, *args, **kwargs):
+            raise RuntimeError("redis unavailable")
+
+    settings = Settings(database_path=":memory:", live_poll_interval_seconds=10)
+    # Must not raise despite the store blowing up on every write.
+    await worker._record_heartbeat(
+        _RaisingStore(), settings, "ingest", ok=True, started=time.monotonic()
+    )
+    await worker._record_heartbeat(
+        _RaisingStore(), settings, "detect", ok=False, started=time.monotonic(),
+        error="boom", min_ttl_seconds=300,
+    )
+
+
+@pytest.mark.asyncio
+async def test_public_output_coarsens_error_text_no_leak():
+    """The public /health/metrics must expose only a coarse error category —
+    never raw exception text that can embed internal URLs/hosts."""
+    store = MemoryStore()
+    settings = Settings(database_path=":memory:", live_poll_interval_seconds=10)
+    now = int(time.time())
+    await store.set_cache(
+        INGEST_HEARTBEAT_KEY,
+        {"ts": now - 1, "duration_ms": 5, "ok": False,
+         "error": "ConnectError: http://10.1.2.3:8080/feeder timed out"},
+        600,
+    )
+    await store.set_cache(LIVE_HEALTH_KEY, {
+        "self_hosted": {
+            "available": True, "success_count": 1, "error_count": 1,
+            "last_success_ts": now - 1, "last_latency_ms": 10,
+            "last_states_count": 1, "backoff_remaining_seconds": 0,
+            "last_error": "HTTPError http://10.1.2.3:8080 refused",
+        },
+    }, 600)
+
+    metrics = await build_health_metrics(store, settings)
+    assert metrics["loops"]["ingest"]["error"] == "error"
+    assert metrics["sources"]["self_hosted"]["last_error"] == "error"
+    assert "10.1.2.3" not in str(metrics)  # no internal host leaked anywhere
+
+    # A rate-limit keeps its useful, non-sensitive category.
+    await store.set_cache(
+        INGEST_HEARTBEAT_KEY,
+        {"ts": now - 1, "duration_ms": 5, "ok": False, "error": "rate_limited:300s"},
+        600,
+    )
+    metrics2 = await build_health_metrics(store, settings)
+    assert metrics2["loops"]["ingest"]["error"] == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_loop_status_tolerates_corrupt_timestamp():
+    store = MemoryStore()
+    settings = Settings(database_path=":memory:")
+    await store.set_cache(INGEST_HEARTBEAT_KEY, {"ts": "not-a-number", "ok": True}, 600)
+    metrics = await build_health_metrics(store, settings)  # must not 500
+    assert metrics["loops"]["ingest"]["alive"] is False
+    assert metrics["loops"]["ingest"]["last_tick_ts"] is None

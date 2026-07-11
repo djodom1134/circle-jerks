@@ -165,7 +165,10 @@ async def _detect_tick(store, settings) -> None:
                 )
 
 
-async def _record_heartbeat(store, settings, name: str, *, ok: bool, started: float, error: str | None = None) -> None:
+async def _record_heartbeat(
+    store, settings, name: str, *, ok: bool, started: float,
+    error: str | None = None, min_ttl_seconds: int = 0,
+) -> None:
     """Publish a loop liveness heartbeat to the store so an INDEPENDENT monitor
     (the /health/metrics endpoint, a separate process) can tell whether this
     loop is still ticking — a stale/absent heartbeat is itself the alarm — and
@@ -178,7 +181,15 @@ async def _record_heartbeat(store, settings, name: str, *, ok: bool, started: fl
     }
     # TTL comfortably exceeds a healthy cadence so a MISSING key means "the loop
     # died", distinct from a present-but-stale one that reports its own age.
-    ttl = max(60, settings.detector_interval_seconds * 6, settings.live_poll_interval_seconds * 6)
+    # `min_ttl_seconds` lets a deliberate long sleep (e.g. a rate-limit backoff)
+    # keep its "why" heartbeat alive for the whole backoff, so the monitor shows
+    # "rate_limited" instead of the key expiring and looking like a crash.
+    ttl = max(
+        60,
+        settings.detector_interval_seconds * 6,
+        settings.live_poll_interval_seconds * 6,
+        int(min_ttl_seconds) + 60,
+    )
     try:
         await store.set_cache(f"worker:heartbeat:{name}", payload, ttl)
     except Exception:
@@ -193,7 +204,11 @@ async def _ingest_loop(store, settings, live_sources) -> None:
             await _record_heartbeat(store, settings, "ingest", ok=True, started=started)
             await asyncio.sleep(effective_poll_interval_seconds(settings, live_sources))
         except LiveSourceRateLimited as exc:
-            await _record_heartbeat(store, settings, "ingest", ok=False, started=started, error=f"rate_limited:{exc.retry_after_seconds}s")
+            await _record_heartbeat(
+                store, settings, "ingest", ok=False, started=started,
+                error=f"rate_limited:{exc.retry_after_seconds}s",
+                min_ttl_seconds=exc.retry_after_seconds,
+            )
             logger.warning("live sources rate limited; backing off for %ss", exc.retry_after_seconds)
             await asyncio.sleep(exc.retry_after_seconds)
         except LiveSourceUnavailable as exc:

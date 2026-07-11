@@ -27,28 +27,48 @@ INGEST_HEARTBEAT_KEY = "worker:heartbeat:ingest"
 DETECT_HEARTBEAT_KEY = "worker:heartbeat:detect"
 LIVE_HEALTH_KEY = "live_sources:health"
 
+_DEAD_LOOP = {
+    "alive": False,
+    "last_tick_ts": None,
+    "age_seconds": None,
+    "last_duration_ms": None,
+    "ok": None,
+    "error": None,
+}
+
+
+def _coarse_error(err) -> str | None:
+    """Reduce an arbitrary error string to a safe category. This endpoint is
+    public, and raw exception text can embed internal URLs/hosts (e.g. the
+    self-hosted feeder); expose only the category, never the free text."""
+    if not err:
+        return None
+    text = str(err).lower()
+    if text.startswith("rate_limited") or "rate limit" in text:
+        return "rate_limited"
+    if "unavailable" in text or "no live source" in text or "stale" in text:
+        return "unavailable"
+    return "error"
+
 
 def _loop_status(heartbeat, interval_seconds: int, now: int) -> dict:
     if not isinstance(heartbeat, dict) or heartbeat.get("ts") is None:
-        return {
-            "alive": False,
-            "last_tick_ts": None,
-            "age_seconds": None,
-            "last_duration_ms": None,
-            "ok": None,
-            "error": None,
-        }
-    age = max(0, now - int(heartbeat["ts"]))
+        return dict(_DEAD_LOOP)
+    try:
+        ts = int(heartbeat["ts"])
+    except (TypeError, ValueError):
+        return dict(_DEAD_LOOP)
+    age = max(0, now - ts)
     # Alive if we've seen a tick within a few cadences — one skipped tick (e.g.
     # a slow detector pass) must not flip the loop to "dead".
     stale_after = max(30, interval_seconds * 3)
     return {
         "alive": age <= stale_after,
-        "last_tick_ts": int(heartbeat["ts"]),
+        "last_tick_ts": ts,
         "age_seconds": age,
         "last_duration_ms": heartbeat.get("duration_ms"),
         "ok": heartbeat.get("ok"),
-        "error": heartbeat.get("error"),
+        "error": _coarse_error(heartbeat.get("error")),
     }
 
 
@@ -78,7 +98,7 @@ def _source_kpis(sources, settings: Settings, now: int) -> tuple[dict, int]:
             "last_latency_ms": stats.get("last_latency_ms"),
             "last_states_count": stats.get("last_states_count"),
             "backoff_remaining_seconds": stats.get("backoff_remaining_seconds"),
-            "last_error": stats.get("last_error"),
+            "last_error": _coarse_error(stats.get("last_error")),
         }
     return kpis, healthy
 
