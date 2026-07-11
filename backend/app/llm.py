@@ -90,12 +90,7 @@ class AggregateComplaintContext:
 
 def build_prompt(context: ComplaintContext, sliders: ToneSliders) -> str:
     bands = prompt_bands(sliders)
-    prefs = context.message_preferences
-    return f"""You write per-incident aviation noise complaint descriptions for a resident to paste into an official form.
-Produce 3 to 8 sentences, with length governed by the Detail slider. Use specific numbers and local time.
-Use 12-hour clock labels with AM/PM only. Do not use 24-hour or military time.
-Never speculate about pilot intent. Never use profanity or personal attacks. Blend the five tone sliders into a coherent voice.
-Follow the message preferences exactly: include a fact only when the corresponding include flag is true.
+    return f"""Write the complaint described by your instructions using only the facts below.
 
 TONE CONTROLS:
 anger: {bands["anger"]}
@@ -104,60 +99,42 @@ respect: {bands["respect"]}
 detail: {bands["detail"]}
 local_flavor: {bands["local"]}
 
-MESSAGE PREFERENCES:
-include_all_detail: {prefs.include_all_detail}
-include_airport_elevation: {prefs.include_elevation}
-include_number_of_circles: {prefs.include_circles}
-include_altitude_over_house: {prefs.include_altitude_over_house}
-include_db_at_home: {prefs.include_db_at_home}
-
 DATA:
 airport: {context.airport_name} ({context.airport_icao})
-airport_field_elevation_ft_msl: {context.airport_elevation_ft if context.airport_elevation_ft is not None else "unknown"}
 user_location_label: {context.user_location_label}
 time_window_label: {context.time_window_label}
-callsign: {context.callsign}
-icao24: {context.icao24}
-previous_reports_by_this_user_for_aircraft: {context.previous_report_count}
+aircraft_n_number: {context.callsign}
 aircraft_type: {context.aircraft_type}
 observed_from: {context.observed_from}
 observed_to: {context.observed_to}
-circles_count: {context.circles}
-avg_loop_radius_nm: {context.avg_radius if context.avg_radius is not None else "unknown"}
-alt_band_ft: {context.alt_min if context.alt_min is not None else "unknown"}-{context.alt_max if context.alt_max is not None else "unknown"}
 touch_and_go_count: {context.touch_and_gos}
-low_approach_count: {context.low_approaches}
 passes_over_user_count: {context.passes}
 avg_altitude_over_user_ft_agl: {context.avg_altitude_user if context.avg_altitude_user is not None else "unknown"}
-min_altitude_over_user_ft_agl: {context.min_altitude_user if context.min_altitude_user is not None else "unknown"}
+lowest_altitude_over_user_ft_agl: {context.min_altitude_user if context.min_altitude_user is not None else "unknown"}
 peak_db_at_home: {f"{context.peak_db_at_home:.1f}" if context.peak_db_at_home is not None else "unknown"}
 quiet_hours_events: {context.quiet_hours_events}
 peak_hours: {context.peak_hours}
 origin_airport: {context.origin_airport}
-runway_used: {context.runway_used or "unknown"}
+previous_reports_by_this_user_for_aircraft: {context.previous_report_count}
 """
 
 
 def build_aggregate_prompt(context: AggregateComplaintContext, sliders: ToneSliders) -> str:
     bands = prompt_bands(sliders)
-    prefs = context.message_preferences
     aircraft_lines = []
     for item in context.items:
         aircraft_lines.append(
             "; ".join([
-                f"{item.callsign} ({item.icao24})",
+                item.callsign,
                 f"origin {item.origin_airport}",
-                f"circles {item.circles}",
+                f"touch_and_gos {item.touch_and_gos}",
                 f"passes {item.passes}",
-                f"avg_over_house_ft_agl {item.avg_altitude_user if item.avg_altitude_user is not None else 'unknown'}",
+                f"lowest_over_house_ft_agl {item.min_altitude_user if item.min_altitude_user is not None else 'unknown'}",
                 f"previous_reports {item.previous_report_count}",
             ])
         )
     return f"""You write one consolidated aviation noise complaint for a resident to paste into an official form.
-Do not write separate sections per aircraft. Produce one coherent complaint that summarizes all aircraft together.
-Use 12-hour clock labels with AM/PM only. Do not use 24-hour or military time.
-Never speculate about pilot intent. Never use profanity or personal attacks.
-Follow the message preferences exactly: include a fact only when the corresponding include flag is true.
+Do not write separate sections per aircraft. Produce one coherent complaint that summarizes all aircraft together, following your instructions.
 
 TONE CONTROLS:
 anger: {bands["anger"]}
@@ -166,28 +143,18 @@ respect: {bands["respect"]}
 detail: {bands["detail"]}
 local_flavor: {bands["local"]}
 
-MESSAGE PREFERENCES:
-include_all_detail: {prefs.include_all_detail}
-include_airport_elevation: {prefs.include_elevation}
-include_number_of_circles: {prefs.include_circles}
-include_altitude_over_house: {prefs.include_altitude_over_house}
-include_db_at_home: {prefs.include_db_at_home}
-
 AGGREGATE DATA:
 airport: {context.airport_name} ({context.airport_icao})
-airport_field_elevation_ft_msl: {context.airport_elevation_ft if context.airport_elevation_ft is not None else "unknown"}
 user_location_label: {context.user_location_label}
 time_window_label: {context.time_window_label}
 observed_from: {context.observed_from}
 observed_to: {context.observed_to}
 aircraft_count: {context.aircraft_count}
-callsigns: {", ".join(context.callsigns)}
-total_circles: {context.total_circles}
+n_numbers: {", ".join(context.callsigns)}
 total_touch_and_go_count: {context.total_touch_and_gos}
-total_low_approach_count: {context.total_low_approaches}
 total_passes_over_user_count: {context.total_passes}
 avg_altitude_over_user_ft_agl: {context.avg_altitude_user if context.avg_altitude_user is not None else "unknown"}
-min_altitude_over_user_ft_agl: {context.min_altitude_user if context.min_altitude_user is not None else "unknown"}
+lowest_altitude_over_user_ft_agl: {context.min_altitude_user if context.min_altitude_user is not None else "unknown"}
 peak_db_at_home: {f"{context.peak_db_at_home:.1f}" if context.peak_db_at_home is not None else "unknown"}
 previous_reports_by_this_user_total: {context.previous_report_total}
 
@@ -274,7 +241,18 @@ def deterministic_aggregate_description(context: AggregateComplaintContext) -> s
     return " ".join(parts)
 
 
-DEFAULT_SYSTEM_PROMPT = "You produce factual, civil aviation noise complaint descriptions. Use 12-hour AM/PM time, never military time."
+DEFAULT_SYSTEM_PROMPT = (
+    "You write a short aviation noise complaint that a resident will paste into an official form. "
+    "Write 3 to 8 sentences in the first person, with length governed by the detail tone control. "
+    "Focus entirely on how disruptive the aircraft is to people on the ground: its repetitive "
+    "touch-and-go landings, the noise it makes, and how low it flies over the resident's home "
+    "(call out the lowest pass). Lead with the aircraft's N-number when one is provided. "
+    "Do not mention runway or airport field elevation. Do not mention the number of circles or the "
+    "loop radius. Do not mention runway changes unless the DATA explicitly flags an unwarranted, "
+    "against-the-wind change. Use specific numbers and 12-hour AM/PM local time; never use 24-hour "
+    "or military time. Never speculate about the pilot's intent. Never use profanity or personal "
+    "attacks. Blend the five tone controls into one coherent voice."
+)
 
 
 def runway_change_note(changes: list[dict]) -> str:
@@ -297,9 +275,10 @@ async def generate_with_groq(
 ) -> str | None:
     if not api_key:
         return None
-    # Tight timeout so the API endpoint falls through to the deterministic
-    # local draft quickly instead of leaving the user staring at a spinner.
-    async with httpx.AsyncClient(timeout=4.0) as client:
+    # Timeout so the API endpoint still falls through to the deterministic
+    # local draft instead of leaving the user staring at a spinner, now at 8s
+    # to give custom system prompts a real chance to reach the model.
+    async with httpx.AsyncClient(timeout=8.0) as client:
         response = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
