@@ -321,3 +321,20 @@ def test_owner_class_locked_returns_409(tmp_path, monkeypatch):
         assert resp.status_code == 409
     get_settings.cache_clear()
     get_settings.cache_clear()
+
+
+def test_activity_online_counts_recent_visitors(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIRCLEJERK_DATABASE_PATH", str(tmp_path / "circlejerk.sqlite3"))
+    monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
+    monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    with TestClient(app) as client:
+        empty = client.get("/activity/online")
+        assert empty.status_code == 200
+        assert empty.json()["count"] == 0
+
+        client.post("/activity/heartbeat", json={"visitor_id": "visitor-abc123", "path": "/"})
+        client.post("/activity/heartbeat", json={"visitor_id": "visitor-def456", "path": "/"})
+
+        after = client.get("/activity/online")
+        assert after.json()["count"] == 2

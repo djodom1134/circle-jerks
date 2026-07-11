@@ -607,6 +607,16 @@ async def activity_heartbeat(
     return {"ok": True, "seen_at": now}
 
 
+@app.get("/activity/online")
+async def activity_online(settings: Annotated[Settings, Depends(settings_dep)]):
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        count = db.online_visitor_count(
+            conn, now=now, active_window_seconds=settings.active_user_window_seconds
+        )
+    return {"count": count}
+
+
 @app.post("/activity/submissions")
 async def activity_submission(
     payload: ActivitySubmissionRequest,

@@ -1605,6 +1605,15 @@ def _aircraft_for_submissions(conn: sqlite3.Connection, submission_ids: list[int
     return grouped
 
 
+def online_visitor_count(conn: sqlite3.Connection, *, now: int, active_window_seconds: int) -> int:
+    """Distinct-visitor rows seen within the active window (currently online)."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM visitor_activity WHERE last_seen >= ?",
+        (now - active_window_seconds,),
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
 def admin_dashboard(conn: sqlite3.Connection, *, now: int, active_window_seconds: int) -> dict:
     active_since = now - active_window_seconds
     summary = conn.execute(
