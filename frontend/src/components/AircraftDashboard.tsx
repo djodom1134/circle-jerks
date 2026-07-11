@@ -77,9 +77,15 @@ export default function AircraftDashboard({ icao, win }: { icao: string; win: St
     if (!target) return;
     deepLinkApplied.current = true;
     setSelected(target);
-    document
-      .getElementById(`vnap-row-${target}`)
-      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Defer to the next frame and jump instantly: a "smooth" scroll on this
+    // long (1000+ row) table animates for ~1s, during which the selection/pulse
+    // re-renders cancel it — leaving the row off-screen. An rAF'd instant scroll
+    // lands reliably; the pulse still draws the eye.
+    requestAnimationFrame(() =>
+      document
+        .getElementById(`vnap-row-${target}`)
+        ?.scrollIntoView({ behavior: "auto", block: "center" }),
+    );
     setPulseIcao(target);
     const t = window.setTimeout(
       () => setPulseIcao((cur) => (cur === target ? null : cur)),
