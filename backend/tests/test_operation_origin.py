@@ -176,7 +176,12 @@ async def test_enrich_origins_skips_takeoff_events(tmp_path):
 @pytest.mark.asyncio
 async def test_enrich_origins_never_raises_on_resolver_failure(tmp_path, monkeypatch):
     """A detector loop that dies on an origin lookup would take down live
-    detection for circlejerks.live. Must swallow the failure and continue."""
+    detection for circlejerks.live. Must swallow the failure and continue.
+
+    The track below carries real ground evidence (on_ground=True) so the
+    performance pre-filter (_track_has_ground_evidence) does not shortcut
+    around the resolver — otherwise the monkeypatched failure would never
+    actually be exercised, and this test would pass for the wrong reason."""
     conn = seeded_conn(tmp_path / "t.sqlite3")
     icao24 = "boom0001"
     db.upsert_operation(conn, _op("op-boom", icao24=icao24, type_="landing"))
@@ -188,15 +193,153 @@ async def test_enrich_origins_never_raises_on_resolver_failure(tmp_path, monkeyp
 
     monkeypatch.setattr(services, "_resolve_origin_local_only", _boom)
 
+    track = [{
+        "icao24": icao24, "timestamp": 1000,
+        "lat": 40.0394, "lon": -105.2258,
+        "on_ground": True, "velocity_kt": 0.0,
+    }]
     new_events = [{"id": "op-boom", "type": "landing", "icao24": icao24, "timestamp": 1000}]
-    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: []})  # must not raise
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})  # must not raise
     conn.commit()
 
     row = db.read_operations(conn, "KLMO", 0, 10000)[0]
     assert row["origin_airport_icao"] is None
 
 
+@pytest.mark.asyncio
+async def test_enrich_origins_never_raises_on_non_dict_event(tmp_path):
+    """Finding 3 (task-4a review round 1): the eligible-type filter and the
+    op_id/icao24 extraction used to sit OUTSIDE the try/except, so a
+    non-dict entry in new_events raised AttributeError straight out of this
+    function (and out of run_detectors_for_monitor). worker.py's detect loop
+    catches that and rolls back the WHOLE pass — discarding persist_events /
+    deviation / flow writes too, not just the origin. Confirms the guard now
+    actually covers the type filter + extraction, not just the resolver
+    call."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    icao24 = "dict0001"
+    db.upsert_operation(conn, _op("op-dict", icao24=icao24, type_="landing"))
+    conn.commit()
+    store = MemoryStore()
+    track = [{
+        "icao24": icao24, "timestamp": 1000,
+        "lat": 40.0394, "lon": -105.2258,
+        "on_ground": True, "velocity_kt": 0.0,
+    }]
+    new_events = [
+        "not-a-dict",
+        {"id": "op-dict", "type": "landing", "icao24": icao24, "timestamp": 1000},
+    ]
+
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})  # must not raise
+    conn.commit()
+
+    row = db.read_operations(conn, "KLMO", 0, 10000)[0]
+    assert row["origin_airport_icao"] == "KBDU"
+
+
+# --- provenance gate: a cached network-derived guess must never be persisted ---
+#
+# Finding 2 (task-4a review round 1): _resolve_origin_local_only's cache key
+# (f"origin:{icao24}:{first_seen//3600}:{last_seen//3600}") is byte-identical
+# to resolve_origin's. resolve_origin writes NETWORK-derived results into
+# that same namespace (adsbdb, FlightAware, OpenSky flights/track-start,
+# Nominatim reverse-geocoding). So even though this detector-loop path never
+# makes a network call itself, it can read one of those results back out of
+# the cache — and this is the first code that persists that value into a
+# durable, press-facing column. These tests pre-seed the cache with the
+# EXACT shape a network result takes and assert it is rejected.
+
+
+@pytest.mark.asyncio
+async def test_enrich_origins_rejects_cached_network_derived_origin(tmp_path):
+    """A cache entry with a network origin_source and "medium" confidence
+    (e.g. OpenSky's 8nm track-start proximity match) must never be written
+    into operations.origin_airport_icao — only a genuine ground-track
+    OBSERVATION may be."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    icao24 = "net0001"
+    db.upsert_operation(conn, _op("op-net1", icao24=icao24, type_="landing"))
+    conn.commit()
+    store = MemoryStore()
+
+    # Real ground evidence exists so the perf pre-filter doesn't shortcut
+    # around the resolver — the resolver must actually reach the cache
+    # check and find (and then correctly reject) the seeded entry below.
+    track = [{
+        "icao24": icao24, "timestamp": 1000,
+        "lat": 40.0394, "lon": -105.2258,
+        "on_ground": True, "velocity_kt": 0.0,
+    }]
+    samples = services.valid_position_samples(track)
+    first_seen = int(samples[0]["timestamp"])
+    last_seen = int(samples[-1]["timestamp"])
+    cache_key = f"origin:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
+    # Simulates resolve_origin having already run (e.g. enrich_offenders's
+    # ORIGIN_ENRICH_LIMIT path, or a background task) and cached a NETWORK
+    # result under this exact key.
+    await store.set_cache(cache_key, {
+        "origin_city": "Denver",
+        "origin_airport_icao": "KDEN",
+        "origin_label": "Denver (KDEN)",
+        "origin_source": "opensky_track_start_near_airport",
+        "origin_confidence": "medium",
+    }, 3600)
+
+    new_events = [{"id": "op-net1", "type": "landing", "icao24": icao24, "timestamp": 1000}]
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})
+    conn.commit()
+
+    row = db.read_operations(conn, "KLMO", 0, 10000)[0]
+    assert row["origin_airport_icao"] is None
+
+
+@pytest.mark.asyncio
+async def test_enrich_origins_rejects_cached_network_origin_even_at_high_confidence(tmp_path):
+    """Confidence alone is NOT a sufficient gate: airport_label_for_icao's
+    "opensky_flights_departure" source (a NETWORK result, from OpenSky flight
+    history) is stamped confidence "high" whenever the departure ICAO
+    happens to match a row in our airports table. The gate must check
+    origin_source too, not just origin_confidence."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    icao24 = "net0002"
+    db.upsert_operation(conn, _op("op-net2", icao24=icao24, type_="landing"))
+    conn.commit()
+    store = MemoryStore()
+
+    track = [{
+        "icao24": icao24, "timestamp": 1000,
+        "lat": 40.0394, "lon": -105.2258,
+        "on_ground": True, "velocity_kt": 0.0,
+    }]
+    samples = services.valid_position_samples(track)
+    first_seen = int(samples[0]["timestamp"])
+    last_seen = int(samples[-1]["timestamp"])
+    cache_key = f"origin:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
+    await store.set_cache(cache_key, {
+        "origin_city": "Boulder",
+        "origin_airport_icao": "KBDU",
+        "origin_label": "Boulder Municipal (KBDU)",
+        "origin_source": "opensky_flights_departure",
+        "origin_confidence": "high",
+    }, 3600)
+
+    new_events = [{"id": "op-net2", "type": "landing", "icao24": icao24, "timestamp": 1000}]
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})
+    conn.commit()
+
+    row = db.read_operations(conn, "KLMO", 0, 10000)[0]
+    assert row["origin_airport_icao"] is None
+
+
+# --- source-inspection lints (weak — see the behavioral test below) ---------
+
+
 def test_enrich_origins_uses_local_only_resolver_never_the_network_waterfall():
+    """This is a lint, not a proof: it would still pass if
+    _resolve_origin_local_only itself grew a network call tomorrow. See
+    test_run_detectors_never_hits_network_even_if_httpx_would_raise below for
+    the behavioral guarantee that survives refactoring."""
     src = inspect.getsource(services._enrich_origins_for_new_events)
     assert "_resolve_origin_local_only(" in src
     assert "resolve_origin(" not in src
@@ -295,3 +438,55 @@ async def test_run_detectors_leaves_origin_null_without_ground_evidence(tmp_path
     rows = [r for r in db.read_operations(conn, "KLMO", 0, now + 10) if r["type"] == "landing"]
     assert rows, "expected a persisted landing op"
     assert rows[0]["origin_airport_icao"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_detectors_never_hits_network_even_if_httpx_would_raise(tmp_path, monkeypatch):
+    """Finding 4 (task-4a review round 1): a BEHAVIORAL guard for "the
+    detector loop never calls resolve_origin's network waterfall", replacing
+    the source-inspection lint above with a test that survives refactoring —
+    it doesn't matter what the code looks like, only what it DOES.
+
+    Every httpx.AsyncClient in this codebase is constructed as `httpx.AsyncClient(...)`
+    at call time (adsbdb.py, flightaware.py, opensky.py, services.py's
+    reverse_city_for_point/weather-adjacent helpers), so patching the shared
+    httpx module's AsyncClient attribute intercepts ALL of them. If anything
+    reachable from run_detectors_for_monitor constructed one, it would raise
+    here, get swallowed by _enrich_origins_for_new_events's own try/except,
+    and the origin below would be written as NULL instead of the correct
+    resolved airport — so a wrong (None) result below proves a network call
+    was attempted."""
+    import httpx as httpx_module
+
+    class _BoomAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("network call attempted from the detector loop")
+
+    monkeypatch.setattr(httpx_module, "AsyncClient", _BoomAsyncClient)
+
+    db_path = str(tmp_path / "detect3.sqlite3")
+    db.init_db(db_path)
+    store = MemoryStore()
+    settings = Settings(database_path=db_path)
+
+    now = int(time.time())
+    lt = now - 400
+    t0 = lt - 90
+    icao24 = "netbm001"
+
+    ground_samples = [{
+        "icao24": icao24, "callsign": "N9LAND", "timestamp": ts,
+        "lat": 40.0394, "lon": -105.2258, "geo_altitude_ft": 5288,
+        "velocity_kt": 0.0, "vertical_rate_fpm": 0, "on_ground": True,
+    } for ts in (t0 - 600, t0 - 570)]
+
+    for s in ground_samples + _approach_and_landing_samples(icao24, t0):
+        await store.add_track_sample(icao24, s, ttl=3600)
+
+    conn = db.connect(db_path)
+    run = await services.run_detectors_for_monitor(store, settings, conn, _monitor())
+    assert run.written >= 1
+
+    rows = [r for r in db.read_operations(conn, "KLMO", 0, now + 10) if r["type"] == "landing"]
+    assert rows, "expected a persisted landing op"
+    assert rows[0]["origin_airport_icao"] == "KBDU"

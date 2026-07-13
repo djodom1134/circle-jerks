@@ -41,6 +41,14 @@ ORIGIN_GROUND_AIRPORT_MAX_NM = 3.0
 ORIGIN_TRACK_START_AIRPORT_MAX_NM = 8.0
 ORIGIN_FIRST_SEEN_AIRPORT_MAX_NM = 8.0
 ORIGIN_GROUND_SPEED_MAX_KT = 45.0
+# The ONLY origin_source that represents a genuine local ground-track
+# OBSERVATION (an on-ground / slow sample near an airport) rather than a
+# network-derived inference. `_resolve_origin_local_only`'s cache key is
+# byte-identical to `resolve_origin`'s (see both functions), so a cache hit
+# can be a network result (adsbdb / FlightAware / OpenSky / Nominatim) that
+# leaked into the same namespace. Only THIS source may ever be persisted into
+# operations.origin_airport_icao — see _persistable_origin_icao.
+ORIGIN_GROUND_TRACK_SOURCE = "ground_track_near_airport"
 # Op types where "origin" is a meaningful, honest signal: an ARRIVAL at this
 # airport. A takeoff's origin is trivially this airport, so writing one on a
 # takeoff row would poison the classifier's "N of M arrivals originated at X"
@@ -492,16 +500,26 @@ async def run_detectors_for_monitor(
         except Exception:  # noqa: BLE001 — never let weather break detection
             wind = {}
         flow.process(conn, airport.icao, runways, new_events, wind, now)
-        # Forward-fill origin_airport_icao for newly-detected arrivals only.
-        # Local-only (cache + ground-track) resolver, never resolve_origin's
-        # network waterfall — see _enrich_origins_for_new_events. Best-effort:
-        # never raises, so a bad lookup can't take down this shared loop.
-        await _enrich_origins_for_new_events(store, conn, new_events, tracks_by_icao24)
         # Release the write lock here. db_session commits only on exit, and the
         # callers keep this connection open for seconds afterwards — the worker
         # across its HTTP fetches, the scan across enrich_offenders and
         # tracks_for_response. Holding an open write transaction that long
         # starved every other writer past SQLite's 5s busy_timeout.
+        conn.commit()
+        # Forward-fill origin_airport_icao for newly-detected arrivals only.
+        # Local-only (cache + ground-track) resolver, never resolve_origin's
+        # network waterfall — see _enrich_origins_for_new_events. Best-effort:
+        # never raises, so a bad lookup can't take down this shared loop.
+        #
+        # Deliberately AFTER the commit above, not before: this used to run
+        # inside the same transaction as persist_events/deviation/flow,
+        # holding SQLite's single write lock across up to 8 unindexed
+        # `nearest_airport` table scans per event (see
+        # _enrich_origins_for_new_events for the fix and the measured
+        # before/after cost). Committing first means a slow or failed
+        # enrichment pass can never hold that lock, and persist_events /
+        # deviation / flow are durable even if enrichment never runs.
+        await _enrich_origins_for_new_events(store, conn, new_events, tracks_by_icao24)
         conn.commit()
     return DetectorRun(written, detected)
 
@@ -1390,6 +1408,43 @@ async def _resolve_origin_local_only(
     return unknown_origin()
 
 
+def _track_has_ground_evidence(track: list[dict]) -> bool:
+    """Mirrors the EXACT condition origin_from_ground_track requires to ever
+    return a result: same [:8] earliest-samples window, same on-ground/slow
+    test. origin_from_ground_track cannot succeed unless this holds, so
+    checking it FIRST — before calling the resolver at all — is behavior
+    preserving and lets the caller skip the unindexed `nearest_airport` table
+    scan (SCAN airports, no lat/lon index, ~0.8ms/call on a production-size
+    16k-row table) entirely for tracks that could never produce a
+    ground-track origin. That's the common case: an arrival that was
+    airborne for its whole tracked history."""
+    for sample in valid_position_samples(track)[:8]:
+        velocity = sample.get("velocity_kt")
+        if sample.get("on_ground") is True or (velocity is not None and velocity <= ORIGIN_GROUND_SPEED_MAX_KT):
+            return True
+    return False
+
+
+def _persistable_origin_icao(origin: dict) -> str | None:
+    """Only a genuine LOCAL ground-track OBSERVATION may be written into the
+    durable, press-facing operations.origin_airport_icao column — never a
+    network-derived guess. `_resolve_origin_local_only`'s cache key is
+    byte-identical to `resolve_origin`'s, so a cache hit here can be reading
+    back a network result `resolve_origin` wrote (adsbdb / FlightAware /
+    OpenSky / Nominatim), including OpenSky's 8nm track-start proximity guess
+    at "medium" confidence. Gate on BOTH source and confidence: confidence
+    alone is NOT sufficient, because `airport_label_for_icao`'s
+    "opensky_flights_departure" source (a NETWORK result) can also carry
+    confidence "high" when the departure ICAO happens to match a row in our
+    airports table."""
+    if (
+        origin.get("origin_source") == ORIGIN_GROUND_TRACK_SOURCE
+        and origin.get("origin_confidence") == "high"
+    ):
+        return origin.get("origin_airport_icao")
+    return None
+
+
 async def _enrich_origins_for_new_events(
     store: Store,
     conn,
@@ -1398,26 +1453,51 @@ async def _enrich_origins_for_new_events(
 ) -> None:
     """Best-effort forward-fill of operations.origin_airport_icao.
 
-    Called once per detector pass, immediately after persist_events, over
-    ONLY new_events (never a re-sweep of old rows) — the same shape as
-    deviation.store_deviations / flow.process. Local-only resolver (cache +
-    ground-track), never resolve_origin's network waterfall: this runs on the
-    detector loop shared with circlejerks.live, and blocking it on external
-    HTTP would degrade live detection. Never raises — a failed lookup for one
-    aircraft must not take down detection for the rest of the scan.
+    Called once per detector pass, over ONLY new_events (never a re-sweep of
+    old rows) — the same shape as deviation.store_deviations / flow.process.
+    Local-only resolver (cache + ground-track), never resolve_origin's
+    network waterfall: this runs on the detector loop shared with
+    circlejerks.live, and blocking it on external HTTP would degrade live
+    detection. Never raises — a failed lookup for one aircraft must not take
+    down detection for the rest of the scan.
+
+    Performance (measured against a production-size 16k-row airports table —
+    see task-4a-report.md "Fix round 1"): the naive version costs ~6.5-7.5ms
+    per event (up to 8 unindexed `nearest_airport` table scans EACH, run
+    before the cheap on-ground/velocity test, with no negative-result
+    caching) and runs while this function's caller still holds SQLite's
+    write lock. Three fixes, all confined to this function:
+      1. Pre-filter (_track_has_ground_evidence) before calling the resolver
+         at all — eliminates the scan entirely for the common airborne-only
+         case.
+      2. Memoize per icao24 for the duration of one pass — repeat
+         touch-and-go events from the same aircraft resolve once, not N
+         times.
+      3. The caller (run_detectors_for_monitor) now invokes this AFTER its
+         own conn.commit(), so this no longer runs inside the same
+         transaction that holds SQLite's single write lock.
     """
     log = logging.getLogger(__name__)
+    resolved_by_icao24: dict[str, dict] = {}
     for event in new_events:
-        if event.get("type") not in ORIGIN_ELIGIBLE_OP_TYPES:
-            continue  # takeoff's origin is trivially this airport; don't write it
-        op_id = event.get("id")
-        icao24 = event.get("icao24")
-        if not op_id or not icao24:
-            continue
+        op_id = None
+        icao24 = None
         try:
-            track = tracks_by_icao24.get(icao24) or []
-            origin = await _resolve_origin_local_only(store, conn, icao24, track)
-            db.update_operation_origin(conn, op_id, origin.get("origin_airport_icao"))
+            if event.get("type") not in ORIGIN_ELIGIBLE_OP_TYPES:
+                continue  # takeoff's origin is trivially this airport; don't write it
+            op_id = event.get("id")
+            icao24 = event.get("icao24")
+            if not op_id or not icao24:
+                continue
+            if icao24 not in resolved_by_icao24:
+                track = tracks_by_icao24.get(icao24) or []
+                if _track_has_ground_evidence(track):
+                    origin = await _resolve_origin_local_only(store, conn, icao24, track)
+                else:
+                    origin = unknown_origin()
+                resolved_by_icao24[icao24] = origin
+            origin = resolved_by_icao24[icao24]
+            db.update_operation_origin(conn, op_id, _persistable_origin_icao(origin))
         except Exception:  # noqa: BLE001 — a failed origin lookup must not break detection
             log.warning(
                 "origin enrichment failed for icao24=%s op_id=%s", icao24, op_id, exc_info=True
@@ -1634,7 +1714,7 @@ def origin_from_ground_track(conn, track: list[dict]) -> dict | None:
             conn,
             sample["lat"],
             sample["lon"],
-            "ground_track_near_airport",
+            ORIGIN_GROUND_TRACK_SOURCE,
             "high",
             ORIGIN_GROUND_AIRPORT_MAX_NM,
         )
