@@ -18,7 +18,9 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import db
+from . import db, homebase
+from .registry.normalize import resolve_display_tail
+from .registry.owner_type import infer_owner_type
 
 # The billable unit. Every one of these is an arrival at the runway.
 RUNWAY_USE_TYPES: tuple[str, ...] = ("landing", "touch_and_go", "low_approach")
@@ -194,3 +196,115 @@ def rollup_daily_runway_uses(
         out.append({"date": key, "runway_uses": found.get(key, 0)})
         cursor += timedelta(days=1)
     return out
+
+
+# Owner types we will NAME on a public page. Organizations only.
+#
+# `llc` and `trust` are deliberately EXCLUDED even though they are legal entities:
+# a single-member LLC ("SMITH AVIATION LLC") and a holding trust are the standard
+# ways an individual owns a personal aircraft, and naming them names a person.
+# `individual` and `unknown` are excluded for the obvious reason.
+NAMEABLE_OWNER_TYPES: frozenset[str] = frozenset({
+    "flight_school",
+    "skydiving",
+    "commercial_airline",
+    "club",
+    "university",
+    "government",
+    "corporation",
+})
+
+PRIVATE_BUCKET = "Private / unaffiliated"
+
+
+def operator_ledger(
+    conn: sqlite3.Connection,
+    icao: str,
+    start_day: str,
+    end_day: str,
+    limit: int = 10,
+) -> list[dict]:
+    """Runway uses aggregated by OPERATOR, ranked descending.
+
+    Never by tail number. An N-number resolves to an owner's name and home address
+    in one FAA registry lookup; a public per-aircraft money leaderboard aimed at
+    press is a harassment vector pointed at individual pilots, some of them students
+    in rented aircraft. It is also the weaker story — a named individual generates
+    sympathy for the target, a named business generates outrage at it.
+
+    Organizations are named. Individuals are bucketed and never named. No registrant
+    address is emitted in any form.
+    """
+    icao = icao.upper()
+
+    rows = conn.execute(
+        "SELECT r.icao24 AS icao24, SUM(r.count) AS uses, "
+        "       (SELECT o.callsign FROM operations o "
+        "         WHERE o.icao24 = r.icao24 AND o.callsign IS NOT NULL "
+        "         ORDER BY o.timestamp DESC LIMIT 1) AS callsign, "
+        "       (SELECT reg.registrant_name FROM aircraft_registry reg "
+        "         WHERE reg.icao_hex = upper(r.icao24) LIMIT 1) AS registrant_name "
+        "FROM daily_operation_rollup r "
+        f"WHERE r.icao=? AND r.date_local BETWEEN ? AND ? "
+        f"  AND r.event_type IN ({','.join('?' * len(RUNWAY_USE_TYPES))}) "
+        "GROUP BY r.icao24",
+        (icao, start_day, end_day, *RUNWAY_USE_TYPES),
+    ).fetchall()
+
+    localities = homebase.locality_map(conn, icao)
+
+    groups: dict[str, dict] = {}
+    for row in rows:
+        owner = infer_owner_type(row["registrant_name"])
+        nameable = owner.owner_type in NAMEABLE_OWNER_TYPES and row["registrant_name"]
+        key = row["registrant_name"] if nameable else PRIVATE_BUCKET
+
+        group = groups.setdefault(key, {
+            "operator": key,
+            "owner_type": owner.owner_type if nameable else "private",
+            "runway_uses": 0,
+            "aircraft": [],
+            "_localities": [],
+        })
+        group["runway_uses"] += row["uses"]
+        group["aircraft"].append({
+            "tail": resolve_display_tail(row["callsign"], None, row["icao24"]),
+            "runway_uses": row["uses"],
+        })
+        entry = localities.get(row["icao24"])
+        if entry:
+            group["_localities"].append(entry)
+
+    out = []
+    for group in groups.values():
+        locality, evidence = _dominant_locality(group.pop("_localities"))
+        group["aircraft_count"] = len(group["aircraft"])
+        group["aircraft"].sort(key=lambda a: a["runway_uses"], reverse=True)
+        group["locality"] = locality
+        group["locality_evidence"] = evidence
+        out.append(group)
+
+    out.sort(key=lambda g: g["runway_uses"], reverse=True)
+    return out[:limit]
+
+
+def _dominant_locality(entries: list[dict]) -> tuple[str, list[dict]]:
+    """An operator's locality is its aircraft's, but only when they AGREE.
+
+    A fleet split between local and non-local aircraft gets `unclassified`, not a
+    majority vote — because the operator ledger names businesses, and a split fleet
+    is precisely the case where a confident badge would be wrong.
+    """
+    if not entries:
+        return homebase.UNCLASSIFIED, []
+
+    decided = [e for e in entries if e["locality"] != homebase.UNCLASSIFIED]
+    if not decided:
+        return homebase.UNCLASSIFIED, entries[0]["evidence"]
+
+    localities = {e["locality"] for e in decided}
+    if len(localities) > 1:
+        return homebase.UNCLASSIFIED, []
+
+    best = max(decided, key=lambda e: e["signal_strength"])
+    return best["locality"], best["evidence"]
