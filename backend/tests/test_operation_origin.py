@@ -191,7 +191,7 @@ async def test_enrich_origins_never_raises_on_resolver_failure(tmp_path, monkeyp
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated resolver failure")
 
-    monkeypatch.setattr(services, "_resolve_origin_local_only", _boom)
+    monkeypatch.setattr(services, "_resolve_origin_local_ground_track", _boom)
 
     track = [{
         "icao24": icao24, "timestamp": 1000,
@@ -204,6 +204,48 @@ async def test_enrich_origins_never_raises_on_resolver_failure(tmp_path, monkeyp
 
     row = db.read_operations(conn, "KLMO", 0, 10000)[0]
     assert row["origin_airport_icao"] is None
+
+
+@pytest.mark.asyncio
+async def test_enrich_origins_memoizes_resolver_failure_across_events(tmp_path, monkeypatch):
+    """Task-4a review round 2, Finding 4: services.py's old single-phase loop
+    skipped `resolved_by_icao24[icao24] = origin` in its except branch, so N
+    events from one persistently-failing aircraft in the same pass retried
+    the resolver N times (and logged N warnings) instead of once. Two events
+    for the same icao24, both eligible, with a resolver that always raises:
+    the resolver must be invoked exactly once, and both operations must land
+    NULL (not raise, not partially resolve)."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    icao24 = "boom0002"
+    db.upsert_operation(conn, _op("op-boom-a", icao24=icao24, type_="landing", ts=1000))
+    db.upsert_operation(conn, _op("op-boom-b", icao24=icao24, type_="touch_and_go", ts=1010))
+    conn.commit()
+    store = MemoryStore()
+
+    calls = []
+
+    async def _boom(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("simulated resolver failure")
+
+    monkeypatch.setattr(services, "_resolve_origin_local_ground_track", _boom)
+
+    track = [{
+        "icao24": icao24, "timestamp": 1000,
+        "lat": 40.0394, "lon": -105.2258,
+        "on_ground": True, "velocity_kt": 0.0,
+    }]
+    new_events = [
+        {"id": "op-boom-a", "type": "landing", "icao24": icao24, "timestamp": 1000},
+        {"id": "op-boom-b", "type": "touch_and_go", "icao24": icao24, "timestamp": 1010},
+    ]
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})  # must not raise
+    conn.commit()
+
+    assert len(calls) == 1, "resolver must be memoized per icao24 per pass, even after a failure"
+    rows = {r["id"]: r for r in db.read_operations(conn, "KLMO", 0, 10000)}
+    assert rows["op-boom-a"]["origin_airport_icao"] is None
+    assert rows["op-boom-b"]["origin_airport_icao"] is None
 
 
 @pytest.mark.asyncio
@@ -252,20 +294,23 @@ async def test_enrich_origins_never_raises_on_non_dict_event(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_enrich_origins_rejects_cached_network_derived_origin(tmp_path):
-    """A cache entry with a network origin_source and "medium" confidence
-    (e.g. OpenSky's 8nm track-start proximity match) must never be written
-    into operations.origin_airport_icao — only a genuine ground-track
-    OBSERVATION may be."""
+async def test_enrich_origins_ignores_cached_network_derived_origin_medium_confidence(tmp_path):
+    """Task-4a review round 2, Finding 1: the round-1 gate rejected a cached
+    network value by inspecting its origin_source/confidence — but
+    _enrich_origins_for_new_events no longer even LOOKS at the shared
+    `origin:` cache namespace on this path, so a poisoned entry there
+    (e.g. OpenSky's 8nm track-start proximity match, cached by
+    enrich_offenders's ORIGIN_ENRICH_LIMIT path or a background task) is
+    never read at all — the persisted value is the LOCAL track's own ground
+    truth (KBDU), proving the cache is bypassed by construction, not by a
+    dict-shape gate."""
     conn = seeded_conn(tmp_path / "t.sqlite3")
     icao24 = "net0001"
     db.upsert_operation(conn, _op("op-net1", icao24=icao24, type_="landing"))
     conn.commit()
     store = MemoryStore()
 
-    # Real ground evidence exists so the perf pre-filter doesn't shortcut
-    # around the resolver — the resolver must actually reach the cache
-    # check and find (and then correctly reject) the seeded entry below.
+    # Real ground evidence at KBDU.
     track = [{
         "icao24": icao24, "timestamp": 1000,
         "lat": 40.0394, "lon": -105.2258,
@@ -277,7 +322,8 @@ async def test_enrich_origins_rejects_cached_network_derived_origin(tmp_path):
     cache_key = f"origin:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
     # Simulates resolve_origin having already run (e.g. enrich_offenders's
     # ORIGIN_ENRICH_LIMIT path, or a background task) and cached a NETWORK
-    # result under this exact key.
+    # result — for a DIFFERENT airport than the local ground truth — under
+    # this exact key.
     await store.set_cache(cache_key, {
         "origin_city": "Denver",
         "origin_airport_icao": "KDEN",
@@ -291,16 +337,19 @@ async def test_enrich_origins_rejects_cached_network_derived_origin(tmp_path):
     conn.commit()
 
     row = db.read_operations(conn, "KLMO", 0, 10000)[0]
-    assert row["origin_airport_icao"] is None
+    assert row["origin_airport_icao"] == "KBDU"
 
 
 @pytest.mark.asyncio
-async def test_enrich_origins_rejects_cached_network_origin_even_at_high_confidence(tmp_path):
-    """Confidence alone is NOT a sufficient gate: airport_label_for_icao's
+async def test_enrich_origins_ignores_cached_network_origin_even_at_high_confidence(tmp_path):
+    """Confidence alone was never a sufficient gate: airport_label_for_icao's
     "opensky_flights_departure" source (a NETWORK result, from OpenSky flight
-    history) is stamped confidence "high" whenever the departure ICAO
-    happens to match a row in our airports table. The gate must check
-    origin_source too, not just origin_confidence."""
+    history) is stamped confidence "high" whenever the departure ICAO happens
+    to match a row in our airports table — indistinguishable, by field
+    inspection alone, from a real local observation. Post round-2 fix this
+    doesn't matter: the shared cache isn't consulted, so a poisoned entry
+    (here, for a DIFFERENT airport than the local ground truth) is never
+    read, at any confidence level."""
     conn = seeded_conn(tmp_path / "t.sqlite3")
     icao24 = "net0002"
     db.upsert_operation(conn, _op("op-net2", icao24=icao24, type_="landing"))
@@ -317,9 +366,9 @@ async def test_enrich_origins_rejects_cached_network_origin_even_at_high_confide
     last_seen = int(samples[-1]["timestamp"])
     cache_key = f"origin:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
     await store.set_cache(cache_key, {
-        "origin_city": "Boulder",
-        "origin_airport_icao": "KBDU",
-        "origin_label": "Boulder Municipal (KBDU)",
+        "origin_city": "Broomfield, CO",
+        "origin_airport_icao": "KBJC",
+        "origin_label": "Broomfield, CO (KBJC)",
         "origin_source": "opensky_flights_departure",
         "origin_confidence": "high",
     }, 3600)
@@ -329,7 +378,71 @@ async def test_enrich_origins_rejects_cached_network_origin_even_at_high_confide
     conn.commit()
 
     row = db.read_operations(conn, "KLMO", 0, 10000)[0]
-    assert row["origin_airport_icao"] is None
+    assert row["origin_airport_icao"] == "KBDU"
+
+
+# --- Finding 1 (task-4a review round 2): the round-1 gate does not hold -----
+#
+# _persistable_origin_icao gates on origin_source == "ground_track_near_airport"
+# AND origin_confidence == "high". But resolve_origin's OWN OpenSky branch
+# (services.py, inside the `for at_ts in dict.fromkeys([0, first_seen])` loop)
+# calls origin_from_ground_track on OPENSKY NETWORK path samples and caches
+# the result under the EXACT SAME key this local-only path reads
+# (f"origin:{icao24}:{first_seen//3600}:{last_seen//3600}") -- with the SAME
+# origin_source and SAME confidence "high" that a genuine local ground
+# observation would carry. There is no difference in the dict shape, so no
+# gate on the dict's contents can ever distinguish them. The only fix is to
+# never read that shared namespace on this path at all.
+
+
+@pytest.mark.asyncio
+async def test_enrich_origins_never_persists_cached_opensky_path_origin_over_local_truth(tmp_path):
+    """Reproduces the reviewer's end-to-end finding: seed the SHARED `origin:`
+    cache with a network-derived value (origin_from_ground_track applied to
+    OpenSky /tracks/all path samples for a DIFFERENT airport, KBJC) under the
+    exact key this aircraft/flight would use, while the LOCAL in-memory track
+    has real ground evidence for KBDU. The persisted column must be KBDU --
+    never KBJC (the laundered network guess), and never NULL (that would
+    silently discard a real local observation just because the shared cache
+    happened to be poisoned)."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    icao24 = "lnd0001"
+    db.upsert_operation(conn, _op("op-l", icao24=icao24, type_="landing"))
+    conn.commit()
+    store = MemoryStore()
+
+    # Local in-memory track: REAL ground evidence at KBDU.
+    track = [{
+        "icao24": icao24, "timestamp": 1000,
+        "lat": 40.0394, "lon": -105.2258,
+        "on_ground": True, "velocity_kt": 0.0,
+    }]
+    samples = services.valid_position_samples(track)
+    first_seen = int(samples[0]["timestamp"])
+    last_seen = int(samples[-1]["timestamp"])
+    cache_key = f"origin:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
+
+    # Exactly what resolve_origin's OpenSky branch caches after fetching an
+    # OpenSky track payload over the NETWORK: origin_from_ground_track(conn,
+    # path_samples), where path_samples = opensky_track_path_samples(payload)
+    # -- rows carry on_ground=bool(row[5]) and no velocity_kt at all.
+    opensky_path_samples = [{
+        "timestamp": 1000, "lat": 39.9088, "lon": -105.1172,  # KBJC -- a DIFFERENT airport
+        "baro_altitude_m": None, "heading_deg": 0, "on_ground": True,
+    }]
+    network_derived = services.origin_from_ground_track(conn, opensky_path_samples)
+    assert network_derived["origin_airport_icao"] == "KBJC"
+    assert network_derived["origin_source"] == services.ORIGIN_GROUND_TRACK_SOURCE
+    assert network_derived["origin_confidence"] == "high"
+    await store.set_cache(cache_key, network_derived, services.origin_cache_ttl(network_derived))
+
+    new_events = [{"id": "op-l", "type": "landing", "icao24": icao24, "timestamp": 1000}]
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})
+    conn.commit()
+
+    row = db.read_operations(conn, "KLMO", 0, 10000)[0]
+    assert row["origin_airport_icao"] == "KBDU"
+    assert row["origin_airport_icao"] != "KBJC"
 
 
 # --- source-inspection lints (weak — see the behavioral test below) ---------
@@ -337,11 +450,19 @@ async def test_enrich_origins_rejects_cached_network_origin_even_at_high_confide
 
 def test_enrich_origins_uses_local_only_resolver_never_the_network_waterfall():
     """This is a lint, not a proof: it would still pass if
-    _resolve_origin_local_only itself grew a network call tomorrow. See
-    test_run_detectors_never_hits_network_even_if_httpx_would_raise below for
-    the behavioral guarantee that survives refactoring."""
+    _resolve_origin_local_ground_track itself grew a network call tomorrow.
+    See test_run_detectors_never_hits_network_even_if_httpx_would_raise below
+    for the behavioral guarantee that survives refactoring.
+
+    Also pins task-4a review round 2, Finding 1: the persisting path must
+    call _resolve_origin_local_ground_track (which resolves directly off the
+    local track and never touches resolve_origin's shared `origin:` cache),
+    NOT the old _resolve_origin_local_only (still used elsewhere, by
+    enrich_offenders's display-only path, but whose cache key collides with
+    resolve_origin's and is therefore unsafe to persist from)."""
     src = inspect.getsource(services._enrich_origins_for_new_events)
-    assert "_resolve_origin_local_only(" in src
+    assert "_resolve_origin_local_ground_track(" in src
+    assert "_resolve_origin_local_only(" not in src
     assert "resolve_origin(" not in src
 
 
