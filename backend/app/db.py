@@ -362,7 +362,12 @@ CREATE TABLE IF NOT EXISTS daily_operation_rollup (
   PRIMARY KEY (icao, date_local, event_type, icao24)
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_icao_date ON daily_operation_rollup(icao, date_local);
+"""
 
+
+# Kept as its own DDL block, appended to SCHEMA below, so that `_migrate` can drop
+# and recreate EXACTLY this table without re-executing the rest of the schema.
+HOME_BASE_SCHEMA = """
 -- Local vs non-local, recomputed nightly. `evidence_json` is a list of
 -- {code, text} facts that the UI renders INLINE next to the classification —
 -- the site never asserts a locality without showing why, because an unexplained
@@ -385,6 +390,8 @@ CREATE TABLE IF NOT EXISTS aircraft_home_base (
 );
 CREATE INDEX IF NOT EXISTS idx_home_base_icao ON aircraft_home_base(icao, locality);
 """
+
+SCHEMA += HOME_BASE_SCHEMA
 
 
 AIRPORT_SEED = [
@@ -483,6 +490,29 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for column, decl in cols:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    # `aircraft_home_base`: rebuild it if it predates the `confidence` ->
+    # `signal_strength` rename.
+    #
+    # SCHEMA is CREATE TABLE IF NOT EXISTS, so on a database that ALREADY carries the
+    # old shape `executescript(SCHEMA)` is a silent no-op and the old `confidence`
+    # column survives. Every write then dies on `OperationalError: table
+    # aircraft_home_base has no column named signal_strength`, and `locality_map`
+    # dies on `no such column: signal_strength`. The production SQLite file persists
+    # across deploys (DEPLOY.md:51,184 excludes data/*.sqlite3* from the rsync), so
+    # the first deploy that lands after a rename would take the ledger down.
+    #
+    # This table is a PURE DERIVED CACHE, rebuilt nightly from `operations` by the
+    # ledger worker. Nothing is lost by throwing it away, so a shape we cannot use is
+    # simply dropped and recreated: a crash becomes a self-heal. (Only ever DROP a
+    # derived cache. No table that holds an original observation may be treated this
+    # way.)
+    home_base = {
+        row["name"] for row in conn.execute("PRAGMA table_info(aircraft_home_base)").fetchall()
+    }
+    if home_base and "signal_strength" not in home_base:
+        conn.execute("DROP TABLE aircraft_home_base")   # index goes with it
+        conn.executescript(HOME_BASE_SCHEMA)
 
 
 def seed_db(conn: sqlite3.Connection) -> None:

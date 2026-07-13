@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from app import db, homebase
+from app import db, dwell, homebase
 
 
 def seeded_conn(path):
@@ -255,7 +255,8 @@ def test_missed_departures_are_not_evidence_of_absence(tmp_path):
     # The receipt must say WHY it weighed nothing, in the reader's language: we
     # saw 59 arrivals and watched it leave again 0 times.
     assert "59 observed arrivals" in overnight_text
-    assert "only 0 times" in overnight_text
+    assert "0 of the 59 full-stop landings" in overnight_text
+    assert "never followed by a departure we saw" in overnight_text
 
 
 def test_all_null_origins_can_never_produce_a_non_local(tmp_path):
@@ -507,13 +508,369 @@ def test_evidence_states_observations_and_true_denominators(tmp_path):
 
     # Every count is a floor, and every claim is about our observations.
     assert "observed" in texts["overnight_stays"]
-    assert "arrival and the departure" in texts["overnight_stays"]
-    # The TRUE denominator: 9 known origins out of 20 observed arrivals.
+    # ROUND 2 / I2: these 20 arrivals are all CIRCUITS. They closed themselves. We
+    # never watched a departure, and the receipt may not say we did -- that sentence
+    # is the load-bearing one under the badge, and the one a correction would quote
+    # back at us.
+    assert "we observed both the arrival and the departure" not in texts["overnight_stays"]
+    assert "circuits ended themselves and are not departures we watched" in (
+        texts["overnight_stays"]
+    )
+    assert "20 separate days" in texts["overnight_stays"]
+    # The TRUE denominator: 9 known origins out of 20 observed arrivals, and -- the
+    # count that actually gates the weight -- 9 separate DAYS, not 9 rows.
     assert "Origin known for 9 of 20 observed arrivals" in texts["arrival_origin"]
     assert "9 of those 9 came from KBDU" in texts["arrival_origin"]
+    assert "on 9 separate days" in texts["arrival_origin"]
     # Not a single evidence string may assert a fact we did not observe.
     for text in texts.values():
         assert "did not" not in text
+
+
+# ---------------------------------------------------------------------------
+# ROUND 2 / CRITICAL 1 -- `closed_visits` was the wrong quantity.
+#
+# `dwell.dwell_intervals` pairs a takeoff with the MOST RECENT landing and DROPS
+# the earlier one (dwell.py:76-79). So the aircraft whose overnights we cannot see
+# is exactly the aircraft that accrues "closed visits" fastest: the destroyed pair
+# is the overnight, the surviving pair is the same-day turnaround. The gate meant
+# to protect against missed departures was being SATISFIED by them.
+#
+# And a touch-and-go can never produce an overnight, so counting circuits in the
+# denominator of "0 overnights observed" is scoring an absence.
+#
+# The gate is now: enough closed visits AND at most one full-stop landing we never
+# watched leave (one = it is still on the field).
+# ---------------------------------------------------------------------------
+
+
+def test_probe_a_based_trainer_with_missed_departures_is_never_non_local(tmp_path):
+    """PROBE A -- a based trainer whose departures we NEVER observed.
+
+    41 full-stop landings, not one paired with a takeoff we saw, plus 20 pattern
+    circuits. Under the old gate the 20 self-closing circuits alone satisfied
+    `closed_visits >= 5`, the 0 overnights scored -0.30, and the KBDU origins
+    scored -0.45: `non_local @ 0.75, based KBDU` about an aircraft that LIVES here.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    # 41 landings, every departure missed by the detector.
+    for i in range(41):
+        _op(conn, f"pa_l{i}", "landing", NOW - (i + 2) * DAY, icao24="prb001", origin="KBDU")
+    # 20 circuits, the most recent an hour ago -- so the last operation is NOT a
+    # full-stop landing and the `on_field` veto (which is timing-dependent) does
+    # not fire. Nothing saves this aircraft except the gate itself.
+    for i in range(20):
+        _op(conn, f"pa_g{i}", "touch_and_go", NOW - i * DAY - 3600,
+            icao24="prb001", origin="KBDU")
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "prb001", now_ts=NOW)
+    assert result["locality"] != homebase.NON_LOCAL, (
+        "a based trainer whose 41 departures we never observed was published as a "
+        f"visitor from {result['based_icao']} @ {result['signal_strength']}"
+    )
+    assert result["locality"] == homebase.UNCLASSIFIED
+    assert result["based_icao"] is None
+    # And the receipt says why: those 41 landings are a hole in our data.
+    overnight_text = next(
+        e["text"] for e in result["evidence"] if e["code"] == "overnight_stays"
+    )
+    assert "41" in overnight_text
+    # It must NOT claim we watched a departure we never watched.
+    assert "we observed both the arrival and the departure" not in overnight_text
+
+
+def test_probe_d2_based_day_tripper_with_missed_dawn_departures_is_never_non_local(tmp_path):
+    """PROBE D2 -- no touch-and-goes at all, and still convicted.
+
+    A KLMO-BASED aircraft flying two legs a day to Boulder for 59 days. Its dawn
+    departure is missed (ADS-B transponders that only come alive after the takeoff
+    roll -- dwell.py:51-53 names missed departures as an EXPECTED condition); its
+    midday departure is seen. Every night it sleeps on the KLMO ramp.
+
+    `dwell_intervals` pairs the midday takeoff with the morning landing and DROPS
+    the afternoon landing -- so the 59 real overnights are invisible and 59 SHORT
+    turnarounds survive as "closed visits". Old verdict: `non_local @ 0.75,
+    based_icao=KBDU`, on a receipt claiming we watched it leave 59 times. We never
+    watched it leave once.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for d in range(59):
+        base = NOW - d * DAY
+        # ...its dawn departure HAPPENED, and we did not see it...
+        _op(conn, f"d2_a{d}", "landing", base - 9 * 3600, icao24="prb002", origin="KBDU")
+        _op(conn, f"d2_t{d}", "takeoff", base - 6 * 3600, icao24="prb002")   # SEEN
+        _op(conn, f"d2_b{d}", "landing", base - 4 * 3600, icao24="prb002", origin="KBDU")
+        # ...and then it sleeps on the KLMO ramp. That overnight pair is destroyed
+        # by the missed dawn takeoff: the NEXT landing overwrites the open one
+        # (dwell.py:76-79), and only the 3h turnaround survives.
+    conn.commit()
+
+    intervals = [
+        i for i in dwell.dwell_intervals(conn, "KLMO", NOW - 180 * DAY, NOW)
+        if i["icao24"] == "prb002"
+    ]
+    assert len(intervals) == 59
+    assert all(i["seconds"] == 3 * 3600 for i in intervals), (
+        "the destroyed evidence: every surviving pair is the 3h turnaround, never "
+        "the 19h overnight"
+    )
+    assert not any(i["seconds"] >= homebase.OVERNIGHT_SECONDS for i in intervals)
+    # The on_field veto is TIMING-dependent and does not fire here: the last
+    # operation is a landing only 4h old, short of the 8h mark. Nothing saves this
+    # aircraft except the gate itself.
+
+    result = homebase.classify(conn, "KLMO", "prb002", now_ts=NOW)
+    assert result["locality"] != homebase.NON_LOCAL, (
+        "an aircraft that sleeps on the KLMO ramp every night was published as a "
+        f"visitor from {result['based_icao']} @ {result['signal_strength']}"
+    )
+    assert result["locality"] == homebase.UNCLASSIFIED
+    assert result["based_icao"] is None
+    overnight_text = next(
+        e["text"] for e in result["evidence"] if e["code"] == "overnight_stays"
+    )
+    # 59 of its 118 landings were never followed by a departure we saw. An aircraft
+    # that slept here is EXACTLY what that looks like.
+    assert "59" in overnight_text
+    assert "we observed both the arrival and the departure" not in overnight_text
+
+
+def test_one_afternoon_of_circuits_is_one_observation_not_twelve(tmp_path):
+    """IMPORTANT 3 -- the gates counted operations, not independent observations.
+
+    The origin writer memoizes per aircraft per detector pass and resolves from the
+    earliest ground sample of the track (services.py:1659, 1725), so every arrival
+    in ONE session gets the same origin from ONE resolution. A single 40-minute
+    pattern session used to yield known=12, share=1.0, closed_visits=12 --
+    `non_local @ 0.75` from one afternoon, on a receipt claiming twelve independent
+    observations. Both gates now count distinct LOCAL DAYS.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(12):
+        _op(conn, f"ses{i}", "touch_and_go", NOW - 2 * DAY + i * 200,
+            icao24="ses888", origin="KBDU")
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "ses888", now_ts=NOW)
+    assert result["locality"] == homebase.UNCLASSIFIED
+    assert result["based_icao"] is None
+    assert result["signal_strength"] < homebase.CONFIDENCE_THRESHOLD
+
+
+def test_gate_still_fires_for_an_honest_transient(tmp_path):
+    """The gate must not over-suppress. Ten circuits from KBDU on ten separate days
+    is ten independent observations of an aircraft that arrives, does not stay, and
+    comes from somewhere else. That is still `non_local`, and it must remain so.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(10):
+        _op(conn, f"ht{i}", "touch_and_go", NOW - (i + 1) * DAY, icao24="hon111", origin="KBDU")
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "hon111", now_ts=NOW)
+    assert result["locality"] == homebase.NON_LOCAL
+    assert result["based_icao"] == "KBDU"
+
+
+def test_one_trailing_unpaired_landing_does_not_suppress_the_gate(tmp_path):
+    """A single landing we never watched leave is the aircraft sitting on the ramp
+    RIGHT NOW -- it is the expected steady state, not a data hole. It must not
+    suppress the overnight gate on its own; two must.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(10):
+        _op(conn, f"tr{i}", "touch_and_go", NOW - (i + 20) * DAY, icao24="trl222", origin="KBDU")
+    # One full-stop landing, four hours ago -- too recent for the on_field veto (8h).
+    _op(conn, "tr_l", "landing", NOW - 4 * 3600, icao24="trl222", origin="KBDU")
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "trl222", now_ts=NOW)
+    assert result["locality"] == homebase.NON_LOCAL
+
+
+# ---------------------------------------------------------------------------
+# ROUND 2 / IMPORTANTS 4-5 and MINORS 6-9.
+# ---------------------------------------------------------------------------
+
+
+def test_a_vetoed_verdict_never_publishes_a_signal_above_the_threshold(tmp_path):
+    """IMPORTANT 5 -- a veto must not be defeatable by reading the number.
+
+    The veto suppresses the VERDICT, but the score that produced it is unchanged --
+    so a vetoed non-local published `unclassified` alongside `signal_strength=0.75`,
+    above CONFIDENCE_THRESHOLD. Any consumer thresholding on the number instead of
+    reading the word gets back exactly the accusation we just withheld.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(14):
+        _op(conn, f"cl{i}", "touch_and_go", NOW - (i + 1) * DAY, icao24="clm111", origin="KBDU")
+    conn.execute(
+        "INSERT INTO aircraft_registry (n_number, icao_hex, registrant_city, registrant_state) "
+        "VALUES ('N8', 'CLM111', 'Longmont', 'CO')"
+    )
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "clm111", now_ts=NOW)
+    assert result["locality"] == homebase.UNCLASSIFIED
+    assert result["signal_strength"] < homebase.CONFIDENCE_THRESHOLD, (
+        f"a vetoed verdict published signal_strength={result['signal_strength']}, at "
+        f"or above CONFIDENCE_THRESHOLD={homebase.CONFIDENCE_THRESHOLD} -- a consumer "
+        f"thresholding on the number resurrects the verdict the veto suppressed"
+    )
+
+    # And the invariant, not just this one case: NO unclassified row, however it got
+    # there, may ever publish a signal at or above the threshold.
+    homebase.recompute_airport(conn, "KLMO", now_ts=NOW)
+    conn.commit()
+    for icao24, row in homebase.locality_map(conn, "KLMO").items():
+        if row["locality"] == homebase.UNCLASSIFIED:
+            assert row["signal_strength"] < homebase.CONFIDENCE_THRESHOLD, icao24
+
+
+def test_on_field_veto_is_a_live_backstop_not_dead_code(tmp_path, monkeypatch):
+    """MINOR 8 -- the on_field veto was arithmetically unreachable.
+
+    On-field adds at least +0.30 and the deepest reachable negative is -0.75, so
+    -0.75 + 0.30 = -0.45 never crossed -0.50: the veto branch could not execute. The
+    protection a parked aircraft actually enjoyed was that numeric coincidence, not
+    the veto that claims to provide it -- and a future reweighting could take the
+    coincidence away while the veto sat there looking like it still guarded the door.
+
+    Neutralise the on-field WEIGHT (the coincidence) and the veto must still hold the
+    line on its own.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(20):
+        _op(conn, f"bs{i}", "touch_and_go", NOW - (i + 3) * DAY, icao24="bck444", origin="KBDU")
+    # Last operation: a full-stop landing 30h ago. As far as we can observe it is
+    # sitting on the KLMO ramp right now.
+    _op(conn, "bs_l", "landing", NOW - 30 * 3600, icao24="bck444", origin="KBDU")
+    conn.commit()
+
+    # Patching a WEIGHT, not the database: the SQLite below is real, and the point of
+    # the test is that the verdict must not depend on this number's exact value.
+    monkeypatch.setattr(homebase, "_W_RESIDENT_SOME", 0.0)
+    result = homebase.classify(conn, "KLMO", "bck444", now_ts=NOW)
+
+    assert result["locality"] != homebase.NON_LOCAL, (
+        "with the on-field weight neutralised the veto did not hold: an aircraft on "
+        "our own ramp was published as a visitor"
+    )
+    assert result["based_icao"] is None
+    withheld = [e for e in result["evidence"] if e["code"] == "verdict_withheld"]
+    assert withheld, "the veto must appear in the receipt, not happen silently"
+    assert "still on the field" in withheld[0]["text"]
+
+
+def test_origin_case_does_not_split_the_count(tmp_path):
+    """MINOR 6 -- dominance was counted on raw strings and only the WINNER was
+    upper-cased, so `KBDU` and `kbdu` split the Counter between them and suppressed
+    the very signal that protects against a false verdict (or handed the plurality to
+    a different field entirely). Normalise BEFORE counting.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(14):
+        origin = "KBDU" if i % 2 else "kbdu"      # same airport, two spellings
+        _op(conn, f"cs{i}", "touch_and_go", NOW - (i + 1) * DAY, icao24="cse555", origin=origin)
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "cse555", now_ts=NOW)
+    assert result["locality"] == homebase.NON_LOCAL
+    assert result["based_icao"] == "KBDU"
+    origin_text = next(e["text"] for e in result["evidence"] if e["code"] == "arrival_origin")
+    assert "14 of those 14 came from KBDU" in origin_text
+    assert "kbdu" not in origin_text
+
+
+def test_registrant_address_elsewhere_is_captioned_as_not_evidence(tmp_path):
+    """MINOR 7 -- "Registrant address Boulder, CO", printed bare directly beneath a
+    "non-local" badge, READS as corroboration of a verdict it took no part in. It
+    scores 0.0 and it is a MAILING address, not a based airport. Say so.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(14):
+        _op(conn, f"cap{i}", "touch_and_go", NOW - (i + 1) * DAY, icao24="cap666", origin="KBDU")
+    conn.execute(
+        "INSERT INTO aircraft_registry (n_number, icao_hex, registrant_city, registrant_state) "
+        "VALUES ('N6', 'CAP666', 'Boulder', 'CO')"
+    )
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "cap666", now_ts=NOW)
+    assert result["locality"] == homebase.NON_LOCAL      # scored by ORIGIN, not by this
+    text = next(e["text"] for e in result["evidence"] if e["code"] == "registrant_address")
+    assert "Boulder, CO" in text
+    assert "mailing address" in text
+    assert "not weighed against it" in text
+
+
+def test_a_future_timestamped_operation_never_manufactures_a_verdict(tmp_path):
+    """MINOR 9 -- `recompute_airport` selected aircraft on `timestamp >= start_ts`
+    with no upper bound, while `_build_context` gathers facts BETWEEN start_ts AND
+    now_ts. An aircraft whose only operations are in the future got an empty context
+    and published `unclassified @ 0.0` -- a row asserting we looked and found nothing,
+    about an aircraft we had not observed once inside the window.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for d in (10, 20, 30, 40):
+        _overnight(conn, d, "aaa111")
+    # A clock-skewed sample / bad backfill: this aircraft exists ONLY in the future.
+    _op(conn, "fut", "landing", NOW + 5 * DAY, icao24="fut999")
+    conn.commit()
+
+    assert homebase.recompute_airport(conn, "KLMO", now_ts=NOW) == 1
+    conn.commit()
+
+    mapping = homebase.locality_map(conn, "KLMO")
+    assert "fut999" not in mapping
+    assert mapping["aaa111"]["locality"] == homebase.LOCAL
+
+
+def test_migrate_self_heals_a_home_base_table_from_before_the_rename(tmp_path):
+    """IMPORTANT 4 -- `db.SCHEMA` is CREATE TABLE IF NOT EXISTS, so on a database
+    that already carries the pre-rename `confidence` column, `executescript(SCHEMA)`
+    is a silent no-op: `recompute_airport` then dies with `OperationalError: table
+    aircraft_home_base has no column named signal_strength` and `locality_map` with
+    `no such column: signal_strength`.
+
+    The production SQLite file PERSISTS across deploys (DEPLOY.md:51,184 excludes
+    data/*.sqlite3* from the rsync), so this is a production break the moment a
+    rename lands on a database that has the table. `aircraft_home_base` is a pure
+    derived cache rebuilt nightly, so the migration drops the unusable shape and lets
+    SCHEMA recreate it: a crash becomes a self-heal.
+    """
+    path = tmp_path / "legacy.sqlite3"
+    conn = db.connect(str(path))
+    # A database built by the PREVIOUS shipped shape of this table.
+    conn.executescript("""
+        CREATE TABLE aircraft_home_base (
+          icao TEXT NOT NULL, icao24 TEXT NOT NULL, locality TEXT NOT NULL,
+          confidence REAL NOT NULL, based_icao TEXT, evidence_json TEXT NOT NULL,
+          computed_at INTEGER NOT NULL, PRIMARY KEY (icao, icao24)
+        );
+    """)
+    conn.execute(
+        "INSERT INTO aircraft_home_base VALUES ('KLMO','old001','non_local',0.8,'KBDU','[]',1)"
+    )
+    conn.commit()
+    conn.close()
+
+    # Exactly what a deploy does: open the existing file, apply schema + migrations.
+    db.init_db(str(path))
+
+    conn = db.connect(str(path))
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(aircraft_home_base)")}
+    assert "signal_strength" in cols
+    assert "confidence" not in cols
+
+    # And the paths that used to crash now work end to end.
+    for d in (10, 20, 30, 40):
+        _overnight(conn, d, "aaa111")
+    conn.commit()
+    assert homebase.recompute_airport(conn, "KLMO", now_ts=NOW) == 1
+    conn.commit()
+    assert homebase.locality_map(conn, "KLMO")["aaa111"]["locality"] == homebase.LOCAL
 
 
 def test_recompute_airport_agrees_with_standalone_classify(tmp_path):
