@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app import db, ledger
 
 
@@ -96,6 +98,37 @@ def test_daily_series_gap_fills_with_zeroes(tmp_path):
     series = ledger.rollup_daily_runway_uses(conn, "KLMO", "2026-06-01", "2026-06-03")
     assert [d["date"] for d in series] == ["2026-06-01", "2026-06-02", "2026-06-03"]
     assert [d["runway_uses"] for d in series] == [1, 0, 1]
+
+
+def test_rebuild_survives_a_second_non_midnight_aligned_overlapping_window(tmp_path):
+    # Regression for the undercount bug: rebuild_rollup's DELETE clears whole
+    # LOCAL days, but a prior version of the reinsert only re-read the raw
+    # [start_ts, end_ts] slice. A second, non-midnight-aligned call that still
+    # overlaps an already-correct day (e.g. a nightly "reprocess the last 24h"
+    # job) must not silently zero out counts outside its slice but inside the
+    # deleted day.
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    midnight_0601 = DAY1_NOON - 12 * 3600  # 2026-06-01 00:00:00 America/Denver
+    _op(conn, "l1", "landing", midnight_0601 + 30 * 60)  # 00:30 local
+    conn.commit()
+
+    # First rebuild: exactly midnight-aligned for 2026-06-01. Correctly counts 1.
+    ledger.rebuild_rollup(conn, "KLMO", midnight_0601, midnight_0601 + DAY)
+    conn.commit()
+    assert ledger.rollup_totals(conn, "KLMO", "2026-06-01", "2026-06-01")["runway_uses"] == 1
+
+    # Second rebuild: a plausible "reprocess the last 24 hours" window that
+    # starts at noon rather than local midnight, but still overlaps 2026-06-01.
+    ledger.rebuild_rollup(conn, "KLMO", DAY1_NOON, DAY1_NOON + DAY)
+    conn.commit()
+
+    assert ledger.rollup_totals(conn, "KLMO", "2026-06-01", "2026-06-01")["runway_uses"] == 1
+
+
+def test_local_days_between_raises_on_swapped_start_and_end(tmp_path):
+    # A caller bug (swapped args) must surface loudly, not silently rebuild nothing.
+    with pytest.raises(ValueError):
+        ledger._local_days_between(DAY1_NOON, DAY1_NOON - DAY, "America/Denver")
 
 
 def test_unique_aircraft_counts_distinct_icao24(tmp_path):

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from . import db
 
@@ -67,17 +68,34 @@ def rebuild_rollup(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: i
     maintenance scripts in backend/scripts/ prune rows from `operations` — an
     incremental upsert would leave orphaned counts behind forever.
 
+    The delete and the reinsert MUST cover the identical scope. The delete always
+    clears whole local days; the reinsert therefore reads the FULL local-day span
+    (local midnight of the first day through local midnight of the day after the
+    last), not the raw [start_ts, end_ts] slice — otherwise a caller whose window
+    isn't aligned to local midnight (e.g. a "reprocess the last 24h" job) would
+    have its delete clear a whole day while the reinsert only repopulates part of
+    it, silently dropping counts that fall inside the day but outside the slice.
+
     Returns the number of rollup rows written.
     """
     icao = icao.upper()
     tz = db.airport_timezone(conn, icao)
 
+    # The days to rebuild are those spanned by the REQUESTED range, not merely the
+    # days that happen to have rows — otherwise a day whose last operation was just
+    # deleted would never get cleared.
+    span_days = _local_days_between(start_ts, end_ts, tz)
+    first_day = date.fromisoformat(span_days[0])
+    last_day = date.fromisoformat(span_days[-1])
+    wide_start_ts = _local_midnight_ts(first_day, tz)
+    wide_end_ts = _local_midnight_ts(last_day + timedelta(days=1), tz) - 1
+
     rows = conn.execute(
-        "SELECT timestamp AS ts, type AS type, icao24 AS icao24 "
+        "SELECT timestamp AS ts, type, icao24 "
         "FROM operations "
         f"WHERE icao=? AND type IN ({','.join('?' * len(ROLLUP_TYPES))}) "
         "  AND timestamp BETWEEN ? AND ? AND icao24 IS NOT NULL",
-        (icao, *ROLLUP_TYPES, int(start_ts), int(end_ts)),
+        (icao, *ROLLUP_TYPES, wide_start_ts, wide_end_ts),
     ).fetchall()
 
     counts: dict[tuple[str, str, str], int] = defaultdict(int)
@@ -85,10 +103,6 @@ def rebuild_rollup(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: i
         day = db.local_day_key(row["ts"], tz)
         counts[(day, row["type"], row["icao24"])] += 1
 
-    # The days to rebuild are those spanned by the REQUESTED range, not merely the
-    # days that happen to have rows — otherwise a day whose last operation was just
-    # deleted would never get cleared.
-    span_days = _local_days_between(start_ts, end_ts, tz)
     conn.executemany(
         "DELETE FROM daily_operation_rollup WHERE icao=? AND date_local=?",
         [(icao, day) for day in span_days],
@@ -102,6 +116,8 @@ def rebuild_rollup(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: i
 
 
 def _local_days_between(start_ts: int, end_ts: int, tz: str | None) -> list[str]:
+    if start_ts > end_ts:
+        raise ValueError(f"start_ts ({start_ts}) must not be after end_ts ({end_ts})")
     first = date.fromisoformat(db.local_day_key(int(start_ts), tz))
     last = date.fromisoformat(db.local_day_key(int(end_ts), tz))
     out, cursor = [], first
@@ -109,6 +125,23 @@ def _local_days_between(start_ts: int, end_ts: int, tz: str | None) -> list[str]
         out.append(cursor.isoformat())
         cursor += timedelta(days=1)
     return out
+
+
+def _local_midnight_ts(day: date, tz: str | None) -> int:
+    """UTC epoch seconds for local midnight of `day` in timezone `tz`.
+
+    The inverse of db.local_day_key: mirrors its fallback so an unknown/missing
+    tz name is treated as UTC, matching how local_day_key would bucket the
+    resulting instant.
+    """
+    naive = datetime(day.year, day.month, day.day)
+    if not tz:
+        return int(naive.replace(tzinfo=timezone.utc).timestamp())
+    try:
+        local_midnight = naive.replace(tzinfo=ZoneInfo(tz))
+    except Exception:  # noqa: BLE001 — unknown tz name -> fall back to UTC
+        local_midnight = naive.replace(tzinfo=timezone.utc)
+    return int(local_midnight.timestamp())
 
 
 def rollup_totals(conn: sqlite3.Connection, icao: str, start_day: str, end_day: str) -> dict:
