@@ -611,3 +611,242 @@ async def test_run_detectors_never_hits_network_even_if_httpx_would_raise(tmp_pa
     rows = [r for r in db.read_operations(conn, "KLMO", 0, now + 10) if r["type"] == "landing"]
     assert rows, "expected a persisted landing op"
     assert rows[0]["origin_airport_icao"] == "KBDU"
+
+
+# --- task-4a review round 3 --------------------------------------------------
+#
+# Three Important findings, none previously pinned by a committed test (all
+# three were verified only in throwaway scratch scripts, per the reviewer):
+#   1. The cap counted every distinct aircraft touched by the loop, including
+#      ones the ground-evidence pre-filter already made FREE — so the budget
+#      meant to bound EXPENSIVE resolutions was exhausted by CHEAP ones,
+#      permanently NULLing out the rare aircraft that actually had ground
+#      evidence (no backfill, no re-sweep — `existing_operation_ids` means
+#      that operation never reappears in `new_events`).
+#   2. The skip-log block sat outside every try/except in this function, so a
+#      mixed-type skip set raised TypeError straight out of
+#      run_detectors_for_monitor -> worker.py's rollback(), discarding that
+#      whole pass's persist_events / deviation / flow writes too.
+#   3. The two-phase resolve-then-write invariant (zero nearest_airport scans
+#      while a write transaction is open) — the most load-bearing perf
+#      guarantee on this shared production loop — had no committed regression
+#      test at all.
+
+
+@pytest.mark.asyncio
+async def test_enrich_origins_never_scans_nearest_airport_inside_a_write_transaction(tmp_path, monkeypatch):
+    """The two-phase invariant (task-4a review round 2, Finding 2): phase 1
+    resolves every aircraft's origin and performs ZERO database writes, so
+    every `db.nearest_airport` scan runs with no write transaction open;
+    phase 2 then writes every already-resolved value in a tight burst. Before
+    this round, that guarantee was checked only in a throwaway scratch probe
+    (task-4a review round 3, Finding 3) — a future refactor that merged the
+    two phases back into one interleaved resolve-and-write loop would
+    silently reintroduce ~1.6s of writer starvation (task-4a-report.md, "Fix
+    round 2") with every other test in this file still green, since none of
+    them observe `conn.in_transaction`.
+
+    Monkeypatches `db.nearest_airport` ITSELF (not just
+    `update_operation_origin`) to record `conn.in_transaction` at the instant
+    of every scan call, across several distinct aircraft that all carry real
+    ground evidence but resolve to no nearby airport — forcing every
+    `nearest_airport` call `origin_from_ground_track` can possibly make.
+    Asserts every recorded value is False."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    store = MemoryStore()
+    new_events: list[dict] = []
+    tracks: dict[str, list[dict]] = {}
+    for i in range(10):
+        icao24 = f"tp{i:04d}"
+        db.upsert_operation(conn, _op(f"op-tp{i}", icao24=icao24, type_="landing"))
+        new_events.append({"id": f"op-tp{i}", "type": "landing", "icao24": icao24, "timestamp": 1000})
+        # On-ground/slow, but nowhere near any seeded airport -- never
+        # resolves, so origin_from_ground_track exhausts every one of its
+        # [:8] samples' nearest_airport calls for each of these aircraft.
+        tracks[icao24] = [{
+            "icao24": icao24, "timestamp": 1000 + j * 10,
+            "lat": 44.7 + i * 0.05, "lon": -110.5 + i * 0.05,
+            "on_ground": True, "velocity_kt": 0.0,
+        } for j in range(8)]
+    conn.commit()
+
+    observed_in_transaction: list[bool] = []
+    real_nearest_airport = db.nearest_airport
+
+    def spy(c, lat, lon):
+        observed_in_transaction.append(c.in_transaction)
+        return real_nearest_airport(c, lat, lon)
+
+    monkeypatch.setattr(db, "nearest_airport", spy)
+
+    await services._enrich_origins_for_new_events(store, conn, new_events, tracks)
+    conn.commit()
+
+    assert observed_in_transaction, "spy was never called -- test would be vacuously true"
+    assert all(v is False for v in observed_in_transaction), (
+        f"nearest_airport ran while a write transaction was open: {observed_in_transaction}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cap_counts_only_actual_resolver_invocations_not_free_aircraft(tmp_path):
+    """Task-4a review round 3, Finding 1 — the reviewer's exact repro: N
+    airborne-only arrivals (the pre-filter makes these FREE — zero DB work,
+    zero scans, `unknown_origin()` straight away) followed by M aircraft with
+    real, resolvable KBDU ground evidence. Before this fix,
+    `len(resolved_by_icao24)` counted the free aircraft too, so a cap of 40
+    was exhausted by the first 40 free entries and all M ground-evidence
+    aircraft landed NULL -- permanently, since only new_events is ever
+    revisited. After the fix, the cap only increments on an actual
+    cache-miss resolver invocation, so all M must resolve regardless of how
+    many free aircraft preceded them in the same pass."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    store = MemoryStore()
+    new_events: list[dict] = []
+    tracks: dict[str, list[dict]] = {}
+
+    n_free = services.ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS
+    for i in range(n_free):
+        icao24 = f"air{i:04d}"
+        db.upsert_operation(conn, _op(f"op-air{i}", icao24=icao24, type_="landing"))
+        new_events.append({"id": f"op-air{i}", "type": "landing", "icao24": icao24, "timestamp": 1000})
+        tracks[icao24] = [{
+            "icao24": icao24, "timestamp": 1000 + j * 10,
+            "lat": 40.17 + j * 0.01, "lon": -105.17 + j * 0.01,
+            "on_ground": False, "velocity_kt": 95.0,
+        } for j in range(10)]
+
+    n_ground = 5
+    for i in range(n_ground):
+        icao24 = f"gnd{i:04d}"
+        db.upsert_operation(conn, _op(f"op-gnd{i}", icao24=icao24, type_="landing"))
+        new_events.append({"id": f"op-gnd{i}", "type": "landing", "icao24": icao24, "timestamp": 1000})
+        tracks[icao24] = [{
+            "icao24": icao24, "timestamp": 1000 + j * 10,
+            "lat": 40.0394, "lon": -105.2258,  # KBDU
+            "on_ground": True, "velocity_kt": 0.0,
+        } for j in range(3)]
+    conn.commit()
+
+    await services._enrich_origins_for_new_events(store, conn, new_events, tracks)
+    conn.commit()
+
+    rows = {r["id"]: r["origin_airport_icao"] for r in db.read_operations(conn, "KLMO", 0, 10000)}
+    ground_origins = {op_id: origin for op_id, origin in rows.items() if op_id.startswith("op-gnd")}
+    assert len(ground_origins) == n_ground
+    assert all(origin == "KBDU" for origin in ground_origins.values()), (
+        f"cap starved genuinely resolvable arrivals that should never have competed "
+        f"with the free airborne-only aircraft for budget: {ground_origins}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_negative_cache_avoids_nearest_airport_scan_on_warm_second_pass(tmp_path, monkeypatch):
+    """An aircraft that resolves to unknown (real ground evidence, but no
+    airport within ORIGIN_GROUND_AIRPORT_MAX_NM) must not re-pay the
+    unindexed nearest_airport scan chain on a LATER pass that sees the same
+    aircraft in the same first_seen/last_seen hour bucket again (task-4a
+    review round 2, Finding 3). Runs the same event through
+    _enrich_origins_for_new_events twice with the SAME Store instance
+    (simulating two consecutive detector passes); the second (warm) pass must
+    make zero nearest_airport calls."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    store = MemoryStore()
+    icao24 = "neg0099"
+    db.upsert_operation(conn, _op("op-neg", icao24=icao24, type_="landing"))
+    conn.commit()
+    # On-ground/slow, but nowhere near any seeded airport -- resolves to
+    # unknown, not to some airport.
+    track = [{
+        "icao24": icao24, "timestamp": 1000 + j * 10,
+        "lat": 44.7, "lon": -110.5,
+        "on_ground": True, "velocity_kt": 0.0,
+    } for j in range(3)]
+    new_events = [{"id": "op-neg", "type": "landing", "icao24": icao24, "timestamp": 1000}]
+
+    # Cold pass: populates the negative cache.
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})
+    conn.commit()
+    row = db.read_operations(conn, "KLMO", 0, 10000)[0]
+    assert row["origin_airport_icao"] is None
+
+    # Warm pass: same aircraft, same first_seen/last_seen hour bucket --
+    # must hit the negative cache and never call nearest_airport at all.
+    calls: list[int] = []
+    real_nearest_airport = db.nearest_airport
+
+    def spy(c, lat, lon):
+        calls.append(1)
+        return real_nearest_airport(c, lat, lon)
+
+    monkeypatch.setattr(db, "nearest_airport", spy)
+    await services._enrich_origins_for_new_events(store, conn, new_events, {icao24: track})
+    conn.commit()
+
+    assert calls == [], f"warm pass ran {len(calls)} nearest_airport scan(s); negative cache did not hit"
+    row = db.read_operations(conn, "KLMO", 0, 10000)[0]
+    assert row["origin_airport_icao"] is None
+
+
+@pytest.mark.asyncio
+async def test_enrich_origins_skip_log_never_raises_on_mixed_type_icao24s(tmp_path):
+    """Task-4a review round 3, Finding 2: `skipped_icao24s` is populated from
+    `event.get("icao24")` with NO type check, and the skip-log block
+    (`sorted(skipped_icao24s)`) used to sit OUTSIDE every try/except in this
+    function. A mixed str/int skip set raises
+    `TypeError: '<' not supported between instances of 'str' and 'int'`
+    straight out of _enrich_origins_for_new_events -- and from there,
+    straight out of run_detectors_for_monitor, since that function's call
+    site wraps this call in no try/except of its own (confirmed by reading
+    services.py; also see test_run_detectors_for_monitor_calls_origin_enrichment,
+    which pins that the call is present in that function's source).
+    worker.py's detect loop catches this at the OUTERMOST level and rolls
+    back the ENTIRE pass -- discarding that pass's persist_events / deviation
+    / flow writes too, not just the origin column. Exactly the class of bug
+    round 1 already hardened against on a different code path (see
+    test_enrich_origins_never_raises_on_non_dict_event above).
+
+    Builds enough distinct ground-evidence aircraft to exceed the cap (so
+    some genuinely land in skipped_icao24s, not just the free path), with one
+    of the skipped icao24s a bare int instead of a str, and asserts the call
+    completes without raising."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    store = MemoryStore()
+    new_events: list[dict] = []
+    tracks: dict = {}
+
+    cap = services.ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS
+    n_over_cap = cap + 5
+    for i in range(n_over_cap):
+        icao24 = f"ovr{i:04d}"
+        db.upsert_operation(conn, _op(f"op-ovr{i}", icao24=icao24, type_="landing"))
+        new_events.append({"id": f"op-ovr{i}", "type": "landing", "icao24": icao24, "timestamp": 1000})
+        # Real ground evidence -- each of these is a genuine cache-miss
+        # resolver invocation, so the first `cap` of them consume the whole
+        # budget and the remaining 5 land in skipped_icao24s.
+        tracks[icao24] = [{
+            "icao24": icao24, "timestamp": 1000 + j * 10,
+            "lat": 40.0394, "lon": -105.2258,  # KBDU
+            "on_ground": True, "velocity_kt": 0.0,
+        } for j in range(3)]
+    # A mixed-type icao24, past the cap, guaranteed to land in
+    # skipped_icao24s alongside the str entries above.
+    mixed_icao24 = 987654
+    new_events.append({"id": "op-mixed", "type": "landing", "icao24": mixed_icao24, "timestamp": 1000})
+    tracks[mixed_icao24] = [{
+        "icao24": mixed_icao24, "timestamp": 1000,
+        "lat": 40.0394, "lon": -105.2258,
+        "on_ground": True, "velocity_kt": 0.0,
+    }]
+    conn.commit()
+
+    # Must not raise.
+    await services._enrich_origins_for_new_events(store, conn, new_events, tracks)
+    conn.commit()
+
+    # The first `cap` string-keyed aircraft still resolved correctly --
+    # proving the skip-log fix didn't come at the cost of the resolution
+    # path itself.
+    rows = {r["id"]: r["origin_airport_icao"] for r in db.read_operations(conn, "KLMO", 0, 10000)}
+    resolved = [op_id for op_id in rows if op_id.startswith("op-ovr")]
+    assert sum(1 for op_id in resolved if rows[op_id] == "KBDU") == cap

@@ -58,22 +58,51 @@ ORIGIN_GROUND_TRACK_SOURCE = "ground_track_near_airport"
 # this prefix is therefore guaranteed to be this function's own prior LOCAL
 # computation, including cached negatives (unknown_origin()).
 ORIGIN_LOCAL_GROUND_TRACK_CACHE_PREFIX = "origin_local_gt"
-# Caps how many DISTINCT aircraft _enrich_origins_for_new_events will attempt
-# to locally resolve in one detector pass (task-4a review round 2, Finding 3).
-# Mirrors ORIGIN_ENRICH_LIMIT's intent (db.py's nearest_airport docstring
-# documents CPU 200% for 30+ seconds once this kind of lookup went uncapped)
-# but for the LOCAL ground-track path: the worst case is every distinct new
-# arrival showing SOME ground/slow sample (velocity_kt == 0.0 is a common
-# degenerate ADS-B value; being on the ground at an unlisted strip also
-# qualifies) yet resolving to no airport within ORIGIN_GROUND_AIRPORT_MAX_NM —
-# up to 8 unindexed `nearest_airport` scans each, and (pre round-2) no
-# negative-result caching. Measured ~1.8s for 300 such aircraft even after the
-# round-1 pre-filter and per-pass memoization (task-4a-report.md, "Fix round
-# 2"). Aircraft past the cap are skipped for THIS pass (logged, not silently
-# dropped); their origin stays NULL for the events already detected this pass,
-# but because only new_events are ever revisited (no backfill), the same
-# aircraft gets another resolution attempt on its next new event in a later
-# pass.
+# Caps how many DISTINCT aircraft _enrich_origins_for_new_events will actually
+# invoke the resolver for (a real cache-miss `nearest_airport` scan chain,
+# never a free airborne-only aircraft or a cache hit — see Finding 1, round 3)
+# in one detector pass (task-4a review round 2, Finding 3).
+#
+# Honest re-measurement (task-4a review round 3; task-4a-report.md, "Fix
+# round 3") against the REAL production airports table -- 16,164 rows,
+# downloaded from OurAirports and filtered exactly as app/airports_import.py
+# does (small/medium/large, US, ident/gps_code/local_code fallback chain),
+# NOT a uniform-random synthetic scatter -- found real US airport geography
+# is clustered, not uniform: query points in the continental interior
+# (including sparse/mountain/desert regions) average ~0.7-2.5 ms/call because
+# the coarse lat/lon bbox pre-filter in db.nearest_airport still has to widen
+# past its tightest box in sparse areas; a prior re-measurement in this same
+# round that reported ~0.048 ms/call and ~115-362 ms worst-case for 300-1000
+# aircraft turned out to be measuring a table that had silently regressed to
+# only the 10-row curated seed (INSERT OR IGNORE against `country TEXT NOT
+# NULL` with no default silently drops every row that omits it) -- NOT the
+# claimed 16k rows. Corrected, uncapped measurement: 40 aircraft ~= 212 ms;
+# 300 ~= 1.6 s; 1000 ~= 5.4 s (8 nearest_airport calls per aircraft, no early
+# exit, matching origin_from_ground_track's own worst-case shape). This is
+# much closer to (and does not contradict) the ORIGINAL round-2 measurement
+# of ~1.8s for 300 -- that number was correct all along.
+#
+# Kept at 40: honest worst case ~212 ms for the current value, which matches
+# round 2's original design target ("under ~250ms") and stays well inside
+# "a few hundred ms" even under the pathological scenario (every distinct new
+# arrival shows ground evidence AND fails to resolve to any of 16k airports --
+# not the common case; Finding 1's fix means the free majority no longer
+# competes for this budget at all, so real headroom for genuinely resolvable
+# aircraft is now much larger in practice than round 2's own numbers assumed,
+# without needing to raise the number itself). Not raised further, for two
+# reasons grounded in the honest numbers above: (1) the true (corrected) cost
+# of a much higher cap is seconds, not hundreds of ms -- 300 ~= 1.6s, 1000 ~=
+# 5.4s; (2) worker.py's _detect_tick loops over EVERY active monitor
+# SEQUENTIALLY on ONE shared connection within one tick (by design -- see its
+# own docstring), so a multi-second stall resolving one monitor's backlog
+# would delay every OTHER monitor's detection that same tick on a shared
+# production instance, not just the one with the backlog. Keeping the
+# per-monitor worst case at a few hundred ms bounds that blast radius too.
+# Aircraft past the cap are skipped for THIS pass (logged, not silently
+# dropped); their origin stays NULL for the events already detected this
+# pass, but because only new_events are ever revisited (no backfill), the
+# same aircraft gets another resolution attempt on its next new event in a
+# later pass.
 ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS = 40
 # Op types where "origin" is a meaningful, honest signal: an ARRIVAL at this
 # airport. A takeoff's origin is trivially this airport, so writing one on a
@@ -1464,7 +1493,7 @@ async def _resolve_origin_local_ground_track(
     conn,
     icao24: str,
     track: list[dict],
-) -> dict:
+) -> tuple[dict, bool]:
     """Origin, by construction, from ONLY the local in-memory `track` — never
     resolve_origin's shared `origin:` cache namespace (task-4a review round 2,
     Finding 1). `origin_from_ground_track` is pure and local (it only reads
@@ -1481,19 +1510,26 @@ async def _resolve_origin_local_ground_track(
     this function's own prior computation. Caches NEGATIVE results
     (unknown_origin()) too, so a distinct aircraft that resolves to no nearby
     airport does not re-run the unindexed `nearest_airport` scan on every
-    later pass (task-4a review round 2, Finding 3)."""
+    later pass (task-4a review round 2, Finding 3).
+
+    Returns `(origin, scanned)` where `scanned` is True iff this call actually
+    ran `origin_from_ground_track` (i.e. a cache miss that hit the real,
+    unindexed `nearest_airport` table scan) rather than returning a cached
+    value at zero DB cost. The caller uses `scanned` to charge
+    `ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS` only for aircraft that
+    actually cost something (task-4a review round 3, Finding 1)."""
     samples = valid_position_samples(track)
     if not samples:
-        return unknown_origin()
+        return unknown_origin(), False
     first_seen = int(samples[0]["timestamp"])
     last_seen = int(samples[-1]["timestamp"])
     cache_key = f"{ORIGIN_LOCAL_GROUND_TRACK_CACHE_PREFIX}:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
     cached = await store.get_cache(cache_key)
     if isinstance(cached, dict):
-        return cached
+        return cached, False
     result = origin_from_ground_track(conn, track) or unknown_origin()
     await store.set_cache(cache_key, result, origin_cache_ttl(result))
-    return result
+    return result, True
 
 
 async def _enrich_origins_for_new_events(
@@ -1530,21 +1566,37 @@ async def _enrich_origins_for_new_events(
     of the round-1 fix is unchanged and still matters: it means a slow or
     failed enrichment pass can never hold up those other writes.)
 
-    Performance (measured against a production-size 16k-row airports table —
-    see task-4a-report.md): pre-filtering on `_track_has_ground_evidence`
-    before ever calling the resolver eliminates the scan entirely for the
-    common airborne-only case; per-pass memoization means repeat touch-and-go
-    events from the same aircraft resolve once, not N times; caching negatives
-    in `_resolve_origin_local_ground_track`'s private namespace means an
+    Performance (measured against the REAL production airports table — 16,164
+    rows, real OurAirports US small/medium/large distribution, not a uniform
+    synthetic scatter; see task-4a-report.md "Fix round 3"): pre-filtering on
+    `_track_has_ground_evidence` before ever calling the resolver eliminates
+    the scan entirely for the common airborne-only case, AT ZERO COST TO THE
+    PER-PASS BUDGET (task-4a review round 3, Finding 1 — the budget below is
+    only ever charged for a real cache-miss resolver invocation, never a free
+    aircraft); per-pass memoization means repeat touch-and-go events from the
+    same aircraft resolve once, not N times; caching negatives in
+    `_resolve_origin_local_ground_track`'s private namespace means an
     aircraft that resolves to no airport doesn't re-scan on a LATER pass; and
     `ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS` bounds the worst case within
-    ONE pass (every distinct aircraft new to this pass, all unresolvable).
+    ONE pass (every distinct aircraft that ACTUALLY required a resolver call
+    this pass, all unresolvable) to ~212ms for the current cap of 40.
     """
     log = logging.getLogger(__name__)
 
     # --- Phase 1: resolve. No database writes anywhere in this loop. -------
     resolved_by_icao24: dict[str, dict] = {}
     skipped_icao24s: set[str] = set()
+    # Counts ONLY aircraft for which the resolver actually ran a real,
+    # unindexed `nearest_airport` scan chain (a cache miss past the
+    # ground-evidence pre-filter) — never the free/airborne-only aircraft
+    # that _track_has_ground_evidence already short-circuits at zero DB cost,
+    # and never a cache hit. Task-4a review round 3, Finding 1: the previous
+    # cap counted every distinct aircraft touched by this loop, so a pass
+    # dominated by the (docstring-documented-as-common) airborne-only case
+    # could exhaust the whole budget before a single expensive resolution
+    # ran, permanently NULLing out the rare aircraft that actually carried
+    # ground evidence.
+    scans_consumed = 0
     for event in new_events:
         icao24 = None
         try:
@@ -1555,14 +1607,18 @@ async def _enrich_origins_for_new_events(
                 continue
             if icao24 in resolved_by_icao24 or icao24 in skipped_icao24s:
                 continue
-            if len(resolved_by_icao24) >= ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS:
+            track = tracks_by_icao24.get(icao24) or []
+            if not _track_has_ground_evidence(track):
+                # Free: origin_from_ground_track could never succeed for this
+                # track, so no resolver call is made and no budget is spent.
+                resolved_by_icao24[icao24] = unknown_origin()
+                continue
+            if scans_consumed >= ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS:
                 skipped_icao24s.add(icao24)
                 continue
-            track = tracks_by_icao24.get(icao24) or []
-            if _track_has_ground_evidence(track):
-                origin = await _resolve_origin_local_ground_track(store, conn, icao24, track)
-            else:
-                origin = unknown_origin()
+            origin, scanned = await _resolve_origin_local_ground_track(store, conn, icao24, track)
+            if scanned:
+                scans_consumed += 1
             resolved_by_icao24[icao24] = origin
         except Exception:  # noqa: BLE001 — a failed resolve must not break detection
             # Memoize the failure so a persistently-failing aircraft with
@@ -1572,15 +1628,26 @@ async def _enrich_origins_for_new_events(
                 resolved_by_icao24[icao24] = unknown_origin()
             log.warning("origin resolution failed for icao24=%s", icao24, exc_info=True)
 
-    if skipped_icao24s:
-        preview = sorted(skipped_icao24s)[:20]
-        more = len(skipped_icao24s) - len(preview)
-        log.warning(
-            "origin enrichment: skipped local resolution for %d distinct aircraft past the "
-            "%d-per-pass cap; left NULL for this pass (icao24s=%s%s)",
-            len(skipped_icao24s), ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS, preview,
-            f" +{more} more" if more > 0 else "",
-        )
+    # Task-4a review round 3, Finding 2: this whole block used to sit OUTSIDE
+    # both try/except-guarded loops. `skipped_icao24s` can (rarely) contain a
+    # non-str icao24 (a malformed event's `icao24` field is never type-checked
+    # upstream), and `sorted()` over a mixed-type set raises TypeError — which
+    # propagated all the way out of run_detectors_for_monitor and caused
+    # worker.py to roll back that whole pass's persist_events / deviation /
+    # flow writes, not just the origin column. str()-coerce before sorting,
+    # AND wrap the block itself, so nothing in here can ever raise out.
+    try:
+        if skipped_icao24s:
+            preview = sorted(map(str, skipped_icao24s))[:20]
+            more = len(skipped_icao24s) - len(preview)
+            log.warning(
+                "origin enrichment: skipped local resolution for %d distinct aircraft past the "
+                "%d-per-pass cap; left NULL for this pass (icao24s=%s%s)",
+                len(skipped_icao24s), ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS, preview,
+                f" +{more} more" if more > 0 else "",
+            )
+    except Exception:  # noqa: BLE001 — logging must never break detection
+        log.warning("origin enrichment: failed to log skipped icao24s", exc_info=True)
 
     # --- Phase 2: write. Every value below is already resolved — this is a --
     # --- tight burst of UPDATEs with no scans interleaved. ------------------
