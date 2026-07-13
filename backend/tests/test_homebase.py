@@ -455,7 +455,18 @@ def test_the_worst_non_local_badge_we_can_print_is_still_not_certain(tmp_path):
 def test_takeoffs_are_never_counted_as_arrivals(tmp_path):
     """The origins query had no `type` filter while its evidence called the rows
     "arrivals". Task 4a means takeoffs never GET an origin -- but the query must be
-    true by construction, not by a coincidence upstream.
+    true by construction, not by a coincidence upstream. THAT subject is what this
+    test still proves, and it is kept.
+
+    ROUND 3 note: this fixture's ORIGINAL assertion was `locality == NON_LOCAL`,
+    on a receipt claiming "0 overnight stays ... of 10 observed arrivals" about an
+    aircraft we watched depart our own field 30 times and never once watched
+    arrive. That is an instance of the round-3 CRITICAL, not a passing case -- 30
+    takeoffs from KLMO with no landing we ever watched (`unpaired_takeoffs = 30`)
+    is exactly the hole an overnight can hide behind, and the fix correctly
+    withholds the "0 overnights" weight here. The aircraft now, correctly,
+    classifies as UNCLASSIFIED: the KBDU origin alone (-0.30) does not clear the
+    non-local threshold on its own.
     """
     conn = seeded_conn(tmp_path / "t.sqlite3")
     for i in range(10):
@@ -467,12 +478,23 @@ def test_takeoffs_are_never_counted_as_arrivals(tmp_path):
     conn.commit()
 
     result = homebase.classify(conn, "KLMO", "bbb222", now_ts=NOW)
-    assert result["locality"] == homebase.NON_LOCAL
-    assert result["based_icao"] == "KBDU"
+    # Round 3: NOT non-local. These 30 takeoffs are unpaired to any landing we
+    # watched, so the "0 overnights" weight is correctly withheld -- the KBDU
+    # origin signal alone is not enough to convict.
+    assert result["locality"] != homebase.NON_LOCAL
+    assert result["locality"] == homebase.UNCLASSIFIED
+    assert result["based_icao"] is None
     origin_text = next(e["text"] for e in result["evidence"] if e["code"] == "arrival_origin")
-    # The denominator is the 10 arrivals, not the 40 operations.
+    # THE SUBJECT THIS TEST EXISTS TO PROVE, UNCHANGED: the denominator is the 10
+    # arrivals, not the 40 operations, and the KLMO-origin takeoffs never appear.
     assert "10 of 10 observed arrivals" in origin_text
     assert "KLMO" not in origin_text
+    # And the receipt says why the overnight signal was withheld.
+    overnight_text = next(
+        e["text"] for e in result["evidence"] if e["code"] == "overnight_stays"
+    )
+    assert "30 takeoffs from KLMO" in overnight_text
+    assert "overnight can hide" in overnight_text
 
 
 def test_arrival_types_match_the_types_the_origin_writer_populates(tmp_path):
@@ -518,10 +540,11 @@ def test_evidence_states_observations_and_true_denominators(tmp_path):
     )
     assert "20 separate days" in texts["overnight_stays"]
     # The TRUE denominator: 9 known origins out of 20 observed arrivals, and -- the
-    # count that actually gates the weight -- 9 separate DAYS, not 9 rows.
-    assert "Origin known for 9 of 20 observed arrivals" in texts["arrival_origin"]
-    assert "9 of those 9 came from KBDU" in texts["arrival_origin"]
-    assert "on 9 separate days" in texts["arrival_origin"]
+    # count that actually gates the weight -- 9 separate DAYS, not 9 rows. MINOR
+    # (round 3): the gate runs on days, so the sentence now leads with days.
+    assert "Origin known on 9 separate days" in texts["arrival_origin"]
+    assert "9 of 20 observed arrivals" in texts["arrival_origin"]
+    assert "9 of those 9 days came from KBDU" in texts["arrival_origin"]
     # Not a single evidence string may assert a fact we did not observe.
     for text in texts.values():
         assert "did not" not in text
@@ -690,6 +713,109 @@ def test_one_trailing_unpaired_landing_does_not_suppress_the_gate(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# ROUND 3 / CRITICAL -- `unpaired_landings` catches a missed DEPARTURE (the
+# landing row exists, nothing ever paired with it) but is completely blind to a
+# missed ARRIVAL: if the detector never emits the `landing` at all, the op is in
+# NEITHER `landings` NOR `intervals`, so `unpaired_landings` reads 0 --
+# arithmetically identical to a perfect observation record.
+#
+# `landing` (detectors.py:735-768) is structurally the most fragile op this
+# module counts: on top of the <=200 ft AGL sample every arrival needs, it also
+# requires a >=500 ft AGL sample in the 300s before touchdown
+# (detectors.py:664-672, 764), while `touch_and_go` (detectors.py:488-514) needs
+# only runway-overlap geometry "at any altitude". Marginal low-altitude ADS-B
+# coverage -- an explicit risk named at detectors.py:801-805 -- drops an
+# aircraft's `landing` rows while leaving its circuits untouched.
+#
+# `detect_takeoffs_over_period` requires NO prior approach from altitude
+# (detectors.py:778-800): a takeoff is only ever emitted for an aircraft that
+# ORIGINATED at the field. So a takeoff we cannot pair with a landing we watched
+# IS an arrival we missed -- the exact mirror of an unpaired landing -- and an
+# overnight hides behind a missed arrival exactly as it hides behind a missed
+# departure.
+# ---------------------------------------------------------------------------
+
+
+def test_hangared_aircraft_with_missed_arrivals_is_never_non_local(tmp_path):
+    """Reviewer's reproduction: 129 nights hangared at KLMO, flying to Boulder
+    daily. The dawn departure is detected cleanly as a `takeoff` (no prior
+    approach -- it started on the ground here). The nightly return is detected
+    as two low pattern circuits, never as a full-stop `landing` -- exactly the
+    shape the `landing` detector's altitude guards can drop.
+
+    So `landings == 0` for this aircraft: we have never once watched it touch
+    the ground here. `unpaired_landings` therefore reads 0 -- indistinguishable
+    from a perfect record -- and before the fix this published `non_local @
+    0.75, based_icao=KBDU` about an aircraft that lives here.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for d in range(1, 130):
+        base = NOW - d * DAY
+        # Dawn departure: detected clean, on the ground here, no landing paired.
+        _op(conn, f"hg_dep{d}", "takeoff", base - 10 * 3600, icao24="hng129")
+        # The nightly return: two low circuits, never a full-stop landing.
+        _op(conn, f"hg_c1_{d}", "touch_and_go", base - 4 * 3600, icao24="hng129", origin="KBDU")
+        _op(conn, f"hg_c2_{d}", "touch_and_go", base - 3 * 3600, icao24="hng129", origin="KBDU")
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "hng129", now_ts=NOW)
+    assert result["locality"] != homebase.NON_LOCAL, (
+        "a hangared aircraft whose 129 nightly returns were never observed as a "
+        f"full-stop landing was published as a visitor from {result['based_icao']} "
+        f"@ {result['signal_strength']}"
+    )
+    assert result["locality"] == homebase.UNCLASSIFIED
+    assert result["based_icao"] is None
+
+    overnight_text = next(
+        e["text"] for e in result["evidence"] if e["code"] == "overnight_stays"
+    )
+    # The new gate's reasoning, in the reader's language.
+    assert "129 takeoffs from KLMO" in overnight_text
+    assert "overnight can hide" in overnight_text
+    # IMPORTANT 2: the receipt must state the number that exposes the hole -- we
+    # have never once watched this aircraft touch the ground here.
+    assert "0 full-stop landings" in overnight_text
+
+
+def test_one_trailing_unpaired_takeoff_does_not_suppress_the_gate(tmp_path):
+    """Mirror of the unpaired-landing case: a single takeoff we never matched to
+    a landing we watched is the aircraft having departed from the ramp it was
+    already sitting on when the window opened -- the expected steady state, not
+    a data hole. It must not suppress the overnight gate on its own; two must.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(10):
+        _op(conn, f"ot{i}", "touch_and_go", NOW - (i + 20) * DAY, icao24="tko222", origin="KBDU")
+    # One takeoff with no landing we ever watched to pair it with.
+    _op(conn, "ot_t", "takeoff", NOW - (30) * DAY, icao24="tko222")
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "tko222", now_ts=NOW)
+    assert result["locality"] == homebase.NON_LOCAL
+
+
+def test_two_unpaired_takeoffs_do_suppress_the_gate(tmp_path):
+    """The other half: TWO takeoffs we could never match to a landing we watched
+    is a hole in the data, not the expected steady state, and must suppress the
+    "0 overnights" weight exactly as two unpaired landings already do.
+    """
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    for i in range(10):
+        _op(conn, f"tu{i}", "touch_and_go", NOW - (i + 20) * DAY, icao24="tku333", origin="KBDU")
+    _op(conn, "tu_t1", "takeoff", NOW - 30 * DAY, icao24="tku333")
+    _op(conn, "tu_t2", "takeoff", NOW - 35 * DAY, icao24="tku333")
+    conn.commit()
+
+    result = homebase.classify(conn, "KLMO", "tku333", now_ts=NOW)
+    assert result["locality"] != homebase.NON_LOCAL, (
+        "two takeoffs we never matched to a watched landing should read as a "
+        f"hole in the data, not evidence of non-locality -- got "
+        f"{result['locality']} based on {result['based_icao']}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # ROUND 2 / IMPORTANTS 4-5 and MINORS 6-9.
 # ---------------------------------------------------------------------------
 
@@ -779,7 +905,7 @@ def test_origin_case_does_not_split_the_count(tmp_path):
     assert result["locality"] == homebase.NON_LOCAL
     assert result["based_icao"] == "KBDU"
     origin_text = next(e["text"] for e in result["evidence"] if e["code"] == "arrival_origin")
-    assert "14 of those 14 came from KBDU" in origin_text
+    assert "14 of those 14 days came from KBDU" in origin_text
     assert "kbdu" not in origin_text
 
 

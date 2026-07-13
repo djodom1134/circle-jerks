@@ -9,8 +9,8 @@ structured evidence that the UI renders inline next to it:
                 18 separate days on which we watched a visit here both begin and
                 end (18 touch-and-go/low-approach circuits ended themselves and
                 are not departures we watched), of 47 observed arrivals
-              - Origin known for 14 of 47 observed arrivals, on 11 separate days;
-                13 of those 14 came from KBDU (on 10 of those 11 days)
+              - Origin known on 11 separate days (14 of 47 observed arrivals);
+                10 of those 11 days came from KBDU (13 of those 14 arrivals)
               - Registrant address Boulder, CO — the FAA registry records a
                 mailing address, not a based airport, so this is not weighed
                 against it
@@ -161,6 +161,27 @@ _MIN_CLOSED_VISIT_DAYS = 5
 # and "0 overnights" through a hole in the data is an absence, not an observation.
 _MAX_UNPAIRED_LANDINGS = 1
 
+# ROUND 3 / CRITICAL — `unpaired_landings` catches a missed DEPARTURE (the
+# landing row exists; nothing ever paired it). It is completely blind to a
+# missed ARRIVAL: if the detector never emits the `landing` at all, the op is in
+# NEITHER `landings` NOR `intervals`, so `unpaired_landings` reads 0 —
+# arithmetically identical to a perfect observation record. And `landing`
+# (detectors.py:735-768) is structurally the most fragile op this module counts:
+# it requires a >=500 ft AGL sample in the 300s before touchdown
+# (detectors.py:664-672, 764) on top of the <=200 ft AGL sample every arrival
+# needs, while `touch_and_go` (detectors.py:488-514) needs only runway-overlap
+# geometry "at any altitude". Marginal low-altitude ADS-B coverage — named as an
+# explicit risk at detectors.py:801-805 — therefore drops an aircraft's
+# `landing` rows while leaving its circuits untouched.
+#
+# `detect_takeoffs_over_period` requires NO prior approach from altitude
+# (detectors.py:778-800): a takeoff is only ever emitted for an aircraft that
+# ORIGINATED at the field. So a takeoff we cannot pair with a landing we watched
+# IS an arrival we missed — the exact mirror of an unpaired landing — and an
+# overnight hides behind a missed arrival exactly as it hides behind a missed
+# departure. Same gate, same threshold, same reasoning.
+_MAX_UNPAIRED_TAKEOFFS = 1
+
 # An aircraft whose LAST observed operation here is a full-stop landing is, as far
 # as we can see, still on the field. That is true whether it is genuinely parked
 # or whether we simply missed its departure — and NEITHER of those is evidence
@@ -270,6 +291,14 @@ def _closure_phrase(circuits: int, paired: int, landings: int) -> str:
             f"we watched it depart after {paired} of the {landings} full-stop "
             f"landing{'' if landings == 1 else 's'} we observed"
         )
+    else:
+        # IMPORTANT 2 (round 3): `landings == 0` is itself load-bearing — it is
+        # exactly the shape in which a missed ARRIVAL hides an overnight (see
+        # `_MAX_UNPAIRED_TAKEOFFS`). Under this module's own standard, the
+        # denominator is what we actually observed, and a reader who never sees
+        # this zero cannot tell "it never sleeps here" from "we have never once
+        # watched this aircraft touch the ground here". Never let it go unsaid.
+        parts.append("we observed 0 full-stop landings")
     if circuits:
         parts.append(
             f"{circuits} touch-and-go/low-approach circuit"
@@ -357,14 +386,24 @@ def _build_context(
 
     # The LATEST operation of any kind, per aircraft — a takeoff, touch-and-go,
     # low approach or circle after a landing all mean it was airborne again.
+    #
+    # The SAME scan also counts `takeoff` rows per aircraft: a takeoff is only
+    # ever emitted when the aircraft originated at the field (no prior approach
+    # from altitude — detectors.py:778-800), so it is a positive, named
+    # observation of ground presence here. Counting it here reuses this query's
+    # existing full-airport scan rather than adding another one.
     last_op: dict[str, sqlite3.Row] = {}
+    takeoffs: dict[str, int] = {}
     for row in conn.execute(
         f"SELECT icao24, type, timestamp AS ts FROM operations "
         f"WHERE icao=? AND timestamp BETWEEN ? AND ? AND icao24 IS NOT NULL{ac_filter} "
         f"ORDER BY icao24 ASC, timestamp DESC, id DESC",
         (icao, start_ts, now_ts, *one),
     ).fetchall():
-        last_op.setdefault(row["icao24"], row)
+        ac = row["icao24"]
+        last_op.setdefault(ac, row)
+        if row["type"] == "takeoff":
+            takeoffs[ac] = takeoffs.get(ac, 0) + 1
 
     # PRIVACY BOUNDARY (unchanged): this is the only read of `aircraft_registry`,
     # and it selects exactly registrant_city and registrant_state. The table also
@@ -402,6 +441,7 @@ def _build_context(
         "origins": origins,
         "origin_days": origin_days,
         "last_op": last_op,
+        "takeoffs": takeoffs,
         "registry": registry,
         "airport_city": airport["city"] if airport else None,
         "tz": tz,
@@ -455,6 +495,14 @@ def classify(
     # ramp — invisible to `dwell_intervals`, which drops the unpaired landing.
     unpaired_landings = landings - paired_landings
 
+    # THE QUANTITY ROUND 2 WAS MISSING: a takeoff never paired with a landing we
+    # watched. Every `takeoff` op is a positive observation of ground presence at
+    # THIS airport (no prior approach from altitude), so one we cannot match to a
+    # landing we watched is an arrival we missed — and an overnight hides behind
+    # a missed arrival exactly as it hides behind a missed departure.
+    takeoffs = context["takeoffs"].get(icao24, 0)
+    unpaired_takeoffs = takeoffs - paired_landings
+
     # A visit we watched BEGIN and END, counted in DISTINCT LOCAL DAYS: a paired
     # landing->takeoff, or a circuit that ended itself.
     tz = context["tz"]
@@ -487,11 +535,15 @@ def classify(
         })
     elif closed_visit_days >= _MIN_CLOSED_VISIT_DAYS and (
         unpaired_landings <= _MAX_UNPAIRED_LANDINGS
+    ) and (
+        unpaired_takeoffs <= _MAX_UNPAIRED_TAKEOFFS
     ):
-        # NOT an absence, on BOTH counts. We watched this aircraft arrive and leave
-        # again on at least _MIN_CLOSED_VISIT_DAYS separate days, every one of those
-        # visits ended the same day, AND there is no pile of full-stop landings we
-        # lost track of behind which an overnight could be hiding. That pair of
+        # NOT an absence, on ALL THREE counts. We watched this aircraft arrive and
+        # leave again on at least _MIN_CLOSED_VISIT_DAYS separate days, every one of
+        # those visits ended the same day, there is no pile of full-stop landings we
+        # lost track of behind which an overnight could be hiding (a missed
+        # DEPARTURE), AND there is no pile of takeoffs we could not match to a
+        # landing we watched (a missed ARRIVAL — the exact mirror). That triple of
         # observations is the only thing that earns the negative weight.
         score += _W_OVERNIGHT_NONE
         evidence.append({
@@ -506,13 +558,23 @@ def classify(
     else:
         # We did not watch it leave often enough, or cleanly enough, for "it doesn't
         # sleep here" to mean anything. Scores 0.0, and the receipt names WHICH of
-        # the two gates stopped it — because "we could not tell" is a different
+        # the three gates stopped it — because "we could not tell" is a different
         # sentence from "we did not look".
         if unpaired_landings > _MAX_UNPAIRED_LANDINGS:
             why = (
                 f"{unpaired_landings} of those landings were never followed by a "
                 f"departure we saw, and an aircraft that slept here is exactly what "
                 f"that looks like"
+            )
+        elif unpaired_takeoffs > _MAX_UNPAIRED_TAKEOFFS:
+            # ROUND 3 / CRITICAL: the mirror case. These takeoffs are positive,
+            # named observations that the aircraft was on the ground at `icao` —
+            # but we never watched the landing that put it there, so an overnight
+            # could be hiding behind every one of them.
+            why = (
+                f"{unpaired_takeoffs} takeoff{'' if unpaired_takeoffs == 1 else 's'} "
+                f"from {icao} we could not match to an arrival we watched — and "
+                f"behind an arrival we missed, an overnight can hide"
             )
         else:
             why = (
@@ -585,10 +647,14 @@ def classify(
         top, top_days = Counter(origin for _, origin in day_pairs).most_common(1)[0]
         count = sum(1 for origin in origins if origin == top)
         share = top_days / known_days
+        # MINOR (round 3): the gate runs on DAYS, not rows -- lead with the
+        # population the reader actually needs to track. Row counts are still
+        # here, but parenthetical, so a lay reader is not asked to hold two
+        # populations in one clause.
         detail = (
-            f"Origin known for {known} of {arrivals} observed arrivals, on "
-            f"{known_days} separate days; {count} of those {known} came from {top} "
-            f"(on {top_days} of those {known_days} days)"
+            f"Origin known on {known_days} separate days ({known} of {arrivals} "
+            f"observed arrivals); {top_days} of those {known_days} days came from "
+            f"{top} ({count} of those {known} arrivals)"
         )
         if top == icao and share >= _ORIGIN_DOMINANCE:
             score += _W_ORIGIN_HOME
