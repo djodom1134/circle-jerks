@@ -93,11 +93,69 @@ services:
     networks:
       - internal
 
+  # --- The Lost Landing (ledger.circlejerks.live) sidecar --------------------
+  # A separate FastAPI service, NOT part of the api/worker image above. It
+  # opens the main circlejerks database READ-ONLY (mode=ro URI, enforced in
+  # ledger-api/app/db.py) and writes its own derived tables to a completely
+  # separate database file/volume, so it can never contend for production's
+  # single SQLite write lock. See ledger-api/app/db.py's module docstring.
+  ledger-api:
+    build:
+      context: ./ledger-api
+    restart: unless-stopped
+    environment:
+      LEDGER_ENVIRONMENT: ${CIRCLEJERK_ENVIRONMENT:-production}
+      # Defense in depth on top of the read-only bind mount below: this URI
+      # form makes SQLite itself refuse any write, before it ever reaches
+      # application code (see db.open_production_readonly).
+      LEDGER_PRODUCTION_DATABASE_PATH: /prod-data/circlejerk.sqlite3
+      # This service's OWN database — daily_operation_rollup and
+      # aircraft_home_base live here, nowhere near the production file.
+      LEDGER_LEDGER_DATABASE_PATH: /data/ledger.sqlite3
+      # Same deployment's live-source credits block as the main api service —
+      # not something this service ingests itself, just describes it.
+      LEDGER_LIVE_SOURCE_PRIORITY: ${CIRCLEJERK_LIVE_SOURCE_PRIORITY:-adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky}
+      LEDGER_ADSBX_RAPIDAPI_KEY: ${ADSBX_RAPIDAPI_KEY:-}
+      LEDGER_SELF_HOSTED_FEEDER_BASE_URL: ${SELF_HOSTED_FEEDER_BASE_URL:-}
+    volumes:
+      # Production DB, read-only at the Docker level too — belt and suspenders
+      # on top of the mode=ro URI above. This container cannot write here even
+      # if the code tried.
+      - /srv/circlejerk/data:/prod-data:ro
+      # This sidecar's OWN writable database. Separate volume, separate file,
+      # never the production one.
+      - /srv/circlejerk/ledger-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=3).read()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - internal
+
+  # The Lost Landing's static frontend (lostlanding/). Built with
+  # VITE_API_BASE=/api (see lostlanding/.env.production) so the browser makes
+  # same-origin requests to ledger.circlejerks.live/api/... — Caddy proxies
+  # those to ledger-api, so there is zero CORS configuration anywhere, same as
+  # frontend/web's relationship to api.
+  web-ledger:
+    build:
+      context: ./lostlanding
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - internal
+
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
     environment:
       CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+      CADDY_LEDGER_DOMAIN: ${CADDY_LEDGER_DOMAIN:-}
       CADDY_EMAIL: ${CADDY_EMAIL:-}
     ports:
       - "80:80"

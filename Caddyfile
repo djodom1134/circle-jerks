@@ -60,3 +60,54 @@ www.{$CADDY_DOMAIN} {
 		reverse_proxy web:8080
 	}
 }
+
+# --- The Lost Landing (ledger sidecar) --------------------------------------
+# Separate site block for ledger.circlejerks.live, driven by CADDY_LEDGER_DOMAIN
+# so it's configurable independently of CADDY_DOMAIN above. This block is
+# additive only — the {$CADDY_DOMAIN} block above (circlejerks.live) is
+# untouched. Caddy handles automatic HTTPS per-domain on its own once DNS
+# points ledger.circlejerks.live at this box.
+{$CADDY_LEDGER_DOMAIN} {
+	encode zstd gzip
+
+	log {
+		output file /data/ledger-access.log {
+			roll_size 50MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+			}
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	@blocked_probe path_regexp blocked_probe (?i)^/.*(\.env|\.git|\.aws|\.php|wp-|wordpress|xmlrpc|phpmyadmin|adminer|cgi-bin|vendor|laravel|_ignition|server-status|actuator|boaform|hnap|shell|backup|backups|\.sql|\.bak|passwd|password|debug|telescope|geoserver|manager/html).*
+	handle @blocked_probe {
+		respond 404
+	}
+
+	handle_path /api/* {
+		reverse_proxy ledger-api:8100 {
+			lb_try_duration 30s
+			lb_try_interval 1s
+			health_uri /healthz
+			health_interval 10s
+			health_timeout 3s
+		}
+	}
+
+	handle {
+		reverse_proxy web-ledger:8080
+	}
+}
