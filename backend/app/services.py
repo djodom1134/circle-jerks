@@ -1488,6 +1488,44 @@ def _track_has_ground_evidence(track: list[dict]) -> bool:
     return False
 
 
+def _origin_local_ground_track_cache_key(icao24: str, track: list[dict]) -> str | None:
+    """Cache key for `_resolve_origin_local_ground_track`'s private
+    namespace — same icao24, same first_seen/last_seen hour bucket as the
+    samples in `track`. Shared by the cache-check path and the
+    scan-and-write path so both key their lookups identically. Returns None
+    when `track` has no valid position samples (nothing to key on)."""
+    samples = valid_position_samples(track)
+    if not samples:
+        return None
+    first_seen = int(samples[0]["timestamp"])
+    last_seen = int(samples[-1]["timestamp"])
+    return f"{ORIGIN_LOCAL_GROUND_TRACK_CACHE_PREFIX}:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
+
+
+async def _check_origin_local_ground_track_cache(
+    store: Store,
+    icao24: str,
+    track: list[dict],
+) -> dict | None:
+    """Cache-ONLY lookup against `_resolve_origin_local_ground_track`'s
+    private namespace — never touches `conn`, never runs
+    `origin_from_ground_track`, and consumes NO scan budget. Split out of
+    `_resolve_origin_local_ground_track` in task-4a review round 4 (Finding
+    1): the per-pass cap must gate on REAL cost (an actual `nearest_airport`
+    scan chain), never on "this aircraft has ground evidence" — that
+    condition alone can't distinguish a free cache hit from an expensive
+    scan-chain invocation. Callers MUST consult this UNCONDITIONALLY, before
+    any cap check, so a cache hit is never denied by a budget it would never
+    have spent. Returns None on a genuine miss (including "no samples to key
+    on" — callers already treat that as a free case via
+    `_track_has_ground_evidence` before ever reaching this)."""
+    cache_key = _origin_local_ground_track_cache_key(icao24, track)
+    if cache_key is None:
+        return None
+    cached = await store.get_cache(cache_key)
+    return cached if isinstance(cached, dict) else None
+
+
 async def _resolve_origin_local_ground_track(
     store: Store,
     conn,
@@ -1512,21 +1550,25 @@ async def _resolve_origin_local_ground_track(
     airport does not re-run the unindexed `nearest_airport` scan on every
     later pass (task-4a review round 2, Finding 3).
 
+    Delegates the cache check to `_check_origin_local_ground_track_cache`
+    (task-4a review round 4, Finding 1) — that split lets
+    `_enrich_origins_for_new_events` consult the cache UNCONDITIONALLY,
+    ahead of its per-pass cap gate, while this function still performs the
+    same check-then-scan-then-write sequence in one call for any caller that
+    wants the combined behavior.
+
     Returns `(origin, scanned)` where `scanned` is True iff this call actually
     ran `origin_from_ground_track` (i.e. a cache miss that hit the real,
     unindexed `nearest_airport` table scan) rather than returning a cached
     value at zero DB cost. The caller uses `scanned` to charge
     `ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS` only for aircraft that
     actually cost something (task-4a review round 3, Finding 1)."""
-    samples = valid_position_samples(track)
-    if not samples:
-        return unknown_origin(), False
-    first_seen = int(samples[0]["timestamp"])
-    last_seen = int(samples[-1]["timestamp"])
-    cache_key = f"{ORIGIN_LOCAL_GROUND_TRACK_CACHE_PREFIX}:{icao24.lower()}:{first_seen // 3600}:{last_seen // 3600}"
-    cached = await store.get_cache(cache_key)
-    if isinstance(cached, dict):
+    cached = await _check_origin_local_ground_track_cache(store, icao24, track)
+    if cached is not None:
         return cached, False
+    cache_key = _origin_local_ground_track_cache_key(icao24, track)
+    if cache_key is None:
+        return unknown_origin(), False
     result = origin_from_ground_track(conn, track) or unknown_origin()
     await store.set_cache(cache_key, result, origin_cache_ttl(result))
     return result, True
@@ -1588,14 +1630,23 @@ async def _enrich_origins_for_new_events(
     skipped_icao24s: set[str] = set()
     # Counts ONLY aircraft for which the resolver actually ran a real,
     # unindexed `nearest_airport` scan chain (a cache miss past the
-    # ground-evidence pre-filter) — never the free/airborne-only aircraft
-    # that _track_has_ground_evidence already short-circuits at zero DB cost,
-    # and never a cache hit. Task-4a review round 3, Finding 1: the previous
-    # cap counted every distinct aircraft touched by this loop, so a pass
+    # ground-evidence pre-filter AND past the unconditional cache check
+    # below) — never the free/airborne-only aircraft that
+    # _track_has_ground_evidence already short-circuits at zero DB cost, and
+    # never a cache hit. Task-4a review round 3, Finding 1: the previous cap
+    # counted every distinct aircraft touched by this loop, so a pass
     # dominated by the (docstring-documented-as-common) airborne-only case
     # could exhaust the whole budget before a single expensive resolution
     # ran, permanently NULLing out the rare aircraft that actually carried
-    # ground evidence.
+    # ground evidence. Task-4a review round 4, Finding 1: round 3 stopped
+    # FREE aircraft from consuming budget, but the gate below still fired on
+    # "has ground evidence" BEFORE the cache was ever consulted — so a
+    # cache-WARM aircraft (already resolved in an earlier pass) could still
+    # be DENIED by a cap that other, genuinely-unresolvable aircraft
+    # exhausted earlier in this same pass's iteration order, even though
+    # resolving it would have cost zero scans. Fixed by checking the cache
+    # unconditionally, ahead of the cap gate, so only a real cache-miss scan
+    # invocation is ever gated.
     scans_consumed = 0
     for event in new_events:
         icao24 = None
@@ -1612,6 +1663,16 @@ async def _enrich_origins_for_new_events(
                 # Free: origin_from_ground_track could never succeed for this
                 # track, so no resolver call is made and no budget is spent.
                 resolved_by_icao24[icao24] = unknown_origin()
+                continue
+            # Consult the private cache UNCONDITIONALLY, before the cap gate
+            # below: a hit costs one store.get_cache call and ZERO scan
+            # budget, so it must ALWAYS be served regardless of
+            # scans_consumed (task-4a review round 4, Finding 1). Only an
+            # actual cache MISS — which would require the real
+            # `nearest_airport` scan chain — may be gated by the cap.
+            cached = await _check_origin_local_ground_track_cache(store, icao24, track)
+            if cached is not None:
+                resolved_by_icao24[icao24] = cached
                 continue
             if scans_consumed >= ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS:
                 skipped_icao24s.add(icao24)

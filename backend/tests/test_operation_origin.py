@@ -741,6 +741,90 @@ async def test_cap_counts_only_actual_resolver_invocations_not_free_aircraft(tmp
 
 
 @pytest.mark.asyncio
+async def test_cache_hit_is_served_even_when_cap_is_exhausted_by_others_first(tmp_path):
+    """Task-4a review round 4, Finding 1 -- the reviewer's exact repro. The
+    cap gate used to fire on "this aircraft has ground evidence" BEFORE the
+    private cache was ever consulted, so it could not distinguish a free
+    cache hit from an expensive scan-chain invocation. An aircraft whose
+    origin is already warm in the private cache (same icao24, same
+    first_seen/last_seen hour bucket -- entirely realistic for a training
+    aircraft doing repeated touch-and-goes across consecutive passes) got
+    skipped and permanently NULLed if `cap` OTHER, genuinely-unresolvable
+    aircraft happened to exhaust scans_consumed earlier in new_events
+    iteration order -- even though resolving it would have cost ZERO scans.
+    Permanent, because there is no backfill/re-sweep: once an op is in
+    `operations`, `existing_operation_ids` guarantees it never returns in
+    new_events.
+
+    Pre-warms one aircraft's origin in an EARLIER pass (so it lands in the
+    private `origin_local_gt:` cache under its first_seen/last_seen hour
+    bucket), then in a LATER pass places `cap` OTHER genuinely-unresolvable
+    ground-evidence aircraft AHEAD of it in new_events -- each a real
+    cache-miss resolver invocation that exhausts the whole scan budget before
+    the pre-warmed aircraft is ever reached. The pre-warmed aircraft must
+    still resolve to its correct origin: a cache hit costs one
+    store.get_cache call and zero scan budget, so it must always be served
+    regardless of scans_consumed."""
+    conn = seeded_conn(tmp_path / "t.sqlite3")
+    store = MemoryStore()
+
+    warm_icao24 = "warm0001"
+    # Reused as the EXACT SAME list object across both passes so the cache
+    # key (derived from this track's first_seen/last_seen hour bucket) is
+    # byte-identical between the warming pass and the later pass.
+    warm_track = [{
+        "icao24": warm_icao24, "timestamp": 1000 + j * 10,
+        "lat": 40.0394, "lon": -105.2258,  # KBDU
+        "on_ground": True, "velocity_kt": 0.0,
+    } for j in range(3)]
+
+    # Earlier pass: resolves and caches this aircraft's origin as KBDU.
+    db.upsert_operation(conn, _op("op-warm-pass1", icao24=warm_icao24, type_="touch_and_go", ts=1000))
+    conn.commit()
+    await services._enrich_origins_for_new_events(
+        store, conn,
+        [{"id": "op-warm-pass1", "type": "touch_and_go", "icao24": warm_icao24, "timestamp": 1000}],
+        {warm_icao24: warm_track},
+    )
+    conn.commit()
+    row = db.read_operations(conn, "KLMO", 0, 10000)[0]
+    assert row["origin_airport_icao"] == "KBDU", "setup: first pass must actually resolve + cache"
+
+    # Later pass: `cap` OTHER genuinely-unresolvable ground-evidence
+    # aircraft, placed AHEAD of the cache-warm aircraft in new_events, each a
+    # real cache-miss resolver invocation that exhausts the whole budget.
+    cap = services.ORIGIN_LOCAL_RESOLVE_MAX_AIRCRAFT_PER_PASS
+    new_events: list[dict] = []
+    tracks: dict = {warm_icao24: warm_track}
+    for i in range(cap):
+        icao24 = f"unresolvable{i:04d}"
+        db.upsert_operation(conn, _op(f"op-unres{i}", icao24=icao24, type_="landing"))
+        new_events.append({"id": f"op-unres{i}", "type": "landing", "icao24": icao24, "timestamp": 2000})
+        # Real ground evidence, but nowhere near any seeded airport -- a
+        # genuine cache-miss resolver invocation for each distinct icao24.
+        tracks[icao24] = [{
+            "icao24": icao24, "timestamp": 2000 + j * 10,
+            "lat": 44.7, "lon": -110.5,
+            "on_ground": True, "velocity_kt": 0.0,
+        } for j in range(3)]
+
+    # The pre-warmed aircraft's SECOND event: same icao24, same track object
+    # (same cache key), placed LAST so all `cap` unresolvable aircraft are
+    # consumed first in iteration order.
+    db.upsert_operation(conn, _op("op-warm-pass2", icao24=warm_icao24, type_="touch_and_go", ts=1005))
+    new_events.append({"id": "op-warm-pass2", "type": "touch_and_go", "icao24": warm_icao24, "timestamp": 1005})
+    conn.commit()
+
+    await services._enrich_origins_for_new_events(store, conn, new_events, tracks)
+    conn.commit()
+
+    rows = {r["id"]: r["origin_airport_icao"] for r in db.read_operations(conn, "KLMO", 0, 10000)}
+    assert rows["op-warm-pass2"] == "KBDU", (
+        "cache-warm aircraft was denied by a scan budget it would never have spent"
+    )
+
+
+@pytest.mark.asyncio
 async def test_negative_cache_avoids_nearest_airport_scan_on_warm_second_pass(tmp_path, monkeypatch):
     """An aircraft that resolves to unknown (real ground evidence, but no
     airport within ORIGIN_GROUND_AIRPORT_MAX_NM) must not re-pay the
