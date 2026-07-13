@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>The Lost Landing | Longmont Airport Revenue Opportunity</title>
+  <meta name="description" content="A concept dashboard showing the revenue Longmont leaves on the runway by not charging fair landing and usage fees." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="sunburst"></div>
+  <header class="topbar">
+    <a class="brand" href="#top"><span class="wing">◆</span> THE LOST LANDING <span class="wing">◆</span></a>
+    <nav>
+      <a href="#calculator">Calculator</a>
+      <a href="#ledger">Lost Revenue</a>
+      <a href="#projects">What It Builds</a>
+      <a href="#method">Method</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-image" role="img" aria-label="Art Deco airport of the future"></div>
+      <div class="hero-overlay"></div>
+      <div class="hero-copy">
+        <p class="eyebrow">LONGMONT, COLORADO • KLMO</p>
+        <h1>Every landing has value.<br><span>We are leaving it on the runway.</span></h1>
+        <p class="lede">A live civic ledger powered by real aircraft activity. Move the fee. See the opportunity. Decide what Longmont could build instead.</p>
+        <a class="cta" href="#calculator">Calculate the lost opportunity</a>
+      </div>
+      <div class="hero-meter">
+        <div><span class="label">Observed annual operations</span><strong id="heroOps">109,500</strong></div>
+        <div><span class="label">Illustrative $10 fee</span><strong id="heroRevenue">$1.10M</strong></div>
+      </div>
+    </section>
+
+    <section id="calculator" class="calculator section-pad">
+      <div class="section-heading">
+        <p class="kicker">THE FAIR-USE CALCULATOR</p>
+        <h2>What if each runway use paid something?</h2>
+        <p>Adjust the fee, the billable share, and activity assumptions. Results update instantly.</p>
+      </div>
+
+      <div class="calc-grid">
+        <div class="controls art-card">
+          <label for="fee">Fee per landing / touch-and-go <output id="feeOut">$10</output></label>
+          <input id="fee" type="range" min="0" max="30" value="10" step="1" />
+
+          <label for="daily">Observed operations per day <output id="dailyOut">300</output></label>
+          <input id="daily" type="range" min="50" max="600" value="300" step="10" />
+
+          <label for="billable">Billable share <output id="billableOut">100%</output></label>
+          <input id="billable" type="range" min="10" max="100" value="100" step="5" />
+
+          <label for="days">Active days per year <output id="daysOut">365</output></label>
+          <input id="days" type="range" min="180" max="365" value="365" step="5" />
+
+          <div class="switches">
+            <button class="preset active" data-fee="5">Conservative $5</button>
+            <button class="preset" data-fee="10">Fair-use $10</button>
+            <button class="preset" data-fee="15">Impact $15</button>
+          </div>
+        </div>
+
+        <div class="results">
+          <div class="money-card primary">
+            <span>Potential annual revenue</span>
+            <strong id="annual">$1,095,000</strong>
+            <small>Based on selected assumptions</small>
+          </div>
+          <div class="money-row">
+            <div class="money-card"><span>Per month</span><strong id="monthly">$91,250</strong></div>
+            <div class="money-card"><span>Per day</span><strong id="perDay">$3,000</strong></div>
+          </div>
+          <div class="money-row">
+            <div class="money-card"><span>Five-year reserve</span><strong id="fiveYear">$5.48M</strong></div>
+            <div class="money-card"><span>Ten-year reserve</span><strong id="tenYear">$10.95M</strong></div>
+          </div>
+          <p class="fineprint">Illustrative gross revenue before collection costs, exemptions, legal review, and behavioral changes.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="ledger" class="ledger section-pad dark-panel">
+      <div class="section-heading light">
+        <p class="kicker">THE OPPORTUNITY LEDGER</p>
+        <h2>See the money accumulate in real time</h2>
+        <p>This concept turns Circle Jerks flight-event data into a civic revenue counter.</p>
+      </div>
+
+      <div class="ledger-grid">
+        <div class="counter-card">
+          <span>Estimated revenue forgone today</span>
+          <strong id="todayLost">$0</strong>
+          <div class="ticker">UPDATING FROM TODAY'S OBSERVED OPERATIONS</div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title"><span>30-day opportunity</span><b id="thirtyTotal">$93,400</b></div>
+          <svg id="barChart" viewBox="0 0 800 260" aria-label="30 day lost revenue chart"></svg>
+        </div>
+      </div>
+
+      <div class="stat-strip">
+        <div><strong id="touchGoes">6,740</strong><span>Touch-and-go events</span></div>
+        <div><strong id="uniqueAircraft">184</strong><span>Unique aircraft</span></div>
+        <div><strong id="outsideShare">72%</strong><span>Estimated non-local share</span></div>
+        <div><strong id="medianStop">4m 12s</strong><span>Median time on field</span></div>
+      </div>
+    </section>
+
+    <section class="data-explorer section-pad">
+      <div class="section-heading">
+        <p class="kicker">MONEY BY AIRCRAFT</p>
+        <h2>Who uses the public asset most?</h2>
+        <p>Illustrative ranking fed by the same tail-number and operation records used by Circle Jerks.</p>
+      </div>
+      <div class="table-wrap art-card">
+        <table>
+          <thead><tr><th>Aircraft</th><th>Observed events</th><th>Estimated fees</th><th>Home base</th><th>Pattern</th></tr></thead>
+          <tbody id="aircraftRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="projects" class="projects section-pad">
+      <div class="section-heading">
+        <p class="kicker">WHAT THE LOST MONEY COULD BUILD</p>
+        <h2>Turn circles into civic capital</h2>
+        <p>Choose a project and see how quickly a fair-use fee could fund it.</p>
+      </div>
+      <div class="project-grid" id="projectGrid"></div>
+    </section>
+
+    <section class="vision section-pad">
+      <div class="vision-copy">
+        <p class="kicker">THE AIRPORT OF THE FUTURE</p>
+        <h2>Not anti-airport. Pro-value.</h2>
+        <p>A financially strong airport can maintain its surfaces on time, build reserves, support cleaner aviation, create a destination FBO, and serve residents instead of depending on deferred maintenance and federal rescue.</p>
+        <div class="vision-pills"><span>Self-funded maintenance</span><span>Electric aviation</span><span>Community FBO</span><span>Transparent ledger</span><span>Quiet-tech incentives</span></div>
+      </div>
+      <img src="airport-future.png" alt="Art Deco illustration of Longmont Airport of the Future" />
+    </section>
+
+    <section id="method" class="method section-pad dark-panel">
+      <div class="section-heading light">
+        <p class="kicker">DATA & METHOD</p>
+        <h2>Built to connect directly to Circle Jerks</h2>
+      </div>
+      <div class="method-grid">
+        <div><b>1</b><h3>Ingest</h3><p>Aircraft tracks, tail numbers, touch-and-go detections, low approaches, timestamps, home-base inference, and dwell time.</p></div>
+        <div><b>2</b><h3>Classify</h3><p>Separate landings, touch-and-goes, local operations, outside training activity, and likely revenue-producing visits.</p></div>
+        <div><b>3</b><h3>Price</h3><p>Apply a user-selected lawful fee assumption consistently across billable events.</p></div>
+        <div><b>4</b><h3>Translate</h3><p>Convert gross opportunity into daily, monthly, annual, reserve, and project-funding views.</p></div>
+      </div>
+      <p class="disclaimer">Concept prototype. Fee legality, collection design, exemptions, and exact operational classifications require City and aviation counsel review. The sample values in this demo should be replaced with live Circle Jerks API results.</p>
+    </section>
+  </main>
+
+  <footer><span>THE LOST LANDING</span><span>A concept for a financially self-sustaining Vance Brand Airport</span></footer>
+  <script src="app.js"></script>
+</body>
+</html>
