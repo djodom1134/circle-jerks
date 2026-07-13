@@ -371,8 +371,14 @@ CREATE TABLE IF NOT EXISTS aircraft_home_base (
   icao TEXT NOT NULL,              -- the airport this judgement is ABOUT
   icao24 TEXT NOT NULL,
   locality TEXT NOT NULL,          -- local | non_local | unclassified
-  confidence REAL NOT NULL,
-  based_icao TEXT,                 -- best guess at where it IS based, when known
+  -- NOT a probability. A rescaled sum of hand-chosen weights, bounded strictly
+  -- below 1.0 (homebase.MAX_SIGNAL_STRENGTH) because under the floor constraint
+  -- no classification here can ever be certain. Named `signal_strength` and not
+  -- `confidence` so that a reader cannot mistake 0.65 for "65% likely to be a
+  -- visitor". This table has never shipped -- it is a derived cache, rebuilt
+  -- nightly by the ledger worker -- so this is its first published shape.
+  signal_strength REAL NOT NULL,
+  based_icao TEXT,                 -- the airport we OBSERVED it arriving from, when known
   evidence_json TEXT NOT NULL,
   computed_at INTEGER NOT NULL,
   PRIMARY KEY (icao, icao24)
