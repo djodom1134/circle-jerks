@@ -133,6 +133,35 @@ services:
     networks:
       - internal
 
+  # Same image as ledger-api, second role — exactly the api/worker split the
+  # backend service pair already uses. Without this, the rollup is only ever
+  # populated by a manual backfill and the published numbers go stale the day
+  # after deploy.
+  #
+  # It rebuilds daily_operation_rollup and aircraft_home_base in THIS service's
+  # own database. It never writes to the production file: that is mounted :ro
+  # here too, and opened via a mode=ro URI on top of that. So this worker cannot
+  # contend for production's single SQLite write lock.
+  ledger-worker:
+    build:
+      context: ./ledger-api
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    environment:
+      LEDGER_ENVIRONMENT: ${CIRCLEJERK_ENVIRONMENT:-production}
+      LEDGER_PRODUCTION_DATABASE_PATH: /prod-data/circlejerk.sqlite3
+      LEDGER_LEDGER_DATABASE_PATH: /data/ledger.sqlite3
+      LEDGER_LIVE_SOURCE_PRIORITY: ${CIRCLEJERK_LIVE_SOURCE_PRIORITY:-adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky}
+      LEDGER_ADSBX_RAPIDAPI_KEY: ${ADSBX_RAPIDAPI_KEY:-}
+      LEDGER_SELF_HOSTED_FEEDER_BASE_URL: ${SELF_HOSTED_FEEDER_BASE_URL:-}
+    volumes:
+      - /srv/circlejerk/data:/prod-data:ro
+      - /srv/circlejerk/ledger-data:/data
+    depends_on:
+      - ledger-api
+    networks:
+      - internal
+
   # The Lost Landing's static frontend (lostlanding/). Built with
   # VITE_API_BASE=/api (see lostlanding/.env.production) so the browser makes
   # same-origin requests to ledger.circlejerks.live/api/... — Caddy proxies
