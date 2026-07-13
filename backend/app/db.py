@@ -708,6 +708,20 @@ def update_operation_wind(conn: sqlite3.Connection, op_id: str,
     )
 
 
+def update_operation_origin(conn: sqlite3.Connection, op_id: str, origin_icao: str | None) -> None:
+    """Write the observed departure airport for one operation, by id.
+
+    `origin_icao` is None when we did not observe a departure airport for this
+    arrival — that is written as NULL, never a placeholder string. NULL means
+    "no information," not "not local" (see homebase.py's locality classifier,
+    which reads this column and must treat NULL as no evidence either way).
+    """
+    conn.execute(
+        "UPDATE operations SET origin_airport_icao = ? WHERE id = ?",
+        (origin_icao, op_id),
+    )
+
+
 def current_flow(conn: sqlite3.Connection, icao: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM runway_flow WHERE icao = ? AND ended_at IS NULL "

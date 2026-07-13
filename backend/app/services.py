@@ -41,6 +41,11 @@ ORIGIN_GROUND_AIRPORT_MAX_NM = 3.0
 ORIGIN_TRACK_START_AIRPORT_MAX_NM = 8.0
 ORIGIN_FIRST_SEEN_AIRPORT_MAX_NM = 8.0
 ORIGIN_GROUND_SPEED_MAX_KT = 45.0
+# Op types where "origin" is a meaningful, honest signal: an ARRIVAL at this
+# airport. A takeoff's origin is trivially this airport, so writing one on a
+# takeoff row would poison the classifier's "N of M arrivals originated at X"
+# evidence with garbage. See homebase.py's locality classifier.
+ORIGIN_ELIGIBLE_OP_TYPES = frozenset({"landing", "touch_and_go", "low_approach"})
 ORIGIN_LOOKBACK_SECONDS = 12 * 3600
 ORIGIN_LOOKAHEAD_SECONDS = 2 * 3600
 ORIGIN_STRONG_CACHE_SECONDS = 24 * 3600
@@ -487,6 +492,11 @@ async def run_detectors_for_monitor(
         except Exception:  # noqa: BLE001 — never let weather break detection
             wind = {}
         flow.process(conn, airport.icao, runways, new_events, wind, now)
+        # Forward-fill origin_airport_icao for newly-detected arrivals only.
+        # Local-only (cache + ground-track) resolver, never resolve_origin's
+        # network waterfall — see _enrich_origins_for_new_events. Best-effort:
+        # never raises, so a bad lookup can't take down this shared loop.
+        await _enrich_origins_for_new_events(store, conn, new_events, tracks_by_icao24)
         # Release the write lock here. db_session commits only on exit, and the
         # callers keep this connection open for seconds afterwards — the worker
         # across its HTTP fetches, the scan across enrich_offenders and
@@ -1378,6 +1388,40 @@ async def _resolve_origin_local_only(
         await store.set_cache(cache_key, local, origin_cache_ttl(local))
         return local
     return unknown_origin()
+
+
+async def _enrich_origins_for_new_events(
+    store: Store,
+    conn,
+    new_events: list[dict],
+    tracks_by_icao24: dict[str, list[dict]],
+) -> None:
+    """Best-effort forward-fill of operations.origin_airport_icao.
+
+    Called once per detector pass, immediately after persist_events, over
+    ONLY new_events (never a re-sweep of old rows) — the same shape as
+    deviation.store_deviations / flow.process. Local-only resolver (cache +
+    ground-track), never resolve_origin's network waterfall: this runs on the
+    detector loop shared with circlejerks.live, and blocking it on external
+    HTTP would degrade live detection. Never raises — a failed lookup for one
+    aircraft must not take down detection for the rest of the scan.
+    """
+    log = logging.getLogger(__name__)
+    for event in new_events:
+        if event.get("type") not in ORIGIN_ELIGIBLE_OP_TYPES:
+            continue  # takeoff's origin is trivially this airport; don't write it
+        op_id = event.get("id")
+        icao24 = event.get("icao24")
+        if not op_id or not icao24:
+            continue
+        try:
+            track = tracks_by_icao24.get(icao24) or []
+            origin = await _resolve_origin_local_only(store, conn, icao24, track)
+            db.update_operation_origin(conn, op_id, origin.get("origin_airport_icao"))
+        except Exception:  # noqa: BLE001 — a failed origin lookup must not break detection
+            log.warning(
+                "origin enrichment failed for icao24=%s op_id=%s", icao24, op_id, exc_info=True
+            )
 
 
 def altitude_over_user_summary(
