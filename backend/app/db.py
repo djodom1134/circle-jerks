@@ -348,6 +348,20 @@ CREATE TABLE IF NOT EXISTS aircraft_community_notes (
   created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 );
 CREATE INDEX IF NOT EXISTS idx_community_notes_icao ON aircraft_community_notes(icao24, created_at DESC);
+
+-- Pre-aggregated daily counts, keyed by AIRPORT-LOCAL calendar day. Exists because
+-- airport_operations_trends recomputes in Python over every raw row with a per-row
+-- registry subquery (see the perf note at the top of airport_stats); a public
+-- dashboard cannot be served off that path. Rebuilt idempotently per day.
+CREATE TABLE IF NOT EXISTS daily_operation_rollup (
+  icao TEXT NOT NULL,
+  date_local TEXT NOT NULL,        -- 'YYYY-MM-DD' in the airport's local timezone
+  event_type TEXT NOT NULL,        -- landing | takeoff | touch_and_go | low_approach
+  icao24 TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY (icao, date_local, event_type, icao24)
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_icao_date ON daily_operation_rollup(icao, date_local);
 """
 
 
