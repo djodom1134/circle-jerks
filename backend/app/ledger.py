@@ -18,7 +18,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import db, homebase
+from . import db, dwell, homebase
 from .registry.normalize import resolve_display_tail
 from .registry.owner_type import infer_owner_type
 
@@ -56,6 +56,43 @@ FLOOR_DISCLAIMER = (
     "Every count on this page is a floor, not an estimate. Aircraft without ADS-B Out "
     "are invisible to us, so real activity is higher than what we report — never lower."
 )
+
+# A plain-language credits line for each ADS-B data source this project can ingest,
+# published alongside the numbers so a reader can see where the underlying data
+# comes from. This is a CREDITS BLOCK, not a license gate: it does not block the
+# endpoint, and it is not meant to represent a legal redistribution clearance.
+SOURCE_ATTRIBUTION: dict[str, dict[str, str]] = {
+    "adsb_lol": {
+        "name": "adsb.lol",
+        "license": "ODbL (Open Database License) — volunteer ADS-B feeder community",
+        "url": "https://adsb.lol",
+    },
+    "airplanes_live": {
+        "name": "airplanes.live",
+        "license": "Volunteer ADS-B feeder community",
+        "url": "https://airplanes.live",
+    },
+    "adsb_fi": {
+        "name": "adsb.fi",
+        "license": "Volunteer ADS-B feeder community",
+        "url": "https://adsb.fi",
+    },
+    "opensky": {
+        "name": "The OpenSky Network",
+        "license": "Research network, see opensky-network.org for terms",
+        "url": "https://opensky-network.org",
+    },
+    "adsbx": {
+        "name": "ADS-B Exchange",
+        "license": "Unfiltered community feed, accessed via a commercial API",
+        "url": "https://www.adsbexchange.com",
+    },
+    "self_hosted": {
+        "name": "Self-hosted receiver",
+        "license": "Operator-owned ADS-B receiver",
+        "url": "",
+    },
+}
 
 
 def is_runway_use(event_type: str) -> bool:
@@ -286,6 +323,89 @@ def operator_ledger(
 
     out.sort(key=lambda g: g["runway_uses"], reverse=True)
     return out[:limit]
+
+
+def methodology(conn: sqlite3.Connection, icao: str, settings) -> dict:
+    """The site's factual claims about its own method, served WITH the numbers.
+
+    This ships from the API rather than the front end on purpose: a caveat that
+    lives in the UI can drift from the code that produced the figure it qualifies.
+    Here, they cannot.
+
+    `attribution` is a plain credits block — the ADS-B sources this deployment is
+    currently configured to ingest — not a license gate. Nothing here blocks the
+    endpoint.
+    """
+    icao = icao.upper()
+    data_since = conn.execute(
+        "SELECT MIN(timestamp) AS t FROM operations WHERE icao=?", (icao,)
+    ).fetchone()["t"]
+
+    return {
+        "billable_unit": "runway_use",
+        "billable_unit_label": "runway uses",
+        "billable_unit_description": (
+            "A runway use is one arrival at the runway: a landing, a touch-and-go, or a "
+            "low approach. It is not an FAA 'operation' — an operation is a takeoff OR a "
+            "landing, so a touch-and-go counts as two, and multiplying a fee by an "
+            "operations count would double-count every one of them."
+        ),
+        "definitions": dict(RUNWAY_USE_DEFINITIONS),
+        "floor_disclaimer": FLOOR_DISCLAIMER,
+        "data_since": data_since,
+        "locality_confidence_threshold": homebase.CONFIDENCE_THRESHOLD,
+        "locality_lookback_days": homebase.DEFAULT_LOOKBACK_DAYS,
+        "attribution": {
+            source: SOURCE_ATTRIBUTION[source]
+            for source in settings.live_source_priority_list()
+            if source in SOURCE_ATTRIBUTION
+        },
+    }
+
+
+def build_ledger(
+    conn: sqlite3.Connection, icao: str, settings, now_ts: int, days: int = 30
+) -> dict:
+    icao = icao.upper()
+    tz = db.airport_timezone(conn, icao)
+    start_ts = int(now_ts) - days * 86400
+    start_day = db.local_day_key(start_ts + 86400, tz)  # inclusive window of `days` days
+    end_day = db.local_day_key(int(now_ts), tz)
+
+    totals = rollup_totals(conn, icao, start_day, end_day)
+    localities = homebase.locality_map(conn, icao)
+
+    seen = conn.execute(
+        "SELECT DISTINCT icao24 FROM daily_operation_rollup "
+        f"WHERE icao=? AND date_local BETWEEN ? AND ? "
+        f"  AND event_type IN ({','.join('?' * len(RUNWAY_USE_TYPES))})",
+        (icao, start_day, end_day, *RUNWAY_USE_TYPES),
+    ).fetchall()
+    # Unclassified aircraft are counted VISIBLY, never silently dropped and never
+    # lumped into local or non-local — see homebase.py's module docstring on why
+    # `non_local` is currently unreachable for most of this historical window.
+    counts = {homebase.LOCAL: 0, homebase.NON_LOCAL: 0, homebase.UNCLASSIFIED: 0}
+    for row in seen:
+        entry = localities.get(row["icao24"])
+        counts[entry["locality"] if entry else homebase.UNCLASSIFIED] += 1
+
+    return {
+        "airport_icao": icao,
+        "timezone": tz,
+        "window": {"days": days, "start_day": start_day, "end_day": end_day},
+        "summary": {
+            "runway_uses": totals["runway_uses"],
+            "by_type": totals["by_type"],
+            "unique_aircraft": totals["unique_aircraft"],
+            "local_aircraft": counts[homebase.LOCAL],
+            "non_local_aircraft": counts[homebase.NON_LOCAL],
+            "unclassified_aircraft": counts[homebase.UNCLASSIFIED],
+            "dwell": dwell.dwell_summary(conn, icao, start_ts, int(now_ts)),
+        },
+        "daily": rollup_daily_runway_uses(conn, icao, start_day, end_day),
+        "operators": operator_ledger(conn, icao, start_day, end_day),
+        "methodology": methodology(conn, icao, settings),
+    }
 
 
 def _dominant_locality(entries: list[dict]) -> tuple[str, list[dict]]:
