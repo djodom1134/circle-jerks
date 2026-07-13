@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, ledger
+from app import ledger
 from app.main import app, settings_dep
 from app.settings import Settings
 
+from .dbsupport import PROD_TEST_SCHEMA, KLMO_SEED
 
 BASE = 1780336800   # 2026-06-01 12:00 America/Denver
 DAY = 86400
@@ -14,31 +17,53 @@ DAY = 86400
 
 @pytest.fixture
 def client(tmp_path):
-    path = str(tmp_path / "t.sqlite3")
-    conn = db.connect(path)
-    conn.executescript(db.SCHEMA)
-    db.seed_db(conn)
+    prod_path = str(tmp_path / "prod.sqlite3")
+    ledger_path = str(tmp_path / "ledger.sqlite3")
 
-    conn.execute(
+    setup = sqlite3.connect(prod_path)
+    setup.row_factory = sqlite3.Row
+    setup.executescript(PROD_TEST_SCHEMA)
+    setup.execute(
+        "INSERT INTO airports (icao, iata, name, city, country, lat, lon, elevation_ft, is_towered, timezone) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        KLMO_SEED,
+    )
+    setup.execute(
         "INSERT INTO aircraft_registry (n_number, icao_hex, registrant_name, "
         "  registrant_city, registrant_state) VALUES ('N111AA','AAA111',"
         "  'BOULDER FLIGHT SCHOOL LLC','Boulder','CO')"
     )
     for i in range(6):
-        db.upsert_operation(conn, db.operation_from_event({
-            "id": f"g{i}", "type": "touch_and_go", "icao24": "aaa111",
-            "callsign": "N111AA", "timestamp": BASE + i * 60, "airport_icao": "KLMO",
-        }))
-    db.upsert_operation(conn, db.operation_from_event({
-        "id": "t1", "type": "takeoff", "icao24": "aaa111", "callsign": "N111AA",
-        "timestamp": BASE + 600, "airport_icao": "KLMO",
-    }))
-    ledger.rebuild_rollup(conn, "KLMO", BASE - 40 * DAY, BASE + DAY)
-    conn.commit()
-    conn.close()
+        setup.execute(
+            "INSERT INTO operations (id, icao, icao24, callsign, type, timestamp) "
+            "VALUES (?, 'KLMO', 'aaa111', 'N111AA', 'touch_and_go', ?)",
+            (f"g{i}", BASE + i * 60),
+        )
+    setup.execute(
+        "INSERT INTO operations (id, icao, icao24, callsign, type, timestamp) "
+        "VALUES ('t1', 'KLMO', 'aaa111', 'N111AA', 'takeoff', ?)",
+        (BASE + 600,),
+    )
+    setup.commit()
+    setup.close()
+
+    # Same shape the real nightly worker/backfill would have produced by the
+    # time anyone hits the endpoint: rollup already built from the production
+    # (here: fixture) database, via the same two-connection split the API uses.
+    from app import db as app_db
+    ro = app_db.open_production_readonly(prod_path)
+    rw = app_db.open_ledger_db(ledger_path)
+    ledger.rebuild_rollup(ro, rw, "KLMO", BASE - 40 * DAY, BASE + DAY)
+    rw.commit()
+    ro.close()
+    rw.close()
 
     def _settings():
-        return Settings(database_path=path, live_source_priority="adsb_lol,self_hosted")
+        return Settings(
+            production_database_path=prod_path,
+            ledger_database_path=ledger_path,
+            live_source_priority="adsb_lol,self_hosted",
+        )
 
     app.dependency_overrides[settings_dep] = _settings
     with TestClient(app) as c:

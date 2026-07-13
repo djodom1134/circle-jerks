@@ -26,7 +26,7 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import db, ledger, patterns, track_history, pattern_circuits, vnap
+from . import db, patterns, track_history, pattern_circuits, vnap
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -54,10 +54,7 @@ app = FastAPI(title="Circle Jerks API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", "http://127.0.0.1:5173",   # circlejerks frontend
-        "http://localhost:5174", "http://127.0.0.1:5174",   # lostlanding frontend
-    ],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1463,22 +1460,6 @@ async def get_airport_operations_trends(
             raise HTTPException(status_code=404, detail="airport not found")
         trends = db.airport_operations_trends(conn, icao, now_ts=now, months=12)
     return {"airport_icao": icao.upper(), **trends}
-
-
-@app.get("/airports/{icao}/ledger")
-async def get_airport_ledger(
-    icao: str,
-    settings: Annotated[Settings, Depends(settings_dep)],
-    days: Annotated[int, Query(ge=1, le=365)] = 30,
-    _now: int | None = None,
-):
-    """The Lost Landing's entire data source: runway uses, the daily series, the
-    operator ledger, and the methodology block that ships WITH the numbers."""
-    now = _now if _now is not None else int(time.time())
-    with db_session(settings.database_path) as conn:
-        if db.get_airport(conn, icao) is None:
-            raise HTTPException(status_code=404, detail="airport not found")
-        return ledger.build_ledger(conn, icao, settings, now_ts=now, days=days)
 
 
 @app.get("/airports/{icao}/vnap-compliance")

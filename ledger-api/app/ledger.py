@@ -99,12 +99,19 @@ def is_runway_use(event_type: str) -> bool:
     return event_type in RUNWAY_USE_TYPES
 
 
-def rebuild_rollup(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: int) -> int:
+def rebuild_rollup(
+    ro_conn: sqlite3.Connection, rw_conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: int
+) -> int:
     """Rebuild daily_operation_rollup for every LOCAL day touched by [start_ts, end_ts].
+
+    `ro_conn` is the production READ-ONLY connection: every row read below
+    comes from its `operations`/`airports` tables. `rw_conn` is this service's
+    OWN database: the DELETE and INSERT below are issued against it alone.
+    The two are never the same connection in production — see app/db.py.
 
     Idempotent: deletes the affected local days wholesale, then reinserts from
     `operations`. Deleting first is what makes a rebuild correct after the
-    maintenance scripts in backend/scripts/ prune rows from `operations` — an
+    maintenance scripts on the main API prune rows from `operations` — an
     incremental upsert would leave orphaned counts behind forever.
 
     The delete and the reinsert MUST cover the identical scope. The delete always
@@ -118,7 +125,7 @@ def rebuild_rollup(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: i
     Returns the number of rollup rows written.
     """
     icao = icao.upper()
-    tz = db.airport_timezone(conn, icao)
+    tz = db.airport_timezone(ro_conn, icao)
 
     # The days to rebuild are those spanned by the REQUESTED range, not merely the
     # days that happen to have rows — otherwise a day whose last operation was just
@@ -129,7 +136,7 @@ def rebuild_rollup(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: i
     wide_start_ts = _local_midnight_ts(first_day, tz)
     wide_end_ts = _local_midnight_ts(last_day + timedelta(days=1), tz) - 1
 
-    rows = conn.execute(
+    rows = ro_conn.execute(
         "SELECT timestamp AS ts, type, icao24 "
         "FROM operations "
         f"WHERE icao=? AND type IN ({','.join('?' * len(ROLLUP_TYPES))}) "
@@ -142,11 +149,11 @@ def rebuild_rollup(conn: sqlite3.Connection, icao: str, start_ts: int, end_ts: i
         day = db.local_day_key(row["ts"], tz)
         counts[(day, row["type"], row["icao24"])] += 1
 
-    conn.executemany(
+    rw_conn.executemany(
         "DELETE FROM daily_operation_rollup WHERE icao=? AND date_local=?",
         [(icao, day) for day in span_days],
     )
-    conn.executemany(
+    rw_conn.executemany(
         "INSERT INTO daily_operation_rollup (icao, date_local, event_type, icao24, count) "
         "VALUES (?, ?, ?, ?, ?)",
         [(icao, day, etype, icao24, n) for (day, etype, icao24), n in counts.items()],
@@ -183,9 +190,13 @@ def _local_midnight_ts(day: date, tz: str | None) -> int:
     return int(local_midnight.timestamp())
 
 
-def rollup_totals(conn: sqlite3.Connection, icao: str, start_day: str, end_day: str) -> dict:
-    """Totals over an inclusive local-day range. Runway uses EXCLUDE takeoffs."""
-    rows = conn.execute(
+def rollup_totals(rw_conn: sqlite3.Connection, icao: str, start_day: str, end_day: str) -> dict:
+    """Totals over an inclusive local-day range. Runway uses EXCLUDE takeoffs.
+
+    Reads ONLY `daily_operation_rollup`, which lives in this service's own
+    database — `rw_conn`, never the production read-only connection.
+    """
+    rows = rw_conn.execute(
         "SELECT event_type, icao24, SUM(count) AS n "
         "FROM daily_operation_rollup "
         "WHERE icao=? AND date_local BETWEEN ? AND ? "
@@ -210,14 +221,16 @@ def rollup_totals(conn: sqlite3.Connection, icao: str, start_day: str, end_day: 
 
 
 def rollup_daily_runway_uses(
-    conn: sqlite3.Connection, icao: str, start_day: str, end_day: str
+    rw_conn: sqlite3.Connection, icao: str, start_day: str, end_day: str
 ) -> list[dict]:
     """Daily runway-use series over an inclusive local-day range, gap-filled with zeroes.
+
+    Reads ONLY `daily_operation_rollup` — this service's own database (`rw_conn`).
 
     Gap-filling matters: a missing bar and a zero bar mean different things, and a
     chart that silently omits quiet days overstates the typical day.
     """
-    rows = conn.execute(
+    rows = rw_conn.execute(
         "SELECT date_local, SUM(count) AS n "
         "FROM daily_operation_rollup "
         f"WHERE icao=? AND date_local BETWEEN ? AND ? "
@@ -255,7 +268,8 @@ PRIVATE_BUCKET = "Private / unaffiliated"
 
 
 def operator_ledger(
-    conn: sqlite3.Connection,
+    ro_conn: sqlite3.Connection,
+    rw_conn: sqlite3.Connection,
     icao: str,
     start_day: str,
     end_day: str,
@@ -271,30 +285,38 @@ def operator_ledger(
 
     Organizations are named. Individuals are bucketed and never named. No registrant
     address is emitted in any form.
+
+    `rw_conn` (this service's own db) supplies the rollup aggregate and the
+    locality map. `ro_conn` (production, read-only) supplies the latest
+    callsign per aircraft and its registrant name — both of these used to be
+    correlated subqueries in the SAME query as the rollup aggregate, back when
+    all three tables lived in one database file. Split into a batched
+    per-aircraft lookup against `ro_conn` now that they live in two separate
+    files with no ATTACH between them (see app/db.py's module docstring for
+    why there is no ATTACH). Same per-row query, same result, one query per
+    aircraft either way — no complexity-class change.
     """
     icao = icao.upper()
 
-    rows = conn.execute(
-        "SELECT r.icao24 AS icao24, SUM(r.count) AS uses, "
-        "       (SELECT o.callsign FROM operations o "
-        "         WHERE o.icao24 = r.icao24 AND o.callsign IS NOT NULL "
-        "         ORDER BY o.timestamp DESC LIMIT 1) AS callsign, "
-        "       (SELECT reg.registrant_name FROM aircraft_registry reg "
-        "         WHERE reg.icao_hex = upper(r.icao24) LIMIT 1) AS registrant_name "
-        "FROM daily_operation_rollup r "
-        f"WHERE r.icao=? AND r.date_local BETWEEN ? AND ? "
-        f"  AND r.event_type IN ({','.join('?' * len(RUNWAY_USE_TYPES))}) "
-        "GROUP BY r.icao24",
+    rows = rw_conn.execute(
+        "SELECT icao24, SUM(count) AS uses "
+        "FROM daily_operation_rollup "
+        f"WHERE icao=? AND date_local BETWEEN ? AND ? "
+        f"  AND event_type IN ({','.join('?' * len(RUNWAY_USE_TYPES))}) "
+        "GROUP BY icao24",
         (icao, start_day, end_day, *RUNWAY_USE_TYPES),
     ).fetchall()
 
-    localities = homebase.locality_map(conn, icao)
+    localities = homebase.locality_map(rw_conn, icao)
 
     groups: dict[str, dict] = {}
     for row in rows:
-        owner = infer_owner_type(row["registrant_name"])
-        nameable = owner.owner_type in NAMEABLE_OWNER_TYPES and row["registrant_name"]
-        key = row["registrant_name"] if nameable else PRIVATE_BUCKET
+        icao24 = row["icao24"]
+        callsign = _latest_callsign(ro_conn, icao24)
+        registrant_name = _registrant_name(ro_conn, icao24)
+        owner = infer_owner_type(registrant_name)
+        nameable = owner.owner_type in NAMEABLE_OWNER_TYPES and registrant_name
+        key = registrant_name if nameable else PRIVATE_BUCKET
 
         group = groups.setdefault(key, {
             "operator": key,
@@ -305,10 +327,10 @@ def operator_ledger(
         })
         group["runway_uses"] += row["uses"]
         group["aircraft"].append({
-            "tail": resolve_display_tail(row["callsign"], None, row["icao24"]),
+            "tail": resolve_display_tail(callsign, None, icao24),
             "runway_uses": row["uses"],
         })
-        entry = localities.get(row["icao24"])
+        entry = localities.get(icao24)
         if entry:
             group["_localities"].append(entry)
 
@@ -325,7 +347,30 @@ def operator_ledger(
     return out[:limit]
 
 
-def methodology(conn: sqlite3.Connection, icao: str, settings) -> dict:
+def _latest_callsign(ro_conn: sqlite3.Connection, icao24: str) -> str | None:
+    """Reads production `operations` (read-only). The most recent non-null
+    callsign this aircraft has broadcast, or None."""
+    row = ro_conn.execute(
+        "SELECT callsign FROM operations "
+        "WHERE icao24 = ? AND callsign IS NOT NULL "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (icao24,),
+    ).fetchone()
+    return row["callsign"] if row else None
+
+
+def _registrant_name(ro_conn: sqlite3.Connection, icao24: str) -> str | None:
+    """Reads production `aircraft_registry` (read-only). ONLY registrant_name
+    — never registrant_street/city/state/zip; see the privacy note on
+    `operator_ledger` and homebase.py's own PRIVACY section for why."""
+    row = ro_conn.execute(
+        "SELECT registrant_name FROM aircraft_registry WHERE icao_hex = ? LIMIT 1",
+        (icao24.upper(),),
+    ).fetchone()
+    return row["registrant_name"] if row else None
+
+
+def methodology(ro_conn: sqlite3.Connection, icao: str, settings) -> dict:
     """The site's factual claims about its own method, served WITH the numbers.
 
     This ships from the API rather than the front end on purpose: a caveat that
@@ -335,9 +380,12 @@ def methodology(conn: sqlite3.Connection, icao: str, settings) -> dict:
     `attribution` is a plain credits block — the ADS-B sources this deployment is
     currently configured to ingest — not a license gate. Nothing here blocks the
     endpoint.
+
+    `data_since` reads production `operations` — `ro_conn` is the read-only
+    connection to that database.
     """
     icao = icao.upper()
-    data_since = conn.execute(
+    data_since = ro_conn.execute(
         "SELECT MIN(timestamp) AS t FROM operations WHERE icao=?", (icao,)
     ).fetchone()["t"]
 
@@ -364,26 +412,38 @@ def methodology(conn: sqlite3.Connection, icao: str, settings) -> dict:
 
 
 def build_ledger(
-    conn: sqlite3.Connection, icao: str, settings, now_ts: int, days: int = 30
+    ro_conn: sqlite3.Connection,
+    rw_conn: sqlite3.Connection,
+    icao: str,
+    settings,
+    now_ts: int,
+    days: int = 30,
 ) -> dict:
+    """The Lost Landing's entire response. `ro_conn` is the production
+    read-only connection (`operations`, `airports`); `rw_conn` is this
+    service's own database (`daily_operation_rollup`, `aircraft_home_base`).
+    Never the same connection in production — see app/db.py's module
+    docstring for why that split is structural, not a convention.
+    """
     icao = icao.upper()
-    tz = db.airport_timezone(conn, icao)
+    tz = db.airport_timezone(ro_conn, icao)
     start_ts = int(now_ts) - days * 86400
     start_day = db.local_day_key(start_ts + 86400, tz)  # inclusive window of `days` days
     end_day = db.local_day_key(int(now_ts), tz)
 
-    totals = rollup_totals(conn, icao, start_day, end_day)
-    localities = homebase.locality_map(conn, icao)
+    totals = rollup_totals(rw_conn, icao, start_day, end_day)
+    localities = homebase.locality_map(rw_conn, icao)
 
-    seen = conn.execute(
+    seen = rw_conn.execute(
         "SELECT DISTINCT icao24 FROM daily_operation_rollup "
         f"WHERE icao=? AND date_local BETWEEN ? AND ? "
         f"  AND event_type IN ({','.join('?' * len(RUNWAY_USE_TYPES))})",
         (icao, start_day, end_day, *RUNWAY_USE_TYPES),
     ).fetchall()
     # Unclassified aircraft are counted VISIBLY, never silently dropped and never
-    # lumped into local or non-local — see homebase.py's module docstring on why
-    # `non_local` is currently unreachable for most of this historical window.
+    # lumped into local or non-local — see homebase.py's module docstring: origin
+    # is permanently NULL, so `non_local` is structurally unreachable without a
+    # positive, named observation, and most aircraft will stay unclassified.
     counts = {homebase.LOCAL: 0, homebase.NON_LOCAL: 0, homebase.UNCLASSIFIED: 0}
     for row in seen:
         entry = localities.get(row["icao24"])
@@ -400,11 +460,11 @@ def build_ledger(
             "local_aircraft": counts[homebase.LOCAL],
             "non_local_aircraft": counts[homebase.NON_LOCAL],
             "unclassified_aircraft": counts[homebase.UNCLASSIFIED],
-            "dwell": dwell.dwell_summary(conn, icao, start_ts, int(now_ts)),
+            "dwell": dwell.dwell_summary(ro_conn, icao, start_ts, int(now_ts)),
         },
-        "daily": rollup_daily_runway_uses(conn, icao, start_day, end_day),
-        "operators": operator_ledger(conn, icao, start_day, end_day),
-        "methodology": methodology(conn, icao, settings),
+        "daily": rollup_daily_runway_uses(rw_conn, icao, start_day, end_day),
+        "operators": operator_ledger(ro_conn, rw_conn, icao, start_day, end_day),
+        "methodology": methodology(ro_conn, icao, settings),
     }
 
 

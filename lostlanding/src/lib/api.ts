@@ -1,6 +1,10 @@
 import type { LedgerResponse } from "./types";
 
-export const API_BASE = (import.meta.env.VITE_API_BASE ?? "http://localhost:8000").replace(/\/+$/, "");
+// Points at the ledger sidecar (ledger-api/), NOT the main circlejerks API.
+// The sidecar is a separate service/process/port on purpose — see
+// ledger-api/app/db.py's module docstring for why the ledger never lives on
+// the main API anymore.
+export const API_BASE = (import.meta.env.VITE_API_BASE ?? "http://localhost:8100").replace(/\/+$/, "");
 
 export class LedgerFetchError extends Error {
   constructor(message: string, public status?: number) {

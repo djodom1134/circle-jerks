@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from . import db, homebase, ledger
+from . import db
 from .db import db_session
 from .geo import bbox_union
 from .live_sources import LiveSourceRateLimited, LiveSourceUnavailable, LiveStateClient, bbox_distance_nm
@@ -165,79 +165,6 @@ async def _detect_tick(store, settings) -> None:
                 )
 
 
-# The rollup only needs the recent past kept warm — a detector pass can only add
-# events to the last few hours — but locality is judged over a long window.
-LEDGER_ROLLUP_WINDOW_DAYS = 3
-LEDGER_INTERVAL_SECONDS = 6 * 3600
-
-
-def ledger_tick(settings, now_ts: int) -> dict:
-    """Refresh the ledger's derived tables for every airport we have events for.
-
-    Rollup: rebuild only the last few local days. A detector pass can only add
-    events near the present, and a full rebuild over unbounded history on every
-    tick would be pointless work. (One-shot backfill over ALL history lives in
-    scripts/backfill_ledger.py, not here.)
-
-    Locality: recomputed in full, because it is judged over a 180-day window and
-    one new overnight stay can legitimately flip an aircraft from non-local to
-    local. Getting that wrong on a named business is exactly the failure this
-    project cannot afford.
-
-    Both `daily_operation_rollup` and `aircraft_home_base` are derived caches
-    rebuilt from `operations` — rebuilding them is always safe. `operations`
-    itself is never read here except via those two rebuild functions.
-    """
-    rollup_rows = 0
-    homebase_rows = 0
-    start_ts = int(now_ts) - LEDGER_ROLLUP_WINDOW_DAYS * 86400
-
-    with db_session(settings.database_path) as conn:
-        airports = [
-            row["icao"]
-            for row in conn.execute(
-                "SELECT DISTINCT icao FROM operations WHERE icao IS NOT NULL"
-            ).fetchall()
-        ]
-        for icao in airports:
-            rollup_rows += ledger.rebuild_rollup(conn, icao, start_ts, int(now_ts))
-            homebase_rows += homebase.recompute_airport(conn, icao, now_ts=int(now_ts))
-            # Never carry a write transaction into the next airport's rebuild:
-            # commit promptly so the write lock is only held for the writes
-            # themselves, matching _detect_tick's per-monitor commit above.
-            conn.commit()
-
-    return {"rollup_rows": rollup_rows, "homebase_rows": homebase_rows}
-
-
-async def _ledger_loop(store, settings) -> None:
-    """Nightly-cadence loop: rebuild the ledger's derived caches. Runs the
-    synchronous SQLite work in a thread — see `_ingest_tick`'s docstring and
-    services.py's `run_detectors_for_monitor` comment on why CPU-bound work
-    over a long history must never run inline on the event loop: it starves
-    the Redis client's socket reads and 500s unrelated requests mid-pass.
-
-    Like every other loop here, a raising tick is logged and reported via the
-    heartbeat, never allowed to end the loop — a nightly rebuild dying would
-    silently stop refreshing the ledger forever.
-    """
-    while True:
-        started = time.monotonic()
-        try:
-            result = await asyncio.to_thread(ledger_tick, settings, int(time.time()))
-            await _record_heartbeat(store, settings, "ledger", ok=True, started=started)
-            logger.info(
-                "ledger tick rollup_rows=%s homebase_rows=%s",
-                result["rollup_rows"], result["homebase_rows"],
-            )
-        except Exception as exc:
-            await _record_heartbeat(
-                store, settings, "ledger", ok=False, started=started, error=repr(exc)[:200]
-            )
-            logger.exception("ledger tick failed")
-        await asyncio.sleep(LEDGER_INTERVAL_SECONDS)
-
-
 async def _record_heartbeat(
     store, settings, name: str, *, ok: bool, started: float,
     error: str | None = None, min_ttl_seconds: int = 0,
@@ -329,15 +256,12 @@ async def run_forever() -> None:
     # takes).
     ingest_task = asyncio.create_task(_ingest_loop(store, settings, live_sources))
     detect_task = asyncio.create_task(_detect_loop(store, settings))
-    # Ledger recompute is its own concurrent task on a nightly cadence, same
-    # reasoning as ingest vs. detect above: it must never block either of them.
-    ledger_task = asyncio.create_task(_ledger_loop(store, settings))
     try:
-        await asyncio.gather(ingest_task, detect_task, ledger_task)
+        await asyncio.gather(ingest_task, detect_task)
     finally:
-        for task in (archive_task, ingest_task, detect_task, ledger_task):
+        for task in (archive_task, ingest_task, detect_task):
             task.cancel()
-        for task in (archive_task, ingest_task, detect_task, ledger_task):
+        for task in (archive_task, ingest_task, detect_task):
             try:
                 await task
             except (asyncio.CancelledError, Exception):

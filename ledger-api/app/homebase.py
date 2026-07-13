@@ -29,10 +29,14 @@ Everything this module can see is a FLOOR, not a measurement:
     (dwell.py:54-55), and `dwell_summary` publishes `coverage` precisely because
     landing->takeoff pairing is known to be lossy (dwell.py:51-53).
   * ADS-B has gaps, and not every aircraft is equipped.
-  * `operations.origin_airport_icao` is forward-fill only: it is written from a
-    locally-observed ground track on arrivals from Task 4a forward, and can never
-    be recovered for an operation already in the database. For the ledger's first
-    180-day window, origin is NULL for essentially every row.
+  * `operations.origin_airport_icao` is PERMANENTLY NULL. The writer that once
+    populated it lived on the main circlejerks API's detector loop and has been
+    removed from that codebase entirely — this service is a read-only customer
+    of that database and will never write to it, and no other process writes
+    this column either. This is not a temporary gap that backfills over time:
+    non-locality is not establishable from the data available to this service,
+    now or ever, absent a new, separate origin-observation pipeline that does
+    not exist. Everything below is written accordingly.
 
 So the ONLY honest reading of a zero is "we did not observe one", never "there
 was not one". THEREFORE:
@@ -42,8 +46,12 @@ was not one". THEREFORE:
   DID see. A NON_LOCAL verdict — the only classification here that can hurt a
   real, named party — additionally requires a POSITIVE, NAMED observation of
   non-locality (arrivals we watched come in from a specific other airport). With
-  no origin data at all, `non_local` is unreachable, arithmetically and
-  structurally. It becomes reachable only as real origin coverage accrues.
+  origin permanently NULL, `non_local` is unreachable, arithmetically and
+  structurally, by construction — not "for now", but for as long as this
+  service has no origin signal at all. The tests pinning this
+  (`test_all_null_origins_can_never_produce_a_non_local` and neighbors) are
+  therefore the permanent contract this module holds itself to, not a
+  snapshot of a transitional state.
 
 ERROR DIRECTION, STATED PLAINLY. This model is deliberately asymmetric. Where it
 cannot tell "the aircraft is parked here" from "we missed its departure", it
@@ -93,11 +101,13 @@ MAX_SIGNAL_STRENGTH = 0.95
 OVERNIGHT_SECONDS = 8 * 3600
 
 # Operation types that are an ARRIVAL at this airport, i.e. the types for which
-# an origin airport is a meaningful, honest signal. A takeoff's origin is
-# trivially this airport, so counting takeoffs would poison the "N of M arrivals
-# came from X" evidence with garbage. This mirrors
-# `services.ORIGIN_ELIGIBLE_OP_TYPES` — the set of types the origin WRITER will
-# ever populate — and a drift guard in the tests fails if the two diverge.
+# an origin airport WOULD be a meaningful, honest signal if this service ever
+# had one. A takeoff's origin is trivially this airport, so counting takeoffs
+# would poison the "N of M arrivals came from X" evidence with garbage. There
+# is no origin writer anymore (origin is permanently NULL — see the module
+# docstring), so this set has no counterpart left to drift from; it is kept
+# because `_build_context`'s arrival query still needs to know which op types
+# count as an "arrival" for the denominators it reports.
 ARRIVAL_TYPES = ("landing", "touch_and_go", "low_approach")
 
 # An arrival that ends in the same operation: the aircraft touched the runway (or
@@ -112,12 +122,15 @@ _SELF_CLOSING_ARRIVAL_TYPES = ("touch_and_go", "low_approach")
 # ---------------------------------------------------------------------------
 # GATES. Each one exists to stop a weight firing on something we did not observe.
 #
-# EVERY GATE COUNTS DISTINCT LOCAL DAYS, NOT ROWS. The origin writer memoizes per
-# aircraft per detector pass and resolves the origin from the earliest ground
-# sample of the track (services.py:1659, 1725), so every arrival in ONE session
-# carries the SAME origin from ONE resolution. Counting rows, a single 40-minute
-# pattern session (12 circuits) reads as 12 closed visits and 12 known origins —
-# it inflates both gates 10-40x and published `non_local` off one afternoon. A day
+# EVERY GATE COUNTS DISTINCT LOCAL DAYS, NOT ROWS. This dates from when the main
+# circlejerks API ran an origin writer that memoized per aircraft per detector
+# pass (resolving from the earliest ground sample of the track), so every
+# arrival in ONE session carried the SAME origin from ONE resolution. That
+# writer has since been removed from the main API entirely — origin is now
+# permanently NULL (see the module docstring) — but the reasoning is kept as
+# the permanent design of this gate, not dead history: counting rows, a single
+# 40-minute pattern session (12 circuits) reads as 12 closed visits, inflating
+# the gate 10-40x and publishing `non_local` off one afternoon. A day
 # is the coarsest bucket we can defend as "another look at the same question", and
 # it is the bucket the rest of the ledger already speaks in. Local days, via
 # db.local_day_key + db.airport_timezone — never UTC: a 19:00 MDT circuit is
@@ -309,7 +322,7 @@ def _closure_phrase(circuits: int, paired: int, landings: int) -> str:
 
 
 def _build_context(
-    conn: sqlite3.Connection,
+    ro_conn: sqlite3.Connection,
     icao: str,
     start_ts: int,
     now_ts: int,
@@ -337,7 +350,7 @@ def _build_context(
     # The airport's OWN timezone. Every gate below buckets by local day, and a UTC
     # day would split a Colorado evening across two buckets — inflating exactly the
     # counts these gates exist to hold down.
-    tz = db.airport_timezone(conn, icao)
+    tz = db.airport_timezone(ro_conn, icao)
     day_of: dict[int, str] = {}
 
     def local_day(ts: int) -> str:
@@ -350,7 +363,7 @@ def _build_context(
         return cached
 
     dwell_by_ac: dict[str, list[dict]] = {}
-    for interval in dwell.dwell_intervals(conn, icao, start_ts, now_ts):
+    for interval in dwell.dwell_intervals(ro_conn, icao, start_ts, now_ts):
         if icao24 is None or interval["icao24"] == icao24:
             dwell_by_ac.setdefault(interval["icao24"], []).append(interval)
 
@@ -359,7 +372,7 @@ def _build_context(
     circuit_days: dict[str, set[str]] = {}
     origins: dict[str, list[str]] = {}
     origin_days: dict[str, set[tuple[str, str]]] = {}
-    for row in conn.execute(
+    for row in ro_conn.execute(
         f"SELECT icao24, type, timestamp AS ts, origin_airport_icao AS origin "
         f"FROM operations "
         f"WHERE icao=? AND timestamp BETWEEN ? AND ? AND icao24 IS NOT NULL"
@@ -394,7 +407,7 @@ def _build_context(
     # existing full-airport scan rather than adding another one.
     last_op: dict[str, sqlite3.Row] = {}
     takeoffs: dict[str, int] = {}
-    for row in conn.execute(
+    for row in ro_conn.execute(
         f"SELECT icao24, type, timestamp AS ts FROM operations "
         f"WHERE icao=? AND timestamp BETWEEN ? AND ? AND icao24 IS NOT NULL{ac_filter} "
         f"ORDER BY icao24 ASC, timestamp DESC, id DESC",
@@ -426,10 +439,10 @@ def _build_context(
         )
         reg_args = (icao, start_ts, now_ts)
     registry: dict[str, sqlite3.Row] = {}
-    for row in conn.execute(reg_sql, reg_args).fetchall():
+    for row in ro_conn.execute(reg_sql, reg_args).fetchall():
         registry.setdefault(row["icao_hex"], row)
 
-    airport = conn.execute(
+    airport = ro_conn.execute(
         "SELECT city FROM airports WHERE icao=?", (icao,)
     ).fetchone()
 
@@ -449,7 +462,7 @@ def _build_context(
 
 
 def classify(
-    conn: sqlite3.Connection,
+    ro_conn: sqlite3.Connection,
     icao: str,
     icao24: str,
     now_ts: int,
@@ -476,7 +489,7 @@ def classify(
     non_local_vetoes: list[str] = []
 
     if context is None:
-        context = _build_context(conn, icao, start_ts, now_ts, icao24=icao24)
+        context = _build_context(ro_conn, icao, start_ts, now_ts, icao24=icao24)
     intervals = context["dwell"].get(icao24, [])
 
     # ---- Observation coverage: what did we actually WATCH? -------------------
@@ -631,10 +644,10 @@ def classify(
     # observation of non-locality available to us: we watched it fly in from a
     # named other airport, repeatedly.
     #
-    # `origin_airport_icao` is forward-fill only and is written on arrivals alone
-    # (services.ORIGIN_ELIGIBLE_OP_TYPES). A NULL origin is NO INFORMATION and is
-    # excluded from the numerator AND named in the denominator, so the receipt
-    # never implies we knew more than we did.
+    # `origin_airport_icao` is permanently NULL (see the module docstring). A
+    # NULL origin is NO INFORMATION and is excluded from the numerator AND
+    # named in the denominator, so the receipt never implies we knew more than
+    # we did.
     #
     # Counted in DISTINCT LOCAL DAYS, not rows: the writer memoises per aircraft per
     # detector pass, so one session's twelve arrivals carry one origin from ONE
@@ -826,12 +839,20 @@ def classify(
 
 
 def recompute_airport(
-    conn: sqlite3.Connection,
+    ro_conn: sqlite3.Connection,
+    rw_conn: sqlite3.Connection,
     icao: str,
     now_ts: int,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
 ) -> int:
-    """Recompute and persist locality for every aircraft seen at `icao` in the window."""
+    """Recompute and persist locality for every aircraft seen at `icao` in the window.
+
+    `ro_conn` is the production READ-ONLY connection — every fact this reads
+    (`operations`, and everything `_build_context`/`classify` touch) comes from
+    there. `rw_conn` is this service's OWN database — the only connection the
+    INSERT below is ever issued against. The two are never the same object in
+    production; see app/db.py's module docstring.
+    """
     icao = icao.upper()
     now_ts = int(now_ts)
     start_ts = now_ts - lookback_days * 86400
@@ -843,17 +864,17 @@ def recompute_airport(
     # had a single in-window observation of.
     aircraft = [
         row["icao24"]
-        for row in conn.execute(
+        for row in ro_conn.execute(
             "SELECT DISTINCT icao24 FROM operations "
             "WHERE icao=? AND timestamp BETWEEN ? AND ? AND icao24 IS NOT NULL",
             (icao, start_ts, now_ts),
         ).fetchall()
     ]
     # Gather the airport's facts ONCE, not once per aircraft.
-    context = _build_context(conn, icao, start_ts, now_ts)
+    context = _build_context(ro_conn, icao, start_ts, now_ts)
     for icao24 in aircraft:
-        result = classify(conn, icao, icao24, now_ts, lookback_days, context=context)
-        conn.execute(
+        result = classify(ro_conn, icao, icao24, now_ts, lookback_days, context=context)
+        rw_conn.execute(
             "INSERT INTO aircraft_home_base "
             "  (icao, icao24, locality, signal_strength, based_icao, evidence_json, computed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?) "
@@ -869,9 +890,15 @@ def recompute_airport(
     return len(aircraft)
 
 
-def locality_map(conn: sqlite3.Connection, icao: str) -> dict[str, dict]:
-    """icao24 -> {locality, signal_strength, based_icao, evidence} for one airport."""
-    rows = conn.execute(
+def locality_map(rw_conn: sqlite3.Connection, icao: str) -> dict[str, dict]:
+    """icao24 -> {locality, signal_strength, based_icao, evidence} for one airport.
+
+    Reads ONLY this service's own `aircraft_home_base` table — `rw_conn` is
+    this service's own database connection (read-write, though this call only
+    reads). Never the production read-only connection: `aircraft_home_base`
+    does not exist there.
+    """
+    rows = rw_conn.execute(
         "SELECT icao24, locality, signal_strength, based_icao, evidence_json "
         "FROM aircraft_home_base WHERE icao=?",
         (icao.upper(),),

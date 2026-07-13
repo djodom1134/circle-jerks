@@ -8,6 +8,10 @@ We never impute. A landing with no matching takeoff in the window has no known
 dwell and is excluded from the sample — but the exclusion is REPORTED, as
 `coverage`, so a reader can see how much of the activity the median actually
 speaks for.
+
+Every function here only ever reads `operations` — `conn` must be the
+production READ-ONLY connection (see app/db.py). Nothing in this module
+writes anything, ever.
 """
 from __future__ import annotations
 
