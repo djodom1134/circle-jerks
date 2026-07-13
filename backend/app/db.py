@@ -362,6 +362,22 @@ CREATE TABLE IF NOT EXISTS daily_operation_rollup (
   PRIMARY KEY (icao, date_local, event_type, icao24)
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_icao_date ON daily_operation_rollup(icao, date_local);
+
+-- Local vs non-local, recomputed nightly. `evidence_json` is a list of
+-- {code, text} facts that the UI renders INLINE next to the classification —
+-- the site never asserts a locality without showing why, because an unexplained
+-- "non-local" next to a named business is a correction waiting to happen.
+CREATE TABLE IF NOT EXISTS aircraft_home_base (
+  icao TEXT NOT NULL,              -- the airport this judgement is ABOUT
+  icao24 TEXT NOT NULL,
+  locality TEXT NOT NULL,          -- local | non_local | unclassified
+  confidence REAL NOT NULL,
+  based_icao TEXT,                 -- best guess at where it IS based, when known
+  evidence_json TEXT NOT NULL,
+  computed_at INTEGER NOT NULL,
+  PRIMARY KEY (icao, icao24)
+);
+CREATE INDEX IF NOT EXISTS idx_home_base_icao ON aircraft_home_base(icao, locality);
 """
 
 
