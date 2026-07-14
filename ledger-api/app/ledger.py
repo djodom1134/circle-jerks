@@ -13,6 +13,7 @@ runway N times" is true exactly as detected, and is the larger number besides.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -267,6 +268,28 @@ NAMEABLE_OWNER_TYPES: frozenset[str] = frozenset({
 PRIVATE_BUCKET = "Private / unaffiliated"
 
 
+def _normalize_operator_key(name: str) -> str:
+    """Fold FAA-registry spelling variants of the SAME registrant into one
+    grouping key. This is deliberately conservative: it merges cosmetic
+    spelling differences, never two genuinely different companies.
+
+    Handles: case, the "&" vs "AND" spelling of a company's own name, stray
+    punctuation (periods, commas), and repeated/leading/trailing whitespace.
+
+    Does NOT touch legal-entity suffixes (INC / LLC / LP / CORP / TRUST /
+    CO / ...) — "FOO INC" and "FOO LLC" may be different legal entities, so
+    they must produce different keys and never merge. If this function ever
+    starts stripping suffixes, "FOO INC" and "FOO LLC" collapse into one row
+    and the site publishes a false claim about one of two real companies —
+    better to leave real duplicates unmerged than risk that.
+    """
+    key = name.upper()
+    key = re.sub(r"[.,]", "", key)  # drop punctuation that carries no meaning here
+    key = re.sub(r"\s*&\s*", " AND ", key)  # canonicalize the ampersand spelling
+    key = re.sub(r"\s+", " ", key).strip()  # collapse whitespace
+    return key
+
+
 def operator_ledger(
     ro_conn: sqlite3.Connection,
     rw_conn: sqlite3.Connection,
@@ -316,7 +339,7 @@ def operator_ledger(
         registrant_name = _registrant_name(ro_conn, icao24)
         owner = infer_owner_type(registrant_name)
         nameable = owner.owner_type in NAMEABLE_OWNER_TYPES and registrant_name
-        key = registrant_name if nameable else PRIVATE_BUCKET
+        key = _normalize_operator_key(registrant_name) if nameable else PRIVATE_BUCKET
 
         group = groups.setdefault(key, {
             "operator": key,
@@ -324,12 +347,19 @@ def operator_ledger(
             "runway_uses": 0,
             "aircraft": [],
             "_localities": [],
+            # Raw registrant-name spelling -> summed runway uses, ONLY for
+            # nameable groups. Used below to pick a stable display name from
+            # among the spelling variants that merged under this key.
+            "_display_variants": {},
         })
         group["runway_uses"] += row["uses"]
         group["aircraft"].append({
             "tail": resolve_display_tail(callsign, None, icao24),
             "runway_uses": row["uses"],
         })
+        if nameable:
+            variants = group["_display_variants"]
+            variants[registrant_name] = variants.get(registrant_name, 0) + row["uses"]
         entry = localities.get(icao24)
         if entry:
             group["_localities"].append(entry)
@@ -337,6 +367,12 @@ def operator_ledger(
     out = []
     for group in groups.values():
         locality, evidence = _dominant_locality(group.pop("_localities"))
+        variants = group.pop("_display_variants")
+        if variants:
+            # Canonical display name: the spelling variant with the most
+            # runway uses. Ties broken lexicographically so the choice is
+            # stable across runs rather than depending on dict/row order.
+            group["operator"] = sorted(variants.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
         group["aircraft_count"] = len(group["aircraft"])
         group["aircraft"].sort(key=lambda a: a["runway_uses"], reverse=True)
         group["locality"] = locality

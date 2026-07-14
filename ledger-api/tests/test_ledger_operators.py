@@ -125,6 +125,104 @@ def test_takeoffs_are_not_counted_as_runway_uses(tmp_path):
     assert rows[0]["runway_uses"] == 1
 
 
+def test_registrant_spelling_variants_merge_into_one_operator(tmp_path):
+    # The real bug: the FAA registry spells the same registrant three
+    # different ways ("G & M AIRCRAFT INC" / "G&M AIRCRAFT INC" /
+    # "G AND M AIRCRAFT INC"). Before the fix these published as three
+    # separate operators on a live, press-facing page and understated the
+    # actual top operator by roughly half. All three must merge into ONE
+    # operator with the SUMMED runway uses and the UNION of aircraft.
+    setup, ro, rw = build_dbs(tmp_path)
+    _register(setup, "N100AA", "aa0001", "G & M AIRCRAFT INC")
+    _register(setup, "N100AB", "aa0002", "G & M AIRCRAFT INC")
+    _register(setup, "N200BA", "bb0001", "G&M AIRCRAFT INC")
+    _register(setup, "N200BB", "bb0002", "G&M AIRCRAFT INC")
+    _register(setup, "N300CA", "cc0001", "G AND M AIRCRAFT INC")
+
+    for i in range(5):
+        _op(setup, f"a1{i}", "touch_and_go", BASE + i * 60, "aa0001", callsign="N100AA")
+    for i in range(4):
+        _op(setup, f"a2{i}", "touch_and_go", BASE + i * 60 + 1000, "aa0002", callsign="N100AB")
+    for i in range(3):
+        _op(setup, f"b1{i}", "touch_and_go", BASE + i * 60 + 2000, "bb0001", callsign="N200BA")
+    for i in range(3):
+        _op(setup, f"b2{i}", "touch_and_go", BASE + i * 60 + 3000, "bb0002", callsign="N200BB")
+    _op(setup, "c1", "touch_and_go", BASE + 4000, "cc0001", callsign="N300CA")
+
+    ledger.rebuild_rollup(ro, rw, "KLMO", BASE - DAY, BASE + DAY)
+    rw.commit()
+
+    rows = ledger.operator_ledger(ro, rw, "KLMO", "2026-06-01", "2026-06-01")
+    assert len(rows) == 1
+    row = rows[0]
+    # Canonical display name is the variant with the most runway uses:
+    # "G & M AIRCRAFT INC" (5 + 4 = 9) beats "G&M AIRCRAFT INC" (3 + 3 = 6)
+    # beats "G AND M AIRCRAFT INC" (1).
+    assert row["operator"] == "G & M AIRCRAFT INC"
+    assert row["runway_uses"] == 5 + 4 + 3 + 3 + 1
+    assert row["aircraft_count"] == 5
+    assert sorted(a["tail"] for a in row["aircraft"]) == [
+        "N100AA", "N100AB", "N200BA", "N200BB", "N300CA",
+    ]
+
+
+def test_case_and_whitespace_variants_merge(tmp_path):
+    setup, ro, rw = build_dbs(tmp_path)
+    _register(setup, "N400AA", "dd0001", "foo  aviation   inc")
+    _register(setup, "N400AB", "dd0002", "FOO AVIATION INC")
+    _op(setup, "d1", "landing", BASE, "dd0001", callsign="N400AA")
+    _op(setup, "d2", "landing", BASE + 60, "dd0002", callsign="N400AB")
+    ledger.rebuild_rollup(ro, rw, "KLMO", BASE - DAY, BASE + DAY)
+    rw.commit()
+
+    rows = ledger.operator_ledger(ro, rw, "KLMO", "2026-06-01", "2026-06-01")
+    assert len(rows) == 1
+    assert rows[0]["runway_uses"] == 2
+    assert rows[0]["aircraft_count"] == 2
+
+
+def test_inc_and_llc_are_different_legal_entities_and_do_not_merge(tmp_path):
+    # "FOO AVIATION INC" and "FOO AVIATION LLC" may be different legal
+    # entities -- normalization must never touch legal suffixes. (LLC is
+    # also never nameable per NAMEABLE_OWNER_TYPES, so this simultaneously
+    # exercises the privacy bucket boundary: the LLC's uses must land in
+    # PRIVATE_BUCKET, not get merged into the INC's named row.)
+    setup, ro, rw = build_dbs(tmp_path)
+    _register(setup, "N500AA", "ee0001", "FOO AVIATION INC")
+    _register(setup, "N500AB", "ee0002", "FOO AVIATION LLC")
+    _op(setup, "e1", "landing", BASE, "ee0001", callsign="N500AA")
+    for i in range(3):
+        _op(setup, f"e2{i}", "landing", BASE + i * 60 + 500, "ee0002", callsign="N500AB")
+    ledger.rebuild_rollup(ro, rw, "KLMO", BASE - DAY, BASE + DAY)
+    rw.commit()
+
+    rows = ledger.operator_ledger(ro, rw, "KLMO", "2026-06-01", "2026-06-01")
+    assert len(rows) == 2
+    named = [r for r in rows if r["operator"] == "FOO AVIATION INC"]
+    assert len(named) == 1
+    assert named[0]["runway_uses"] == 1
+    private = [r for r in rows if r["operator"] == ledger.PRIVATE_BUCKET]
+    assert len(private) == 1
+    assert private[0]["runway_uses"] == 3
+
+
+def test_different_corporate_suffixes_do_not_merge(tmp_path):
+    # "INC" and "CORP" both classify as owner_type "corporation" (both are
+    # nameable), but they are literally different suffixes. Normalization
+    # must never strip or fold legal suffixes -- these must stay separate.
+    setup, ro, rw = build_dbs(tmp_path)
+    _register(setup, "N600AA", "ff0001", "FOO AVIATION INC")
+    _register(setup, "N600AB", "ff0002", "FOO AVIATION CORP")
+    _op(setup, "f1", "landing", BASE, "ff0001", callsign="N600AA")
+    _op(setup, "f2", "landing", BASE + 60, "ff0002", callsign="N600AB")
+    ledger.rebuild_rollup(ro, rw, "KLMO", BASE - DAY, BASE + DAY)
+    rw.commit()
+
+    rows = ledger.operator_ledger(ro, rw, "KLMO", "2026-06-01", "2026-06-01")
+    assert len(rows) == 2
+    assert sorted(r["operator"] for r in rows) == ["FOO AVIATION CORP", "FOO AVIATION INC"]
+
+
 def test_unclassified_aircraft_are_counted_visibly_not_dropped(tmp_path):
     # homebase.recompute_airport is never called here, so aircraft_home_base has
     # no row at all for this aircraft yet. That must not make the operator
