@@ -105,9 +105,10 @@ services:
     restart: unless-stopped
     environment:
       LEDGER_ENVIRONMENT: ${CIRCLEJERK_ENVIRONMENT:-production}
-      # Defense in depth on top of the read-only bind mount below: this URI
-      # form makes SQLite itself refuse any write, before it ever reaches
-      # application code (see db.open_production_readonly).
+      # Opened via a `file:...?mode=ro` URI (see db.open_production_readonly),
+      # so SQLite itself refuses any write to this file before it ever reaches
+      # application code. This is THE protection — see the volume note below for
+      # why a Docker-level :ro mount cannot be used on a live WAL database.
       LEDGER_PRODUCTION_DATABASE_PATH: /prod-data/circlejerk.sqlite3
       # This service's OWN database — daily_operation_rollup and
       # aircraft_home_base live here, nowhere near the production file.
@@ -118,10 +119,18 @@ services:
       LEDGER_ADSBX_RAPIDAPI_KEY: ${ADSBX_RAPIDAPI_KEY:-}
       LEDGER_SELF_HOSTED_FEEDER_BASE_URL: ${SELF_HOSTED_FEEDER_BASE_URL:-}
     volumes:
-      # Production DB, read-only at the Docker level too — belt and suspenders
-      # on top of the mode=ro URI above. This container cannot write here even
-      # if the code tried.
-      - /srv/circlejerk/data:/prod-data:ro
+      # Production DB. NOT :ro at the Docker layer — SQLite cannot open a WAL
+      # database read-only unless it can map the -shm shared-memory index
+      # read-write, and prod is in WAL mode. -shm is transient reader
+      # coordination, not database content; every SQLite reader maps it, the
+      # running api/worker containers included.
+      #
+      # The real protection is one layer down: db.open_production_readonly()
+      # opens `file:...?mode=ro`, so SQLite ITSELF rejects every INSERT/UPDATE/
+      # DELETE/CREATE against this file (10 tests in test_db_boundary.py prove
+      # it). Readers never take the write lock, so this cannot contend with
+      # production's single writer either.
+      - /srv/circlejerk/data:/prod-data
       # This sidecar's OWN writable database. Separate volume, separate file,
       # never the production one.
       - /srv/circlejerk/ledger-data:/data
@@ -155,7 +164,9 @@ services:
       LEDGER_ADSBX_RAPIDAPI_KEY: ${ADSBX_RAPIDAPI_KEY:-}
       LEDGER_SELF_HOSTED_FEEDER_BASE_URL: ${SELF_HOSTED_FEEDER_BASE_URL:-}
     volumes:
-      - /srv/circlejerk/data:/prod-data:ro
+      # See ledger-api above: WAL requires a writable -shm; mode=ro in SQLite
+      # is what actually forbids writing to the production database.
+      - /srv/circlejerk/data:/prod-data
       - /srv/circlejerk/ledger-data:/data
     depends_on:
       - ledger-api
