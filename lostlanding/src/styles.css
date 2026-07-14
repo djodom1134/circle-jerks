@@ -233,7 +233,7 @@ input:focus-visible,
 .hero-image {
   position: absolute;
   inset: 0;
-  background: url("./assets/airport-future.jpg") center 45% / cover no-repeat;
+  background: url("./assets/airport-deco.jpg") center 45% / cover no-repeat;
   filter: saturate(0.9) contrast(1.08);
 }
 

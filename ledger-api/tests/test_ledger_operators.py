@@ -242,3 +242,30 @@ def test_unclassified_aircraft_are_counted_visibly_not_dropped(tmp_path):
     assert rows[0]["runway_uses"] == 3
     assert rows[0]["locality"] == homebase.UNCLASSIFIED
     assert rows[0]["locality_evidence"] == []
+
+
+def test_a_mostly_unclassified_fleet_is_not_badged_from_a_handful():
+    """The 'Private / unaffiliated' bucket held 354 aircraft, of which ~20 were
+    classified local — and it published a confident LOCAL badge across all 354.
+
+    A label has to describe the group it is attached to. If we could not classify
+    most of the fleet, we do not get to label the fleet.
+    """
+    from app.ledger import _dominant_locality
+    from app import homebase
+
+    mostly_unknown = (
+        [{"locality": homebase.LOCAL, "signal_strength": 0.9, "evidence": [{"code": "x", "text": "t"}]}] * 20
+        + [{"locality": homebase.UNCLASSIFIED, "signal_strength": 0.1, "evidence": []}] * 334
+    )
+    locality, _ = _dominant_locality(mostly_unknown)
+    assert locality == homebase.UNCLASSIFIED
+
+    # But a real operator whose fleet we DID classify still gets its badge.
+    small_known_fleet = [
+        {"locality": homebase.LOCAL, "signal_strength": 0.9, "evidence": [{"code": "x", "text": "t"}]},
+        {"locality": homebase.LOCAL, "signal_strength": 0.8, "evidence": [{"code": "y", "text": "u"}]},
+        {"locality": homebase.UNCLASSIFIED, "signal_strength": 0.1, "evidence": []},
+    ]
+    locality, _ = _dominant_locality(small_known_fleet)
+    assert locality == homebase.LOCAL

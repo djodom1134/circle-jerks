@@ -505,11 +505,21 @@ def build_ledger(
 
 
 def _dominant_locality(entries: list[dict]) -> tuple[str, list[dict]]:
-    """An operator's locality is its aircraft's, but only when they AGREE.
+    """An operator's locality is its aircraft's, but only when they AGREE and we
+    actually classified most of them.
 
-    A fleet split between local and non-local aircraft gets `unclassified`, not a
-    majority vote — because the operator ledger names businesses, and a split fleet
-    is precisely the case where a confident badge would be wrong.
+    Three ways to end up `unclassified`, and each one exists because a confident
+    badge would otherwise be a claim we cannot support:
+
+    1. Nothing classified at all.
+    2. A fleet split between local and non-local — a majority vote here would
+       badge a business on the strength of the aircraft that happened to win.
+    3. **Most of the fleet unclassified.** Without this, a group of 354 aircraft
+       of which we could classify 20 gets a confident badge from those 20. That
+       is exactly what the "Private / unaffiliated" bucket is, and it published
+       LOCAL across 354 aircraft on the strength of a handful. A label has to
+       describe the group it is attached to, so we require that we classified
+       more than half of it.
     """
     if not entries:
         return homebase.UNCLASSIFIED, []
@@ -517,6 +527,10 @@ def _dominant_locality(entries: list[dict]) -> tuple[str, list[dict]]:
     decided = [e for e in entries if e["locality"] != homebase.UNCLASSIFIED]
     if not decided:
         return homebase.UNCLASSIFIED, entries[0]["evidence"]
+
+    # We must have classified MORE than half the fleet to label the fleet.
+    if len(decided) * 2 <= len(entries):
+        return homebase.UNCLASSIFIED, []
 
     localities = {e["locality"] for e in decided}
     if len(localities) > 1:
