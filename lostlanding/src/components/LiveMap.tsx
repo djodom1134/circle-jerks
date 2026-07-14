@@ -275,9 +275,10 @@ export function LiveMap() {
         <p className="kicker">Live, Right Now</p>
         <h2 id="live-map-heading">Every plane on this map is really there</h2>
         <p>
-          Positions refresh roughly every 10 seconds from live ADS-B tracking within {RING_NM} nm of the field. Price
-          tags multiply each aircraft's OBSERVED runway uses by the fee you set below — aircraft we have never
-          detected using the runway show no tag at all, not a $0 tag.
+          Positions refresh roughly every 10 seconds from live ADS-B tracking of the airspace around the field — which
+          is why you will also see traffic passing high overhead, bound for somewhere else entirely. Price tags multiply
+          each aircraft's OBSERVED runway uses at KLMO by the fee you set below. An aircraft we have never detected
+          using this runway carries no tag at all — not a $0 tag. Most of the airliners up there will never have one.
         </p>
       </div>
 
