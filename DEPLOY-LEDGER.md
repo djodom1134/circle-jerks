@@ -267,3 +267,43 @@ how the ledger sidecar deploy goes.
   that service, it's a third new container, not part of the "two services"
   this doc covers, and the manual-backfill step above becomes redundant
   (but still safe to run).
+
+---
+
+## Gotcha: the Caddyfile is a single-FILE bind mount
+
+`docker-compose.prod.yml` mounts `./Caddyfile:/etc/caddy/Caddyfile:ro`. A single-file
+bind mount binds the **inode**, not the path.
+
+`rsync` writes a temp file and renames it into place, which creates a **new inode**. The
+running caddy container keeps holding the OLD one. So after rsyncing a changed Caddyfile:
+
+- the host file is new,
+- the container still sees the old file,
+- and `caddy reload` "succeeds" — it reloads the *stale* file and reports success.
+
+This is silent. It cost a debugging cycle on the live-map deploy: `/live/*` 200'd with
+`text/html` (the SPA catch-all) because caddy had never seen the route.
+
+**Either** rsync the Caddyfile with `--inplace` (preserves the inode, so `caddy reload`
+works and there is zero downtime):
+
+```bash
+rsync -az --inplace -e "ssh $SSH_OPTS" ./Caddyfile root@$DROPLET:/srv/circlejerk/app/Caddyfile
+ssh $SSH_OPTS root@$DROPLET 'cd /srv/circlejerk/app && \
+  docker compose -f docker-compose.prod.yml exec -T caddy caddy reload --config /etc/caddy/Caddyfile'
+```
+
+**or** recreate the container (re-binds the new inode, ~1s blip on circlejerks.live):
+
+```bash
+ssh $SSH_OPTS root@$DROPLET 'cd /srv/circlejerk/app && \
+  docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate caddy'
+```
+
+Prefer `--inplace`. Verify either way — do not trust the reload's exit code:
+
+```bash
+ssh $SSH_OPTS root@$DROPLET 'docker exec app-caddy-1 grep -c "handle_path /live" /etc/caddy/Caddyfile'
+# 0 = the container is still on the old file.
+```
