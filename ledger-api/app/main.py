@@ -14,7 +14,7 @@ logging.basicConfig(
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import db, ledger
+from . import db, fees, ledger
 from .settings import Settings, get_settings
 
 logger = logging.getLogger("ledger_api")
@@ -78,3 +78,25 @@ async def get_airport_ledger(
         if db.get_airport(ro_conn, icao) is None:
             raise HTTPException(status_code=404, detail="airport not found")
         return ledger.build_ledger(ro_conn, rw_conn, icao, settings, now_ts=now, days=days)
+
+
+@app.get("/airports/{icao}/aircraft-fees")
+async def get_aircraft_fees(
+    icao: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    _now: int | None = None,
+):
+    """Per-aircraft runway-use totals for the live map's price tags and the
+    hero ticker. See app/fees.py's module docstring for the rolling-24h vs
+    local-calendar-month/year distinction, and why neither ever reads
+    `daily_operation_rollup`.
+
+    Read-only against the production database ONLY -- this endpoint never
+    opens this service's own database, because it has nothing to write and
+    nothing it needs from the rollup.
+    """
+    now = _now if _now is not None else int(time.time())
+    with db.production_readonly_session(settings.production_database_path) as ro_conn:
+        if db.get_airport(ro_conn, icao) is None:
+            raise HTTPException(status_code=404, detail="airport not found")
+        return fees.build_aircraft_fees(ro_conn, icao, now_ts=now)

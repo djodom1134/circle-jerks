@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchLedger } from "./lib/api";
 import type { LedgerResponse } from "./lib/types";
+import { FeeProvider } from "./lib/feeContext";
+import { AircraftFeesProvider } from "./lib/aircraftFeesContext";
 import { Header } from "./components/Header";
 import { Footer } from "./components/Footer";
 import { LoadingState } from "./components/LoadingState";
@@ -44,16 +46,22 @@ export default function App() {
   useEffect(() => load(), [load, attempt]);
 
   return (
-    <div className="app">
-      <a className="skip-link" href="#top">
-        Skip to main content
-      </a>
-      <div className="sunburst" aria-hidden="true" />
-      <Header />
-      {state.status === "loading" && <LoadingState />}
-      {state.status === "error" && <ErrorState message={state.message} onRetry={() => setAttempt((n) => n + 1)} />}
-      {state.status === "ready" && <LedgerPage data={state.data} />}
-      <Footer />
-    </div>
+    <FeeProvider>
+      <AircraftFeesProvider icao={AIRPORT_ICAO}>
+        <div className="app">
+          <a className="skip-link" href="#top">
+            Skip to main content
+          </a>
+          <div className="sunburst" aria-hidden="true" />
+          <Header />
+          {state.status === "loading" && <LoadingState />}
+          {state.status === "error" && (
+            <ErrorState message={state.message} onRetry={() => setAttempt((n) => n + 1)} />
+          )}
+          {state.status === "ready" && <LedgerPage data={state.data} />}
+          <Footer />
+        </div>
+      </AircraftFeesProvider>
+    </FeeProvider>
   );
 }

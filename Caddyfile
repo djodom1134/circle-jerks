@@ -107,6 +107,25 @@ www.{$CADDY_DOMAIN} {
 		}
 	}
 
+	# The Lost Landing's live map is a CUSTOMER of the main circlejerks API's
+	# already-public /positions endpoint (see backend/app/main.py) -- it never
+	# gets its own copy of that endpoint. This proxies the browser's same-origin
+	# /live/* requests straight to the MAIN api container, so the live map can
+	# call e.g. /live/positions?... with zero CORS changes anywhere (same
+	# origin as ledger.circlejerks.live). This is the ONLY line in this whole
+	# file that ever points at the main `api` container from this block; the
+	# main circlejerks API itself is untouched -- see backend/'s CLAUDE.md-level
+	# invariant that it stays byte-identical to production.
+	handle_path /live/* {
+		reverse_proxy api:8000 {
+			lb_try_duration 30s
+			lb_try_interval 1s
+			health_uri /healthz
+			health_interval 10s
+			health_timeout 3s
+		}
+	}
+
 	handle {
 		reverse_proxy web-ledger:8080
 	}

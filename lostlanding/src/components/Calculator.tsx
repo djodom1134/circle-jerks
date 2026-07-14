@@ -2,11 +2,15 @@ import { useId, useMemo, useState } from "react";
 import type { LedgerResponse } from "../lib/types";
 import { computeRevenue } from "../lib/calculator";
 import { formatCompactCurrency, formatCurrency, formatInteger } from "../lib/format";
+import { useFee } from "../lib/feeContext";
 
 const FEE_PRESETS = [5, 10, 15] as const;
 
 export function Calculator({ data }: { data: LedgerResponse }) {
-  const [fee, setFee] = useState(10);
+  // Shared with the live map's price tags and the hero ticker -- one fee
+  // slider, one source of truth (see lib/feeContext.tsx), not three
+  // independent copies that could silently drift apart.
+  const { fee, setFee } = useFee();
   const [billablePercent, setBillablePercent] = useState(100);
 
   const feeId = useId();

@@ -1,5 +1,6 @@
 import type { LedgerResponse } from "../lib/types";
 import { Hero } from "./Hero";
+import { LiveMap } from "./LiveMap";
 import { Calculator } from "./Calculator";
 import { DailyChart } from "./DailyChart";
 import { OperatorLedger } from "./OperatorLedger";
@@ -14,6 +15,7 @@ export function LedgerPage({ data }: { data: LedgerResponse }) {
   return (
     <main>
       <Hero data={data} />
+      <LiveMap />
       {isZeroWindow && (
         <div className="section-pad" style={{ paddingBottom: 0 }}>
           <ZeroBanner title="This window shows zero runway uses — and that's shown deliberately">
