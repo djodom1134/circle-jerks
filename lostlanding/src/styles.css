@@ -515,6 +515,12 @@ input:focus-visible,
   pointer-events: none;
 }
 
+/* An aircraft near the top of the frame has no room for a tooltip above it —
+   the breakdown just clipped off the map and was unreadable. Flip it below. */
+.plane-tooltip--below {
+  transform: translate(-50%, 14px);
+}
+
 .plane-tooltip-body strong {
   display: block;
   color: var(--gold2);

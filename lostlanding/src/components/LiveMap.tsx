@@ -35,7 +35,15 @@ interface TooltipState {
   icao24: string;
   x: number;
   y: number;
+  /** Render below the marker instead of above it, when there is no room above. */
+  below: boolean;
 }
+
+/** Roughly the tooltip's height, incl. its 14px standoff. Only used to decide
+ *  whether it fits above the marker; being a little off just biases the flip. */
+const TOOLTIP_H = 190;
+/** Half the tooltip's min-width, so we can keep it inside the map's left/right edges. */
+const TOOLTIP_HALF_W = 120;
 
 function TooltipBreakdown({
   position,
@@ -175,7 +183,18 @@ export function LiveMap() {
     const mapRect = containerRef.current?.getBoundingClientRect();
     const elRect = el.getBoundingClientRect();
     if (!mapRect) return;
-    setActiveTooltip({ icao24, x: elRect.left - mapRect.left + elRect.width / 2, y: elRect.top - mapRect.top });
+
+    const top = elRect.top - mapRect.top;
+    // The tooltip renders above the marker by default. An aircraft near the top
+    // of the frame would push it outside the map, which clips it — the breakdown
+    // for those planes was simply unreadable. Flip it below when it won't fit.
+    const below = top < TOOLTIP_H;
+    // Same problem sideways: clamp so a plane near an edge doesn't shove half the
+    // tooltip out of the frame.
+    const rawX = elRect.left - mapRect.left + elRect.width / 2;
+    const x = Math.min(Math.max(rawX, TOOLTIP_HALF_W), mapRect.width - TOOLTIP_HALF_W);
+
+    setActiveTooltip({ icao24, x, y: below ? top + elRect.height : top, below });
   }
 
   function closeTooltipFor(icao24: string) {
@@ -286,7 +305,7 @@ export function LiveMap() {
         )}
         {activeTooltip && activePosition && (
           <div
-            className="plane-tooltip"
+            className={`plane-tooltip${activeTooltip.below ? " plane-tooltip--below" : ""}`}
             role="tooltip"
             style={{ left: `${activeTooltip.x}px`, top: `${activeTooltip.y}px` }}
           >
