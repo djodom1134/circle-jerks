@@ -269,3 +269,13 @@ def test_a_mostly_unclassified_fleet_is_not_badged_from_a_handful():
     ]
     locality, _ = _dominant_locality(small_known_fleet)
     assert locality == homebase.LOCAL
+
+    # Half, not a majority. Mile Hi Skydivers has two aircraft and we watched one
+    # of them sleep at KLMO. They are based here; a strict-majority rule would
+    # have silently dropped that badge — swapping one false claim for another.
+    mile_hi = [
+        {"locality": homebase.LOCAL, "signal_strength": 0.9, "evidence": [{"code": "x", "text": "t"}]},
+        {"locality": homebase.UNCLASSIFIED, "signal_strength": 0.1, "evidence": []},
+    ]
+    locality, _ = _dominant_locality(mile_hi)
+    assert locality == homebase.LOCAL

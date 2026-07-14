@@ -528,8 +528,13 @@ def _dominant_locality(entries: list[dict]) -> tuple[str, list[dict]]:
     if not decided:
         return homebase.UNCLASSIFIED, entries[0]["evidence"]
 
-    # We must have classified MORE than half the fleet to label the fleet.
-    if len(decided) * 2 <= len(entries):
+    # We must have classified at least HALF the fleet to label the fleet.
+    #
+    # Half, not a majority: a two-aircraft operator with one aircraft we watched
+    # sleep here (Mile Hi Skydivers) is genuinely local, and a strict majority
+    # rule would silently drop that — trading one false claim for a different
+    # one. The bucket this guard exists for is nowhere near the line: 20 of 354.
+    if len(decided) * 2 < len(entries):
         return homebase.UNCLASSIFIED, []
 
     localities = {e["locality"] for e in decided}
