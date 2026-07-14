@@ -428,6 +428,42 @@ input:focus-visible,
   opacity: 0.85;
 }
 
+/* ---------- hero obligation callout ---------- */
+
+.hero-obligation {
+  margin: 0.7em 0 1.1em;
+  padding: 16px 20px;
+  max-width: 620px;
+  border-left: 3px solid var(--gold2);
+  background: #06222bcc;
+}
+
+.hero-obligation p {
+  margin: 0 0 0.5em;
+  font-size: 1.05rem;
+  line-height: 1.5;
+  color: #fff9e8;
+}
+
+.hero-obligation strong {
+  color: var(--gold2);
+}
+
+.hero-obligation-link {
+  display: inline-block;
+  color: var(--gold2);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-decoration: none;
+  border-bottom: 1px solid var(--gold2);
+}
+
+.hero-obligation-link:hover,
+.hero-obligation-link:focus-visible {
+  color: var(--gold);
+  border-color: var(--gold);
+}
+
 /* ---------- live map ---------- */
 
 .live-map-section {
@@ -1174,6 +1210,114 @@ input:focus-visible,
   color: var(--rust);
 }
 
+/* ---------- faa obligation ---------- */
+
+.obligation-quotes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+.obligation-quote {
+  margin: 0;
+  padding: 26px 28px;
+}
+
+.obligation-quote blockquote {
+  margin: 0 0 14px;
+  font-family: "Cormorant Garamond", serif;
+  font-style: italic;
+  font-size: 1.2rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.obligation-quote figcaption cite {
+  display: block;
+  font-style: normal;
+  font-size: 0.82rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--teal2);
+}
+
+.obligation-quote figcaption a {
+  color: var(--rust);
+  text-decoration: underline;
+}
+
+.obligation-grant {
+  background: var(--ink);
+  color: white;
+  border: 1px solid var(--line-strong);
+  padding: 28px 32px;
+  margin-bottom: 28px;
+}
+
+.grant-figure {
+  font-family: "Cormorant Garamond", serif;
+  font-size: clamp(2.4rem, 5vw, 3.6rem);
+  color: var(--gold2);
+  margin: 0 0 0.15em;
+  line-height: 1;
+}
+
+.grant-detail {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.5;
+}
+
+.grant-detail a {
+  color: var(--gold2);
+  text-decoration: underline;
+}
+
+.grant-kicker {
+  margin: 14px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--gold2);
+  line-height: 1.4;
+}
+
+.obligation-economy {
+  margin-bottom: 28px;
+  max-width: 850px;
+}
+
+.obligation-economy h3 {
+  font-family: "Cormorant Garamond", serif;
+  text-transform: uppercase;
+  font-size: 1.6rem;
+  margin: 0 0 0.4em;
+  color: var(--rust);
+}
+
+.obligation-economy p {
+  font-size: 1.05rem;
+  line-height: 1.55;
+  margin: 0 0 0.8em;
+}
+
+.obligation-revenue {
+  margin-bottom: 28px;
+}
+
+.obligation-revenue .obligation-quote {
+  margin-bottom: 18px;
+}
+
+.obligation-revenue > p {
+  font-size: 1.05rem;
+  line-height: 1.55;
+  max-width: 850px;
+  margin: 0;
+}
+
 /* ---------- footer ---------- */
 
 footer.site-footer {
@@ -1209,6 +1353,9 @@ footer.site-footer {
   }
   .stat-strip {
     grid-template-columns: 1fr 1fr;
+  }
+  .obligation-quotes {
+    grid-template-columns: 1fr;
   }
   .hero-copy {
     margin: 0 7vw;
@@ -1260,5 +1407,8 @@ footer.site-footer {
   .hero-companion-stats {
     flex-direction: column;
     gap: 12px;
+  }
+  .obligation-grant {
+    padding: 22px 20px;
   }
 }

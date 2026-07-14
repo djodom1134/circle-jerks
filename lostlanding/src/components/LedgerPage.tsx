@@ -6,6 +6,7 @@ import { DailyChart } from "./DailyChart";
 import { OperatorLedger } from "./OperatorLedger";
 import { LocalityBreakdown } from "./LocalityBreakdown";
 import { Methodology } from "./Methodology";
+import { FaaObligation } from "./FaaObligation";
 import { LawfulUse } from "./LawfulUse";
 import { ZeroBanner } from "./ZeroBanner";
 
@@ -31,6 +32,7 @@ export function LedgerPage({ data }: { data: LedgerResponse }) {
       <OperatorLedger data={data} />
       <LocalityBreakdown data={data} />
       <Methodology data={data} />
+      <FaaObligation data={data} />
       <LawfulUse data={data} />
     </main>
   );

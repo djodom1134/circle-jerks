@@ -113,6 +113,25 @@ describe("Hero", () => {
     await waitFor(() => expect(screen.getByText("$80.00")).toBeTruthy());
   });
 
+  it("adds the self-sustaining obligation callout directly under the ticker, linking to the full section", async () => {
+    renderHero();
+    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+
+    expect(document.body.textContent).toMatch(/as self-sustaining as possible/i);
+    expect(document.body.textContent).toMatch(
+      /longmont accepted \$725,000 in federal money this year to rebuild a taxilane, while charging nothing at all for the runway/i,
+    );
+
+    const link = screen.getByRole("link", { name: /see the obligation longmont signed/i });
+    expect(link.getAttribute("href")).toBe("#obligation");
+
+    // Must not bury the ticker: the ticker headline stays before the obligation callout in DOM order.
+    const tickerEl = screen.getByText(/we missed out on/i);
+    const obligationEl = document.querySelector(".hero-obligation");
+    expect(obligationEl).toBeTruthy();
+    expect(tickerEl.compareDocumentPosition(obligationEl!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("shows an em dash placeholder, not a fabricated dollar figure, before the first successful load", () => {
     fetchAircraftFeesMock.mockReturnValue(new Promise(() => {})); // never resolves
     render(

@@ -82,11 +82,11 @@ export function LawfulUse({ data }: { data: LedgerResponse }) {
       </div>
 
       <p className="legal-note">
-        <strong>Airport revenue stays on the airport.</strong> Under FAA Grant Assurance 25 and 49 U.S.C. §
-        47107(b), a federally obligated airport like {data.airport_icao} cannot divert landing or usage fees to
-        off-airport spending — a community center, a park, a road project elsewhere in town — without risking its
-        federal obligations. That's not a footnote limiting this idea; it's the reason every project above is
-        actually buildable without a legal fight. Nothing here funds anything off airport property.
+        <strong>Airport revenue stays on the airport.</strong> That isn't a footnote limiting this idea; it's the
+        reason every project above is actually buildable without a legal fight — nothing here funds anything off
+        airport property. See{" "}
+        <a href="#obligation">the federal obligation Longmont signed</a> for the exact statute and grant-assurance
+        language that locks this revenue to {data.airport_icao} itself.
       </p>
     </section>
   );

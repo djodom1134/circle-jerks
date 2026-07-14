@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import App from "./App";
-import { ZERO_LEDGER_FIXTURE } from "./test/fixtures";
+import { SAMPLE_LEDGER_FIXTURE, ZERO_LEDGER_FIXTURE } from "./test/fixtures";
 
 afterEach(() => {
   cleanup();
@@ -106,5 +106,20 @@ describe("App", () => {
     expect(screen.getAllByText("0").length).toBeGreaterThan(0);
     // The operator ledger explains there is nothing to show, rather than an empty table.
     expect(screen.getByText(/no operators recorded/i)).toBeTruthy();
+  });
+
+  it("never renders the forbidden FAA claims anywhere on the rendered page", async () => {
+    stubMultiEndpointFetch(SAMPLE_LEDGER_FIXTURE);
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryByText(/counting runway uses/i)).toBeNull());
+    // Sanity: the new obligation section actually rendered on the real page.
+    await waitFor(() => expect(screen.getByText("$725,000")).toBeTruthy());
+
+    const lower = document.body.textContent?.toLowerCase() ?? "";
+    expect(lower).not.toContain("requires a landing fee");
+    expect(lower).not.toContain("violating federal law");
+    expect(lower).not.toContain("illegal");
   });
 });

@@ -60,6 +60,17 @@ export function Hero({ data }: { data: LedgerResponse }) {
           </p>
         </div>
 
+        <div className="hero-obligation">
+          <p>
+            Longmont signed a federal promise to make this airport <strong>as self-sustaining as possible</strong>.
+            Longmont accepted $725,000 in federal money this year to rebuild a taxilane, while charging nothing at
+            all for the runway.
+          </p>
+          <a className="hero-obligation-link" href="#obligation">
+            See the obligation Longmont signed &rarr;
+          </a>
+        </div>
+
         <p className="hero-fee-line">
           At <strong>{formatCurrency(fee)}</strong> per runway use — a number <em>you</em> control below.
         </p>

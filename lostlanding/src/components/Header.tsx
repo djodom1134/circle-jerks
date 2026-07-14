@@ -16,6 +16,7 @@ export function Header() {
         <a href="#ledger">Operator Ledger</a>
         <a href="#based-here">Who's Based Here</a>
         <a href="#method">Method</a>
+        <a href="#obligation">The Obligation</a>
         <a href="#lawful-use">What the Law Allows</a>
       </nav>
     </header>
