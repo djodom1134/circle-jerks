@@ -46,11 +46,12 @@ export function LocalityBreakdown({ data }: { data: LedgerResponse }) {
       )}
 
       <p className="honesty-note">
-        There is no "estimated non-local share" on this page. Establishing non-locality requires origin evidence
-        that, for this historical window, is forward-fill only — it doesn't exist yet, so
+        There is no "estimated non-local share" on this page. Calling an aircraft non-local would mean showing
+        where it departed from, and we do not collect that: reading it would require changing the detector that
+        runs the live map, which we will not do to this airport's data.
         {summary.non_local_aircraft > 0
-          ? ` only ${formatInteger(summary.non_local_aircraft)} aircraft currently clear that bar.`
-          : " we currently cannot establish non-locality for this window."}{" "}
+          ? ` Only ${formatInteger(summary.non_local_aircraft)} aircraft clear that bar.`
+          : " So we cannot establish that any aircraft here is a visitor, and we do not claim it."}{" "}
         We would rather show you an honest "we don't know" than a confident-looking number we can't back up.
       </p>
     </section>
