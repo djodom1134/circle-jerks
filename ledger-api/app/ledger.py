@@ -447,6 +447,83 @@ def methodology(ro_conn: sqlite3.Connection, icao: str, settings) -> dict:
     }
 
 
+# How far to annualize the observed daily rate for `annual_projection`. Not
+# configurable: changing it would change the meaning of "projected annual"
+# without changing the label, which is exactly the kind of drift this project
+# exists to prevent.
+PROJECTION_ANNUALIZATION_DAYS = 365
+
+
+def annual_projection(ro_conn: sqlite3.Connection, icao: str, now_ts: int) -> dict:
+    """A PROJECTED annual runway-use rate, computed from OUR OWN measured data
+    only.
+
+    Deliberately never derived from the FAA's published Form-5010 operations
+    estimate for this field. That figure is wrong as a revenue base twice
+    over: it is an ESTIMATE, not a count (the same distinction the hero draws
+    against it), and it is denominated in FAA "operations", where a
+    touch-and-go is two -- using it here would be exactly the double-count
+    RUNWAY_USE_TYPES exists to correct (see the module docstring). The 120,000
+    figure belongs only as an independent, differently-measured cross-check in
+    the frontend copy, never as an input to this arithmetic and never
+    presented as a count.
+
+    The basis is simply: every runway use this deployment has ever counted,
+    divided by how many days it has been counting, times
+    PROJECTION_ANNUALIZATION_DAYS. Unlike every other figure this module
+    produces, this one is NOT a floor -- it takes a real, counted rate from a
+    short, present-day window and assumes that rate holds for a full year.
+    This project's history so far sits inside Colorado's peak GA flying
+    season, so the true annual figure is plausibly LOWER than this
+    projection, not higher, unlike every floor elsewhere on the site. That
+    seasonality caveat belongs in the copy that renders this number
+    (frontend), stated plainly -- it is not a footnote, it is what makes the
+    rest of the page's floors credible.
+
+    Reads the FULL history in `operations` for `icao`, never the
+    `days`-windowed slice `build_ledger` otherwise reports elsewhere -- the
+    projection's whole premise is "our real history", which may be longer or
+    shorter than any single request's `days` parameter.
+    """
+    icao = icao.upper()
+    now_ts = int(now_ts)
+
+    counting_since = ro_conn.execute(
+        "SELECT MIN(timestamp) AS t FROM operations WHERE icao=?", (icao,)
+    ).fetchone()["t"]
+
+    if counting_since is None:
+        return {
+            "counting_since": None,
+            "days_of_data": 0.0,
+            "runway_uses_to_date": 0,
+            "observed_daily_rate": 0.0,
+            "annualization_days": PROJECTION_ANNUALIZATION_DAYS,
+            "projected_annual_runway_uses": 0,
+        }
+
+    placeholders = ",".join("?" * len(RUNWAY_USE_TYPES))
+    runway_uses_to_date = ro_conn.execute(
+        f"SELECT COUNT(*) AS n FROM operations "
+        f"WHERE icao=? AND type IN ({placeholders}) AND icao24 IS NOT NULL",
+        (icao, *RUNWAY_USE_TYPES),
+    ).fetchone()["n"]
+
+    # Floored at 1 day: a deployment only minutes old must not divide by a
+    # near-zero span and report an absurd extrapolated rate.
+    days_of_data = max((now_ts - counting_since) / 86400, 1.0)
+    observed_daily_rate = runway_uses_to_date / days_of_data
+
+    return {
+        "counting_since": counting_since,
+        "days_of_data": round(days_of_data, 2),
+        "runway_uses_to_date": runway_uses_to_date,
+        "observed_daily_rate": round(observed_daily_rate, 2),
+        "annualization_days": PROJECTION_ANNUALIZATION_DAYS,
+        "projected_annual_runway_uses": round(observed_daily_rate * PROJECTION_ANNUALIZATION_DAYS),
+    }
+
+
 def build_ledger(
     ro_conn: sqlite3.Connection,
     rw_conn: sqlite3.Connection,
@@ -500,6 +577,8 @@ def build_ledger(
         },
         "daily": rollup_daily_runway_uses(rw_conn, icao, start_day, end_day),
         "operators": operator_ledger(ro_conn, rw_conn, icao, start_day, end_day),
+        "visits": dwell.visit_summary(ro_conn, icao, start_ts, int(now_ts)),
+        "projection": annual_projection(ro_conn, icao, now_ts),
         "methodology": methodology(ro_conn, icao, settings),
     }
 

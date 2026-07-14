@@ -14,6 +14,7 @@ export function Header() {
         <a href="#calculator">Calculator</a>
         <a href="#daily">Daily Count</a>
         <a href="#ledger">Operator Ledger</a>
+        <a href="#visits">Who Actually Stopped?</a>
         <a href="#based-here">Who's Based Here</a>
         <a href="#method">Method</a>
         <a href="#obligation">The Obligation</a>

@@ -4,6 +4,7 @@ import { LiveMap } from "./LiveMap";
 import { Calculator } from "./Calculator";
 import { DailyChart } from "./DailyChart";
 import { OperatorLedger } from "./OperatorLedger";
+import { RealVisits } from "./RealVisits";
 import { LocalityBreakdown } from "./LocalityBreakdown";
 import { Methodology } from "./Methodology";
 import { FaaObligation } from "./FaaObligation";
@@ -30,6 +31,7 @@ export function LedgerPage({ data }: { data: LedgerResponse }) {
       <Calculator data={data} />
       <DailyChart data={data} />
       <OperatorLedger data={data} />
+      <RealVisits data={data} />
       <LocalityBreakdown data={data} />
       <Methodology data={data} />
       <FaaObligation data={data} />

@@ -407,7 +407,7 @@ input:focus-visible,
   margin: 0.4em 0 1em;
   padding: 14px 0 0;
   border-top: 1px solid var(--line);
-  max-width: 620px;
+  max-width: 760px;
 }
 
 .hero-companion-stats > div {
@@ -426,6 +426,29 @@ input:focus-visible,
   font-size: 0.82rem;
   color: #cfead2;
   opacity: 0.85;
+}
+
+/* The projected-annual companion stat is deliberately visually distinct from
+   its two neighbors (both of which are COUNTS) -- a dashed border reads as
+   "not quite the same category of number" at a glance, before anyone reads
+   the word "projected" in the label. */
+.hero-companion-projected {
+  border: 1px dashed var(--gold2);
+  padding: 6px 10px;
+  border-radius: 2px;
+}
+
+.hero-projection-note {
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: #cabf9e;
+  opacity: 0.9;
+  max-width: 640px;
+  margin: 0 0 0.8em;
+}
+
+.hero-projection-note strong {
+  color: var(--gold2);
 }
 
 /* ---------- hero obligation callout ---------- */
@@ -1027,6 +1050,44 @@ input:focus-visible,
   margin: 6px 0 0;
 }
 
+/* ---------- who actually stopped ---------- */
+
+.visits-headline {
+  background: var(--ink);
+  color: white;
+  border: 1px solid var(--gold);
+  padding: 34px 36px;
+  margin-bottom: 28px;
+  text-align: center;
+}
+
+.visits-headline-figure {
+  font-family: "Cormorant Garamond", serif;
+  font-size: clamp(3.2rem, 9vw, 5.4rem);
+  color: var(--gold2);
+  margin: 0 0 0.1em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.visits-headline-text {
+  margin: 0 auto;
+  max-width: 640px;
+  font-size: 1.1rem;
+  line-height: 1.5;
+}
+
+.visits-lede {
+  font-size: 1.05rem;
+  line-height: 1.55;
+  margin: 0 0 20px;
+  max-width: 760px;
+}
+
+.visits-grid {
+  margin-bottom: 8px;
+}
+
 /* ---------- locality breakdown ---------- */
 
 .locality-grid {
@@ -1378,6 +1439,9 @@ footer.site-footer {
   .money-row,
   .locality-grid {
     grid-template-columns: 1fr;
+  }
+  .visits-headline {
+    padding: 26px 6vw;
   }
   .hero h1 {
     font-size: 2.6rem;

@@ -138,3 +138,93 @@ def test_summary_reports_coverage_and_never_divides_by_zero(tmp_path):
     blank = dwell.dwell_summary(empty_ro, "KLMO", *WINDOW)
     assert blank["median_seconds"] is None
     assert blank["coverage"] == 0.0
+
+
+# ---------- visit_summary: "real visits" (>= 20 minutes on the ground) ----------
+
+
+def test_visit_summary_boundary_1200_stays_1199_is_quick_turn(tmp_path):
+    # Reviewer-specified boundary: exactly the threshold counts as a stay;
+    # one second short does not.
+    setup, ro, rw = build_dbs(tmp_path)
+    _op(setup, "l1", "landing", BASE, icao24="aaa111")
+    _op(setup, "t1", "takeoff", BASE + 1200, icao24="aaa111")  # exactly 1200s -> stayed
+    _op(setup, "l2", "landing", BASE, icao24="bbb222")
+    _op(setup, "t2", "takeoff", BASE + 1199, icao24="bbb222")  # 1s short -> quick turn
+
+    summary = dwell.visit_summary(ro, "KLMO", *WINDOW)
+    assert summary == {
+        "min_seconds": 1200,
+        "stayed": 1,
+        "quick_turn": 1,
+        "paired": 2,
+        "landings": 2,
+        "coverage": 1.0,
+        "median_stay_seconds": 1200,
+    }
+
+
+def test_visit_summary_does_not_silently_drop_a_multi_day_visit(tmp_path):
+    # dwell_intervals with the DEFAULT (6h) lookahead cannot find this takeoff
+    # at all -- it is 3 days past end_ts -- which would misclassify a genuine
+    # multi-day visit as an unpaired landing (a coverage gap) instead of a
+    # `stayed` visit. Prove the naive approach fails first, so this test
+    # actually exercises what visit_summary is responsible for fixing.
+    setup, ro, rw = build_dbs(tmp_path)
+    start_ts = BASE
+    end_ts = BASE + 3600
+    _op(setup, "l1", "landing", end_ts - 100, icao24="ccc333")
+    _op(setup, "t1", "takeoff", end_ts + 3 * 86400, icao24="ccc333")
+
+    assert dwell.dwell_intervals(ro, "KLMO", start_ts, end_ts) == []
+
+    summary = dwell.visit_summary(ro, "KLMO", start_ts, end_ts)
+    assert summary["paired"] == 1
+    assert summary["stayed"] == 1
+    assert summary["quick_turn"] == 0
+    assert summary["landings"] == 1
+    assert summary["coverage"] == 1.0
+    assert summary["median_stay_seconds"] == 3 * 86400 + 100
+
+
+def test_visit_summary_median_only_reflects_the_stayed_group(tmp_path):
+    setup, ro, rw = build_dbs(tmp_path)
+    _op(setup, "l1", "landing", BASE, icao24="aaa111")
+    _op(setup, "t1", "takeoff", BASE + 300, icao24="aaa111")    # quick turn, 5 min
+    _op(setup, "l2", "landing", BASE, icao24="bbb222")
+    _op(setup, "t2", "takeoff", BASE + 1800, icao24="bbb222")   # stayed, 30 min
+    _op(setup, "l3", "landing", BASE, icao24="ccc333")
+    _op(setup, "t3", "takeoff", BASE + 3600, icao24="ccc333")   # stayed, 60 min
+
+    summary = dwell.visit_summary(ro, "KLMO", *WINDOW)
+    assert summary["stayed"] == 2
+    assert summary["quick_turn"] == 1
+    assert summary["median_stay_seconds"] == 2700  # mean of 1800 and 3600 -- the 300s pair excluded
+
+
+def test_visit_summary_coverage_reports_unpaired_landings_and_never_divides_by_zero(tmp_path):
+    setup, ro, rw = build_dbs(tmp_path)
+    _op(setup, "l1", "landing", BASE, icao24="aaa111")
+    _op(setup, "t1", "takeoff", BASE + 1800, icao24="aaa111")
+    _op(setup, "l2", "landing", BASE, icao24="bbb222")  # never departs -- must not be imputed
+
+    summary = dwell.visit_summary(ro, "KLMO", *WINDOW)
+    assert summary["landings"] == 2
+    assert summary["paired"] == 1
+    assert summary["stayed"] == 1
+    assert summary["coverage"] == 0.5
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    _, empty_ro, _ = build_dbs(empty_dir)
+    blank = dwell.visit_summary(empty_ro, "KLMO", *WINDOW)
+    assert blank["landings"] == 0
+    assert blank["paired"] == 0
+    assert blank["stayed"] == 0
+    assert blank["quick_turn"] == 0
+    assert blank["coverage"] == 0.0
+    assert blank["median_stay_seconds"] is None
+
+
+def test_visit_summary_default_min_seconds_is_20_minutes(tmp_path):
+    assert dwell.VISIT_MIN_SECONDS == 1200

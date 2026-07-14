@@ -46,6 +46,23 @@ export const ZERO_LEDGER_FIXTURE: LedgerResponse = {
     runway_uses: 0,
   })),
   operators: [],
+  visits: {
+    min_seconds: 1200,
+    stayed: 0,
+    quick_turn: 0,
+    paired: 0,
+    landings: 0,
+    coverage: 0,
+    median_stay_seconds: null,
+  },
+  projection: {
+    counting_since: null,
+    days_of_data: 0,
+    runway_uses_to_date: 0,
+    observed_daily_rate: 0,
+    annualization_days: 365,
+    projected_annual_runway_uses: 0,
+  },
   methodology: METHODOLOGY,
 };
 
@@ -95,5 +112,22 @@ export const SAMPLE_LEDGER_FIXTURE: LedgerResponse = {
       locality_evidence: [],
     },
   ],
+  visits: {
+    min_seconds: 1200,
+    stayed: 40,
+    quick_turn: 65,
+    paired: 105,
+    landings: 120,
+    coverage: 0.875,
+    median_stay_seconds: 2400,
+  },
+  projection: {
+    counting_since: 1750000000, // 2025-06-15 UTC-ish
+    days_of_data: 30,
+    runway_uses_to_date: 300,
+    observed_daily_rate: 10,
+    annualization_days: 365,
+    projected_annual_runway_uses: 3650,
+  },
   methodology: METHODOLOGY,
 };

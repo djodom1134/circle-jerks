@@ -29,6 +29,46 @@ export interface DwellSummary {
   coverage: number; // 0..1
 }
 
+/**
+ * Of the landing->takeoff pairs we could actually measure, how many stayed
+ * `min_seconds` or longer (a real visit) versus a quick turn? `paired` (=
+ * stayed + quick_turn) is the ONLY honest denominator for `stayed` and
+ * `quick_turn` -- most landings have no matching takeoff in view at all
+ * (still on the field, or we missed the departure). `coverage` = paired /
+ * landings, published so a reader can see how much of the activity this
+ * speaks for. `min_seconds` (1200s / 20 minutes) is a judgment call this
+ * project is making, not an FAA or industry standard -- never present it as
+ * one.
+ */
+export interface VisitSummary {
+  min_seconds: number;
+  stayed: number;
+  quick_turn: number;
+  paired: number;
+  landings: number;
+  coverage: number; // 0..1
+  median_stay_seconds: number | null;
+}
+
+/**
+ * A PROJECTED annual runway-use rate, computed from our own measured data
+ * only -- never from the FAA's published Form-5010 operations estimate (see
+ * ledger-api/app/ledger.py's `annual_projection` docstring for why that
+ * figure cannot be the input here). Unlike every other field on this
+ * response, this one is not a floor: it assumes a short, present-day rate
+ * holds for a full year, and this project's history so far sits inside
+ * Colorado's peak flying season -- render that caveat wherever this number
+ * appears, every time.
+ */
+export interface AnnualProjection {
+  counting_since: number | null; // unix seconds
+  days_of_data: number;
+  runway_uses_to_date: number;
+  observed_daily_rate: number;
+  annualization_days: number;
+  projected_annual_runway_uses: number;
+}
+
 export interface LedgerSummary {
   runway_uses: number;
   by_type: RunwayUseByType;
@@ -97,5 +137,7 @@ export interface LedgerResponse {
   summary: LedgerSummary;
   daily: DailyPoint[];
   operators: Operator[];
+  visits: VisitSummary;
+  projection: AnnualProjection;
   methodology: Methodology;
 }

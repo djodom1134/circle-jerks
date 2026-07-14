@@ -15,7 +15,7 @@ function sumAircraftField(aircraft: Record<string, AircraftFeeEntry>, field: key
 }
 
 export function Hero({ data }: { data: LedgerResponse }) {
-  const { summary, window, methodology } = data;
+  const { summary, window, methodology, projection } = data;
   const rangeLabel = `${formatShortDate(window.start_day)} – ${formatShortDate(window.end_day)}`;
 
   const { fee } = useFee();
@@ -39,6 +39,17 @@ export function Hero({ data }: { data: LedgerResponse }) {
   const monthUses = feesData ? sumAircraftField(feesData.aircraft, "month") : null;
   const sinceUses = feesData ? sumAircraftField(feesData.aircraft, "total") : null;
   const countingSinceLabel = feesData?.counting_since != null ? formatUnixDate(feesData.counting_since) : null;
+
+  // PROJECTED, never counted -- see ledger-api/app/ledger.py's
+  // `annual_projection` docstring. Basis is OUR OWN measured rate
+  // (runway uses / days counted), never the FAA's Form 5010 operations
+  // estimate: that figure is an estimate (not a count) in a different unit
+  // (an operation is a takeoff OR a landing; a runway use is one arrival),
+  // and using it as a revenue base would be exactly the double-count this
+  // page exists to correct. Reacts to the fee slider like every other dollar
+  // figure on this page, via the same `fee` state.
+  const projectedAnnualRevenue = projection.projected_annual_runway_uses * fee;
+  const projectionCountingSinceLabel = formatUnixDate(projection.counting_since);
 
   return (
     <section className="hero" id="top">
@@ -92,7 +103,26 @@ export function Hero({ data }: { data: LedgerResponse }) {
                 {formatInteger(sinceUses)} runway uses)
               </span>
             </div>
+            <div className="hero-companion-projected">
+              <strong>{formatCurrency(projectedAnnualRevenue)}</strong>
+              <span>
+                projected annual — at the rate we've measured so far ({formatInteger(projection.projected_annual_runway_uses)}{" "}
+                runway uses/yr, {projection.observed_daily_rate.toFixed(1)}/day)
+              </span>
+            </div>
           </div>
+        )}
+
+        {ready && (
+          <p className="hero-projection-note">
+            <strong>That last figure is projected, not counted.</strong> We have only counted since{" "}
+            {projectionCountingSinceLabel ?? "recently"} — mid-June into mid-July, Colorado's peak flying season.
+            Colorado winters are quieter, so a full year at this rate is very likely an over-estimate: this is the
+            one number on this page that is not a floor. For context, the FAA's own published figure for{" "}
+            {data.airport_icao} is on the order of 120,000 operations a year — an estimate, not a count, and a
+            different unit (an operation is a takeoff OR a landing; a runway use is one arrival). Two entirely
+            different methods, by two entirely different parties, land in the same order of magnitude.
+          </p>
         )}
 
         {feesError && (

@@ -110,3 +110,28 @@ def test_methodology_reports_unclassified_count(client):
 
 def test_unknown_airport_is_404(client):
     assert client.get("/airports/ZZZZ/ledger").status_code == 404
+
+
+def test_ledger_includes_visits_and_projection_without_disturbing_the_existing_shape(client):
+    # See tests/test_ledger_visits_and_projection.py for the exhaustive
+    # behavior of both blocks; this just proves the standard endpoint
+    # response (used by every other test in this file) grew these two keys
+    # rather than anything existing being renamed or removed.
+    body = client.get(f"/airports/KLMO/ledger?days=30&_now={BASE + DAY}").json()
+
+    assert body["visits"]["min_seconds"] == 1200
+    assert set(body["visits"]) == {
+        "min_seconds", "stayed", "quick_turn", "paired", "landings", "coverage", "median_stay_seconds",
+    }
+
+    assert body["projection"]["annualization_days"] == 365
+    assert set(body["projection"]) == {
+        "counting_since", "days_of_data", "runway_uses_to_date",
+        "observed_daily_rate", "annualization_days", "projected_annual_runway_uses",
+    }
+
+    # Nothing pre-existing moved or disappeared.
+    assert set(body) == {
+        "airport_icao", "timezone", "window", "summary", "daily",
+        "operators", "visits", "projection", "methodology",
+    }

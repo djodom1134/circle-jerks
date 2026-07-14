@@ -93,6 +93,48 @@ describe("Hero", () => {
     expect(document.body.textContent?.toLowerCase()).not.toContain("lifetime");
   });
 
+  it("adds a projected-annual companion figure, labeled as projected and reactive to the fee slider", async () => {
+    renderHero(FEES_FIXTURE, true);
+    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+
+    // SAMPLE_LEDGER_FIXTURE.projection.projected_annual_runway_uses = 3650, fee = $10 -> $36,500.
+    expect(screen.getByText("$36,500")).toBeTruthy();
+    const projectedEl = document.querySelector(".hero-companion-projected");
+    expect(projectedEl).toBeTruthy();
+    expect(projectedEl!.textContent?.toLowerCase()).toContain("projected annual");
+
+    await act(async () => {
+      screen.getByRole("button", { name: /bump fee/i }).click();
+    });
+    // Same 3650 runway uses/yr, now at $20 -> $73,000.
+    await waitFor(() => expect(screen.getByText("$73,000")).toBeTruthy());
+  });
+
+  it("never lets the projected figure be mistaken for a count -- and states the seasonality limit plainly", async () => {
+    renderHero();
+    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+
+    const note = document.querySelector(".hero-projection-note")?.textContent ?? "";
+    expect(note.toLowerCase()).toContain("projected, not counted");
+    expect(note.toLowerCase()).toContain("peak flying season");
+    expect(note.toLowerCase()).toMatch(/over-estimate/);
+    expect(note.toLowerCase()).toContain("not a floor");
+  });
+
+  it("cites the FAA's 120,000-operations figure only as an independent cross-check, never converted or stated as fact", async () => {
+    renderHero();
+    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+
+    const note = document.querySelector(".hero-projection-note")?.textContent ?? "";
+    expect(note).toMatch(/120,000 operations a year/);
+    expect(note.toLowerCase()).toContain("an estimate, not a count");
+    expect(note.toLowerCase()).toContain("same order of magnitude");
+    // Must never do the FAA-operations-to-runway-uses conversion -- that
+    // would be the exact double-count this page attacks.
+    expect(note).not.toMatch(/120,000\s*(x|\*|times|\/|÷)\s*2/i);
+    expect(note.toLowerCase()).not.toContain("60,000 runway uses");
+  });
+
   it("keeps the counting-methodology story (untowered, FAA 5010 estimates, floor language) as supporting copy", async () => {
     renderHero();
     await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
