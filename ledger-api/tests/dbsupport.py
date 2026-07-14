@@ -62,7 +62,11 @@ CREATE TABLE IF NOT EXISTS operations (
   callsign TEXT,
   type TEXT NOT NULL,
   timestamp INTEGER NOT NULL,
-  origin_airport_icao TEXT
+  origin_airport_icao TEXT,
+  -- A closed lap's duration, written onto the CIRCLE row by the main API's
+  -- deviation pass. laps.py joins a touch_and_go back to its circle on
+  -- (icao24, timestamp) to recover the lap's time span from this.
+  time_total_s INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_operations_icao_ts ON operations(icao, timestamp);
 CREATE INDEX IF NOT EXISTS idx_operations_icao24 ON operations(icao24);
@@ -107,13 +111,28 @@ def build_dbs(tmp_path):
     return setup_conn, ro_conn, rw_conn
 
 
-def op(setup_conn, oid, type_, ts, icao24="a1", callsign=None, origin=None, icao="KLMO"):
+def op(setup_conn, oid, type_, ts, icao24="a1", callsign=None, origin=None, icao="KLMO",
+       time_total_s=None):
     setup_conn.execute(
-        "INSERT INTO operations (id, icao, icao24, callsign, type, timestamp, origin_airport_icao) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (oid, icao, icao24, callsign or icao24.upper(), type_, ts, origin),
+        "INSERT INTO operations "
+        "  (id, icao, icao24, callsign, type, timestamp, origin_airport_icao, time_total_s) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (oid, icao, icao24, callsign or icao24.upper(), type_, ts, origin, time_total_s),
     )
     setup_conn.commit()
+
+
+def lap(setup_conn, oid, ts, icao24="a1", duration_s=330, icao="KLMO", callsign=None):
+    """One detected pattern lap, exactly as the main API writes it: a `circle` row
+    carrying the lap's duration, plus the `touch_and_go` derived 1:1 from it and
+    sharing its (icao24, timestamp). See detectors.touch_and_gos_from_circles.
+
+    Returns the touch_and_go's operation id — the row a runway-use count counts.
+    """
+    op(setup_conn, f"c-{oid}", "circle", ts, icao24=icao24, callsign=callsign, icao=icao,
+       time_total_s=duration_s)
+    op(setup_conn, f"tg-{oid}", "touch_and_go", ts, icao24=icao24, callsign=callsign, icao=icao)
+    return f"tg-{oid}"
 
 
 def register(setup_conn, n_number, icao_hex, registrant_name=None, city=None, state=None,

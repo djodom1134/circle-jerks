@@ -36,6 +36,37 @@ MAX_CIRCLE_CLOSURE_NM = 0.5
 # full laps, doubling the circle count.
 TIGHT_CLOSURE_BONUS_NM = 0.5
 MAX_CIRCLE_ALTITUDE_FT_AGL = 2000
+# ...and the FLOOR that ceiling never had: the lap must have actually GOT AIRBORNE.
+#
+# The ceiling above has no counterpart, so a loop that NEVER LEFT THE GROUND
+# satisfied the altitude gate trivially. That is not hypothetical: a taxi circuit
+# closes on itself, turns through a full 360 degrees, and at a walking-pace 15 kt
+# over a 12-minute taxi comfortably exceeds MIN_CIRCLE_PATH_NM — so it cleared
+# every other gate and was emitted as a pattern circle. Worse, an aircraft on the
+# ground reports `baro_altitude_ft = 0` as an ON-GROUND SENTINEL (see
+# `altitude_agl_from_elevation`), which resolves to 0 ft AGL — an altitude that
+# passes a ceiling test perfectly happily.
+#
+# 300 ft sits in the wide empty band between the two populations it must separate:
+#   * a real KLMO pattern lap peaks at 770-995 ft AGL (pattern altitude is 1000 ft
+#     AGL), so the floor is ~2.5x BELOW the lowest real lap;
+#   * an aircraft on the surface is at 0 ft AGL by definition, and the worst
+#     baro/GPS noise on a ground sample is a couple hundred feet, so the floor is
+#     ~2.5x ABOVE the highest ground artefact.
+# No real pattern lap can fail it; no ground movement can pass it. Verified against
+# a reconstructed KLMO track: it removes zero real laps and rejects the ground loop.
+#
+# SCOPE — measured, so nobody re-litigates it. This gate does NOT, on its own, stop
+# a touch-and-go being counted twice. That duplicate is an event-IDENTITY problem,
+# not an altitude one: one pattern lap crosses the runway TWICE (the departure roll
+# and the arrival), those two passes are further apart than
+# CIRCLE_LAP_ANCHOR_SECONDS, and which of them wins `closest_idx` below depends on
+# where the sliding scan window happens to cut the track. So one lap resolves to two
+# different anchors, two ids, two rows — and BOTH of them contain the airborne
+# circuit, so both clear this floor exactly as a real lap does. Fixing that properly
+# means redesigning lap identity; until then the duplicates are suppressed at READ
+# time by their overlapping time spans — see `laps.py` in the ledger sidecar.
+MIN_CIRCLE_AIRBORNE_AGL_FT = 300
 # A closed lap counts as a touch-and-go when its path passes within this far of
 # the runway segment — i.e. it flew over the runway, at any altitude. (Real
 # pattern work tracks the runway to within ~0.01 nm; an off-field orbit stays
@@ -86,9 +117,32 @@ def samples_in_last(track: list[dict], seconds: int) -> list[dict]:
 
 
 def altitude_agl_from_elevation(sample: dict, elevation_ft: float) -> float | None:
+    """Height above the field in feet, or None when the sample carries no altitude.
+
+    ON-GROUND SENTINEL. ADS-B feeds report `baro_altitude_ft = 0` for an aircraft
+    that is ON THE GROUND. That zero is a FLAG meaning "on the surface" — it is
+    NOT a claim that the aircraft is at 0 ft MSL, and subtracting the field
+    elevation from it is meaningless: at KLMO (field elevation 5,055 ft) it yields
+    -5,055 ft AGL, and nothing at a 5,055 ft field is a mile below the ground. An
+    aircraft on the surface is at 0 ft AGL by definition, so say that directly
+    rather than doing the arithmetic on a sentinel.
+
+    Handling it here changes no number today — the `max(0.0, ...)` clamp below
+    already floors that -5,055 to 0.0 — but it means the clamp is no longer
+    LOAD-BEARING for correctness. The clamp exists to absorb a few hundred feet of
+    barometric error near the field, not to launder a sentinel; the moment anyone
+    relaxes it (say, to allow genuinely negative AGL at a below-field site) the
+    sentinel would escape as a real altitude again. The 0.0 it produces is still
+    an altitude that passes a ceiling test, which is why the circle detector needs
+    MIN_CIRCLE_AIRBORNE_AGL_FT as well — this branch alone does not stop a ground
+    taxi being read as a pattern lap.
+    """
     alt = sample.get("geo_altitude_ft")
     if alt is None:
-        alt = sample.get("baro_altitude_ft")
+        baro = sample.get("baro_altitude_ft")
+        if baro is not None and float(baro) == 0.0:
+            return 0.0  # on-ground sentinel -> 0 ft AGL, never `0 - elevation_ft`
+        alt = baro
     if alt is None:
         return None
     return max(0.0, float(alt) - elevation_ft)
@@ -291,6 +345,12 @@ def _detect_circles_in_samples(
             if (alt := altitude_agl(sample, airport)) is not None
         ]
         if not altitudes or min(altitudes) > MAX_CIRCLE_ALTITUDE_FT_AGL:
+            return None
+        # FLOOR: a pattern circle must have got airborne. The ceiling above is
+        # satisfied trivially by a loop that never left the ground — a taxi circuit
+        # is a closed 360-degree loop whose every sample reads 0 ft AGL. This ADDS
+        # a gate; it relaxes nothing. See MIN_CIRCLE_AIRBORNE_AGL_FT.
+        if max(altitudes) < MIN_CIRCLE_AIRBORNE_AGL_FT:
             return None
 
         radius_values = [

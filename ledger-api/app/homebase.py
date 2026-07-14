@@ -73,7 +73,7 @@ import json
 import sqlite3
 from collections import Counter
 
-from . import db, dwell
+from . import db, dwell, laps
 
 LOCAL = "local"
 NON_LOCAL = "non_local"
@@ -372,13 +372,22 @@ def _build_context(
     circuit_days: dict[str, set[str]] = {}
     origins: dict[str, list[str]] = {}
     origin_days: dict[str, set[tuple[str, str]]] = {}
+    # `arrivals` is published verbatim in the evidence prose below ("... of N
+    # observed arrivals"), so it has to be the same N the rest of the site counts:
+    # lap re-detections are suppressed here exactly as they are in the rollup and
+    # the fee ticker. See laps.py. This lowers `arrivals` and `self_closing` by the
+    # same amount, so the `landings = arrivals - self_closing` split the gates below
+    # turn on is unchanged — the denominators just stop being inflated.
+    phantoms = laps.phantom_lap_op_ids(ro_conn, icao)
     for row in ro_conn.execute(
-        f"SELECT icao24, type, timestamp AS ts, origin_airport_icao AS origin "
+        f"SELECT id, icao24, type, timestamp AS ts, origin_airport_icao AS origin "
         f"FROM operations "
         f"WHERE icao=? AND timestamp BETWEEN ? AND ? AND icao24 IS NOT NULL"
         f"{ac_filter} AND type IN ({arrival_ph})",
         (icao, start_ts, now_ts, *one, *ARRIVAL_TYPES),
     ).fetchall():
+        if row["id"] in phantoms:
+            continue
         ac = row["icao24"]
         arrivals[ac] = arrivals.get(ac, 0) + 1
         if row["type"] in _SELF_CLOSING_ARRIVAL_TYPES:

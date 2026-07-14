@@ -19,7 +19,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import db, dwell, homebase
+from . import db, dwell, homebase, laps
 from .registry.normalize import resolve_display_tail
 from .registry.owner_type import infer_owner_type
 
@@ -41,10 +41,15 @@ RUNWAY_USE_DEFINITIONS: dict[str, str] = {
         "within 300 seconds."
     ),
     "touch_and_go": (
-        "The aircraft flew a closed pattern circuit whose track passed within 0.25 nm "
-        "of the runway. This is a geometric test: it does not confirm that the wheels "
-        "touched the pavement. We count it as a use of the runway, not as a verified "
-        "touchdown."
+        "The aircraft flew a closed pattern circuit that climbed at least 300 ft above "
+        "the field and whose track passed within 0.25 nm of the runway. This is a "
+        "geometric test: it does not confirm that the wheels touched the pavement. We "
+        "count it as a use of the runway, not as a verified touchdown. A circuit that "
+        "never got airborne is not counted at all — an aircraft taxiing back down the "
+        "runway also traces a closed loop over it, and that is ground movement, not a "
+        "lap. Where one lap was detected more than once, we count it once: laps that "
+        "overlap in time cannot both have been flown, so we keep one and discard the "
+        "rest."
     ),
     "low_approach": (
         "The aircraft approached from at least 500 ft above the field, came within "
@@ -138,15 +143,23 @@ def rebuild_rollup(
     wide_end_ts = _local_midnight_ts(last_day + timedelta(days=1), tz) - 1
 
     rows = ro_conn.execute(
-        "SELECT timestamp AS ts, type, icao24 "
+        "SELECT id, timestamp AS ts, type, icao24 "
         "FROM operations "
         f"WHERE icao=? AND type IN ({','.join('?' * len(ROLLUP_TYPES))}) "
         "  AND timestamp BETWEEN ? AND ? AND icao24 IS NOT NULL",
         (icao, *ROLLUP_TYPES, wide_start_ts, wide_end_ts),
     ).fetchall()
 
+    # Drop re-detections of a lap already counted — see laps.py. Applied HERE, at
+    # the one place the rollup is built from `operations`, so every reader of
+    # `daily_operation_rollup` (totals, the daily series, the operator ledger) is
+    # clean by construction and must NOT filter again.
+    phantoms = laps.phantom_lap_op_ids(ro_conn, icao)
+
     counts: dict[tuple[str, str, str], int] = defaultdict(int)
     for row in rows:
+        if row["id"] in phantoms:
+            continue
         day = db.local_day_key(row["ts"], tz)
         counts[(day, row["type"], row["icao24"])] += 1
 
@@ -502,12 +515,17 @@ def annual_projection(ro_conn: sqlite3.Connection, icao: str, now_ts: int) -> di
             "projected_annual_runway_uses": 0,
         }
 
+    # Reads `operations` directly rather than the rollup, so it must suppress lap
+    # re-detections itself (see laps.py). `phantom_lap_op_ids` is computed over the
+    # full history, which is exactly the span this projection counts, so every
+    # suppressed id is inside the count being corrected.
     placeholders = ",".join("?" * len(RUNWAY_USE_TYPES))
-    runway_uses_to_date = ro_conn.execute(
+    counted = ro_conn.execute(
         f"SELECT COUNT(*) AS n FROM operations "
         f"WHERE icao=? AND type IN ({placeholders}) AND icao24 IS NOT NULL",
         (icao, *RUNWAY_USE_TYPES),
     ).fetchone()["n"]
+    runway_uses_to_date = counted - len(laps.phantom_lap_op_ids(ro_conn, icao))
 
     # Floored at 1 day: a deployment only minutes old must not divide by a
     # near-zero span and report an absurd extrapolated rate.

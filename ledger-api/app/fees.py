@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import db, ledger
+from . import db, laps, ledger
 from .registry.normalize import resolve_display_tail
 
 # The ticker's "today" is a ROLLING window, not a local calendar day -- see
@@ -73,31 +73,47 @@ def build_aircraft_fees(ro_conn: sqlite3.Connection, icao: str, now_ts: int) -> 
 
     placeholders = ",".join("?" * len(ledger.RUNWAY_USE_TYPES))
 
+    # Every count below reads `operations` directly rather than the rollup (see the
+    # module docstring), so each one must suppress lap re-detections for itself —
+    # the rollup's own filtering in ledger.rebuild_rollup cannot help here. One
+    # global decision, applied to all four windows, so the ticker, the 24h figure
+    # and the lifetime total can never disagree about which laps were real. See
+    # laps.py.
+    #
+    # Filtered in Python, never as a SQL `id NOT IN (...)`: the suppressed set grows
+    # with history (already ~1k rows over a month of pattern work at KLMO) and would
+    # run straight into SQLite's bound-parameter ceiling. The queries keep their
+    # indexed range-scan shape and return ids instead of a bare COUNT(*).
+    phantoms = laps.phantom_lap_op_ids(ro_conn, icao)
+
     # Rolling 24h count -- one indexed range scan on operations(icao,
     # timestamp) over a single day. Deliberately NOT a full-history scan; see
     # the module docstring for why this can never come from the rollup.
     since_ts = now_ts - ROLLING_WINDOW_SECONDS
     rolling_rows = ro_conn.execute(
-        f"SELECT icao24, COUNT(*) AS n FROM operations "
+        f"SELECT id, icao24 FROM operations "
         f"WHERE icao=? AND type IN ({placeholders}) AND icao24 IS NOT NULL "
-        f"  AND timestamp BETWEEN ? AND ? "
-        f"GROUP BY icao24",
+        f"  AND timestamp BETWEEN ? AND ?",
         (icao, *ledger.RUNWAY_USE_TYPES, since_ts, now_ts),
     ).fetchall()
-    rolling_by_aircraft: dict[str, int] = {row["icao24"]: row["n"] for row in rolling_rows}
+    rolling_by_aircraft: dict[str, int] = {}
+    for row in rolling_rows:
+        if row["id"] in phantoms:
+            continue
+        rolling_by_aircraft[row["icao24"]] = rolling_by_aircraft.get(row["icao24"], 0) + 1
     rolling_total = sum(rolling_by_aircraft.values())
 
     # Trailing 20-minute rate -- another indexed range scan on operations(icao,
     # timestamp), same shape as the rolling-24h query above, just a shorter
     # window and a scalar count rather than a per-aircraft breakdown.
     rate_since_ts = now_ts - RATE_WINDOW_SECONDS
-    rate_row = ro_conn.execute(
-        f"SELECT COUNT(*) AS n FROM operations "
+    rate_rows = ro_conn.execute(
+        f"SELECT id FROM operations "
         f"WHERE icao=? AND type IN ({placeholders}) AND icao24 IS NOT NULL "
         f"  AND timestamp BETWEEN ? AND ?",
         (icao, *ledger.RUNWAY_USE_TYPES, rate_since_ts, now_ts),
-    ).fetchone()
-    rate_runway_uses = int(rate_row["n"]) if rate_row else 0
+    ).fetchall()
+    rate_runway_uses = sum(1 for row in rate_rows if row["id"] not in phantoms)
 
     # Full history for `total` plus local-calendar month/year-to-date. This
     # airport's ADS-B history is short (weeks, as of writing), so scanning
@@ -105,7 +121,7 @@ def build_aircraft_fees(ro_conn: sqlite3.Connection, icao: str, now_ts: int) -> 
     # way `total` is guaranteed to cover ALL of `operations`, not just
     # whatever window the rollup happens to have rebuilt.
     rows = ro_conn.execute(
-        f"SELECT icao24, callsign, timestamp AS ts FROM operations "
+        f"SELECT id, icao24, callsign, timestamp AS ts FROM operations "
         f"WHERE icao=? AND type IN ({placeholders}) AND icao24 IS NOT NULL",
         (icao, *ledger.RUNWAY_USE_TYPES),
     ).fetchall()
@@ -113,6 +129,8 @@ def build_aircraft_fees(ro_conn: sqlite3.Connection, icao: str, now_ts: int) -> 
     counts: dict[str, dict[str, int]] = {}
     latest_callsign: dict[str, tuple[int, str]] = {}
     for row in rows:
+        if row["id"] in phantoms:
+            continue
         icao24 = row["icao24"]
         entry = counts.setdefault(icao24, {"total": 0, "month": 0, "year": 0})
         entry["total"] += 1
