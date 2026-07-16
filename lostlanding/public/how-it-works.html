@@ -1,0 +1,1091 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>How the Runway Ledger Works &mdash; The Lost Landing (KLMO)</title>
+<meta name="description" content="A plain-language guide to how the Lost Landing ledger counts runway use at Vance Brand Municipal Airport (KLMO): the landing-fee arithmetic, how locals and visitors are told apart, and how real visits are measured.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@500;600;700&display=swap" rel="stylesheet">
+<style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;padding:0}img{max-width:100%}</style>
+</head>
+<body>
+<style>
+
+
+:root {
+  --ink: #071c26;
+  --navy: #061c25;
+  --teal: #0b3b47;
+  --teal2: #145e68;
+  --gold: #d9a441;
+  --gold2: #f4d37b;
+  --cream: #f5edda;
+  --paper: #ece0c5;
+  --rust: #a74d2a;
+  --white: #fffdf5;
+  --ok-green: #4c7a5a;
+  --line: #d9a44155;
+  --line-strong: #d9a441aa;
+  --serif: "Cormorant Garamond", Georgia, "Times New Roman", serif;
+  --sans: "Barlow Condensed", "Roboto Condensed", "Arial Narrow", system-ui, sans-serif;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+.ledger-doc {
+  font-family: var(--sans);
+  color: var(--ink);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* Full-bleed cream ground + faint deco sunburst, independent of the host skeleton. */
+.page-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background: var(--cream);
+  pointer-events: none;
+}
+.sunburst {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.07;
+  pointer-events: none;
+  background: repeating-conic-gradient(from 0deg at 50% 10%, var(--gold) 0deg 3deg, transparent 3deg 10deg);
+}
+
+.ledger-doc a { color: inherit; }
+.ledger-doc a:focus-visible,
+.ledger-doc button:focus-visible {
+  outline: 3px solid var(--gold2);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+/* ---------- topbar ---------- */
+.topbar {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  padding: 14px 6vw;
+  background: #061c25f2;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(10px);
+}
+.brand {
+  color: var(--gold2);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-decoration: none;
+  font-size: 1.05rem;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+.wing { font-size: 0.7em; margin: 0 0.5em; color: var(--gold); }
+.topbar nav { display: flex; gap: 22px; flex-wrap: wrap; }
+.topbar nav a {
+  color: #fff9e8;
+  text-decoration: none;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.86rem;
+}
+.topbar nav a:hover, .topbar nav a:focus-visible { color: var(--gold2); }
+.topbar nav a.topbar-back {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 5px 14px;
+  color: var(--gold2);
+  font-weight: 700;
+}
+.topbar nav a.topbar-back:hover, .topbar nav a.topbar-back:focus-visible {
+  background: var(--gold2);
+  color: var(--ink);
+}
+
+/* ---------- type + section scaffolding ---------- */
+.eyebrow, .kicker {
+  color: var(--gold);
+  letter-spacing: 0.22em;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin: 0 0 0.6em;
+  font-size: 0.92rem;
+}
+.dark-panel .kicker, .dark-panel .eyebrow { color: var(--gold2); }
+
+.section-pad { padding: 70px max(7vw, calc((100% - 1300px) / 2)); position: relative; }
+.section-pad.tight { padding-top: 36px; }
+
+/* Editorial split: section heading on a left rail, body filling the right. */
+.split {
+  display: grid;
+  grid-template-columns: minmax(240px, 330px) minmax(0, 1fr);
+  gap: 28px 60px;
+  align-items: start;
+}
+.split > .section-heading { margin-bottom: 0; max-width: none; }
+.split > .section-heading .dek { font-size: 1.05rem; }
+.note-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 24px 40px; margin-top: 30px; }
+.note-pair .note { margin-top: 0; max-width: none; }
+.fee-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 44px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.section-heading { max-width: 42rem; margin-bottom: 30px; }
+.section-heading h2 {
+  font-family: var(--serif);
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  line-height: 0.98;
+  margin: 0.15em 0 0.35em;
+  text-wrap: balance;
+}
+.section-heading .dek {
+  font-size: 1.18rem;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 42rem;
+}
+
+/* Reading column */
+.prose { max-width: 42rem; }
+.prose p { margin: 0 0 1.1em; font-size: 1.14rem; }
+.prose p:last-child { margin-bottom: 0; }
+.prose strong { font-weight: 700; }
+.prose em { font-style: italic; }
+.wide { max-width: 52rem; }
+
+.dark-panel {
+  background: var(--ink);
+  color: var(--white);
+  position: relative;
+}
+.dark-panel .prose p { color: #efe6cf; }
+.dark-panel::before {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  border: 1px solid var(--line);
+  pointer-events: none;
+}
+.dark-panel > * { position: relative; }
+
+.art-card {
+  background: #fffaf0;
+  border: 1px solid #c39237;
+  box-shadow: 8px 8px 0 var(--teal);
+}
+
+.gold-rule {
+  border: none;
+  border-top: 1px solid var(--line-strong);
+  max-width: 1200px;
+  margin: 0 7vw;
+}
+.deco-rule {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--gold);
+  margin: 0 0 26px;
+  max-width: 64ch;
+}
+.deco-rule::before, .deco-rule::after {
+  content: "";
+  height: 1px;
+  background: var(--line-strong);
+  flex: 1;
+}
+.deco-rule span { font-size: 0.8em; letter-spacing: 0.3em; }
+
+/* ---------- hero ---------- */
+.hero {
+  position: relative;
+  background: var(--navy);
+  color: var(--white);
+  overflow: hidden;
+}
+.hero-bg {
+  position: absolute;
+  inset: 0;
+  background: url(/how-it-works-hero.jpg) 68% 44% / cover no-repeat;
+  filter: saturate(1.03) contrast(1.05);
+}
+.hero-overlay {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, #061c25f4 0%, #061c25d6 32%, #061c256e 58%, #061c251a 80%, transparent),
+    linear-gradient(0deg, #061c25e6, transparent 46%);
+}
+.hero-inner {
+  position: relative;
+  width: min(1300px, 100% - 14vw);
+  margin-inline: auto;
+  padding: 76px 0 44px;
+}
+.hero-copy { max-width: 40rem; }
+.hero .eyebrow { color: var(--gold2); }
+.hero h1 {
+  font-family: var(--serif);
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: clamp(2.6rem, 6vw, 5rem);
+  line-height: 0.92;
+  margin: 0.1em 0 0.28em;
+  text-shadow: 0 4px 20px #0008;
+  text-wrap: balance;
+}
+.hero h1 .sub {
+  display: block;
+  color: var(--gold2);
+  font-size: 0.44em;
+  letter-spacing: 0.02em;
+  line-height: 1.15;
+  margin-top: 0.5em;
+  text-transform: uppercase;
+  text-shadow: none;
+}
+.hero-lede {
+  font-size: 1.3rem;
+  line-height: 1.5;
+  max-width: 36rem;
+  color: #efe6cf;
+  margin: 0 0 1.1em;
+}
+.hero-lede strong { color: var(--gold2); font-weight: 700; }
+.byline {
+  font-size: 0.94rem;
+  letter-spacing: 0.04em;
+  color: #cabf9e;
+  max-width: 38rem;
+  margin: 0 0 30px;
+  line-height: 1.5;
+}
+
+.floor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  border: 1px solid var(--gold2);
+  color: var(--gold2);
+  padding: 8px 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.floor-chip::before { content: "\25B2"; font-size: 0.8em; }
+
+/* hero meter strip */
+.hero-meter-wrap {
+  position: relative;
+  background: #061c25ea;
+  border-top: 1px solid var(--line-strong);
+}
+.hero-meter {
+  width: min(1300px, 100% - 14vw);
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+.hero-meter > div { padding: 22px 30px; border-right: 1px solid var(--line); }
+.hero-meter > div:first-child { padding-left: 0; }
+.hero-meter > div:last-child { padding-right: 0; border-right: none; }
+.hero-meter .label {
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--gold2);
+  font-size: 0.82rem;
+  margin-bottom: 4px;
+}
+.hero-meter strong {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 1.5rem;
+  display: block;
+  line-height: 1.1;
+}
+.hero-meter .val-sans { font-family: var(--sans); font-size: 1.35rem; letter-spacing: 0.02em; }
+.hero-meter .sub { display: block; font-size: 0.8rem; color: #cfead2; opacity: 0.85; margin-top: 4px; }
+
+/* ---------- definition / method cards ---------- */
+.method-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-top: 8px;
+  max-width: none;
+}
+.method-card { padding: 22px 24px; border: 1px solid var(--line-strong); background: #fffaf022; }
+.method-card h3 {
+  font-family: var(--serif);
+  font-size: 1.55rem;
+  text-transform: uppercase;
+  font-weight: 700;
+  margin: 0 0 4px;
+  color: var(--teal2);
+  line-height: 1;
+}
+.method-card .type-tag {
+  display: inline-block;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--rust);
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.method-card p { line-height: 1.5; margin: 0; font-size: 1.02rem; }
+
+/* ---------- callouts / notes ---------- */
+.note {
+  border-left: 4px solid var(--gold);
+  padding: 4px 0 4px 20px;
+  font-size: 1.06rem;
+  line-height: 1.55;
+  max-width: 42rem;
+  margin: 24px 0 0;
+}
+.note strong { color: var(--rust); }
+.dark-panel .note strong { color: var(--gold2); }
+
+.floor-callout {
+  margin-top: 34px;
+  background: #0b2530;
+  color: var(--white);
+  border: 1px solid var(--gold);
+  padding: 24px 28px;
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  max-width: 900px;
+}
+.floor-callout .glyph { font-size: 2rem; color: var(--gold2); line-height: 1; }
+.floor-callout p { margin: 0; font-size: 1.16rem; line-height: 1.5; font-weight: 600; }
+.floor-callout strong { color: var(--gold2); }
+
+/* ---------- formula + worked example ---------- */
+.formula-stack { display: grid; gap: 14px; margin: 6px 0 0; max-width: 760px; }
+.formula {
+  background: #0b2530;
+  color: var(--white);
+  border: 1px solid var(--line-strong);
+  padding: 18px 22px;
+  font-size: clamp(1.05rem, 2.4vw, 1.4rem);
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+.formula .op, .formula .eq { color: var(--gold2); font-weight: 700; padding: 0 0.15em; }
+.formula .term { color: #efe6cf; }
+.formula .lbl {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 8px;
+}
+
+.example {
+  margin-top: 30px;
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 24px;
+  align-items: start;
+}
+.example-steps { display: grid; gap: 0; align-self: start; }
+.example-steps .step {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: baseline;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 1.06rem;
+}
+.example-steps .step:first-child { padding-top: 0; }
+.example-steps .step .k { color: #e7ddc6; }
+.example-steps .step .v {
+  font-weight: 700;
+  color: var(--gold2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.example-steps .caption { font-size: 0.9rem; color: #cabf9e; margin: 14px 0 0; line-height: 1.5; }
+
+.money-card {
+  padding: 24px 26px;
+  background: linear-gradient(145deg, var(--teal), var(--navy));
+  color: var(--white);
+  box-shadow: 8px 8px 0 var(--gold);
+  border: 1px solid var(--line-strong);
+}
+.money-card .m-label {
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.86rem;
+  color: var(--gold2);
+}
+.money-card .m-figure {
+  display: block;
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(2.6rem, 6vw, 4rem);
+  color: var(--gold2);
+  line-height: 1;
+  margin: 8px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+.money-card .m-sub { font-size: 0.9rem; color: #cfead2; }
+.money-card .m-alt {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+}
+.money-card .m-alt div span { display: block; }
+.money-card .m-alt .a-fee { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gold2); }
+.money-card .m-alt .a-val { font-weight: 700; font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+
+/* projection dashed treatment */
+.projection-band {
+  margin-top: 30px;
+  border: 1px dashed var(--gold);
+  background: #fffaf0;
+  padding: 26px 30px;
+  max-width: none;
+}
+.projection-band .p-tag {
+  display: inline-block;
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--rust);
+  font-weight: 700;
+  border: 1px solid var(--rust);
+  padding: 3px 8px;
+  margin-bottom: 12px;
+}
+.projection-band p { margin: 0 0 0.7em; font-size: 1.06rem; line-height: 1.55; max-width: 46rem; }
+.projection-band p:last-child { margin-bottom: 0; }
+.projection-band .formula { background: #0b2530; margin-top: 6px; }
+
+/* ---------- locality cards ---------- */
+.locality-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-top: 8px;
+  max-width: none;
+}
+.locality-card {
+  background: #fffaf0;
+  border: 1px solid #c39237;
+  box-shadow: 6px 6px 0 var(--teal);
+  padding: 24px;
+}
+.locality-card.is-unclassified { border-color: var(--rust); box-shadow: 6px 6px 0 var(--rust); }
+.badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+.badge.b-local { background: #cfe3d3; color: #22492c; }
+.badge.b-unclassified { background: #ecdcc0; color: #6b4a1c; }
+.badge.b-nonlocal { background: #e3cfd3; color: #5c2230; }
+.locality-card h3 { margin: 14px 0 6px; font-family: var(--serif); font-size: 1.5rem; text-transform: uppercase; font-weight: 700; }
+.locality-card p { margin: 0; font-size: 0.98rem; line-height: 1.5; }
+
+/* signal list */
+.signal-list { display: grid; gap: 12px; margin: 8px 0 0; max-width: none; list-style: none; padding: 0; }
+.signal-list li {
+  display: grid;
+  grid-template-columns: minmax(150px, 190px) 1fr;
+  gap: 18px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--line);
+  align-items: baseline;
+}
+.signal-list li:first-child { border-top: 1px solid var(--line); }
+.signal-list .s-name {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--teal2);
+  font-size: 0.98rem;
+}
+.signal-list .s-body { font-size: 1.04rem; line-height: 1.5; }
+.signal-list .s-body strong { color: var(--rust); }
+
+/* ---------- who stopped headline ---------- */
+.visits-headline {
+  background: var(--ink);
+  color: var(--white);
+  border: 1px solid var(--gold);
+  padding: 40px 40px;
+  text-align: center;
+  max-width: 900px;
+  margin: 8px auto 0;
+}
+.visits-headline .big {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(3rem, 9vw, 5rem);
+  color: var(--gold2);
+  margin: 0 0 0.15em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.visits-headline p { margin: 0 auto; max-width: 40rem; font-size: 1.14rem; line-height: 1.5; color: #efe6cf; }
+.visits-headline p strong { color: var(--white); }
+
+/* ---------- obligation ---------- */
+.obligation-quotes { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 4px 0 28px; max-width: none; }
+.obligation-quote { margin: 0; padding: 26px 28px; }
+.obligation-quote blockquote {
+  margin: 0 0 14px;
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 1.24rem;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.obligation-quote cite {
+  display: block;
+  font-style: normal;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--teal2);
+}
+.obligation-quote cite a { color: var(--rust); }
+
+.grant {
+  background: var(--ink);
+  color: var(--white);
+  border: 1px solid var(--line-strong);
+  padding: 30px 34px;
+  max-width: none;
+}
+.grant .g-figure {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(2.6rem, 5.5vw, 3.8rem);
+  color: var(--gold2);
+  margin: 0 0 0.1em;
+  line-height: 1;
+}
+.grant .g-detail { margin: 0; font-size: 1.06rem; line-height: 1.5; color: #efe6cf; }
+.grant .g-kicker {
+  margin: 16px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--gold2);
+  line-height: 1.4;
+}
+
+/* ---------- footer ---------- */
+.site-footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  padding: 28px 7vw;
+  background: #031117;
+  color: var(--gold);
+  letter-spacing: 0.06em;
+  font-size: 0.9rem;
+}
+.site-footer .disclaimer { max-width: 70ch; color: #b9a978; letter-spacing: 0.02em; line-height: 1.5; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 940px) {
+  .method-grid, .locality-grid { grid-template-columns: 1fr; }
+  .obligation-quotes { grid-template-columns: 1fr; }
+  .example, .fee-top, .note-pair { grid-template-columns: 1fr; }
+  .split { grid-template-columns: 1fr; gap: 18px; }
+  .hero-meter { grid-template-columns: 1fr; }
+  .hero-meter > div { border-right: none; border-bottom: 1px solid var(--line); padding: 16px 0; }
+  .hero-meter > div:last-child { border-bottom: none; }
+  .signal-list li { grid-template-columns: 1fr; gap: 4px; }
+}
+@media (max-width: 620px) {
+  .section-pad { padding: 52px 7vw; }
+  .topbar nav { gap: 14px; }
+}
+</style>
+
+<div class="ledger-doc">
+  <div class="page-bg"></div>
+  <div class="sunburst"></div>
+
+  <header class="topbar">
+    <a class="brand" href="/">The Lost Landing <span class="wing">&#9992;</span> KLMO</a>
+    <nav aria-label="Sections">
+      <a class="topbar-back" href="/">&larr; The Ledger</a>
+      <a href="#count">What we count</a>
+      <a href="#fee">The fee math</a>
+      <a href="#locals">Locals</a>
+      <a href="#stopped">Real visits</a>
+      <a href="#obligation">Why it matters</a>
+    </nav>
+  </header>
+
+  <main>
+    <!-- HERO -->
+    <section class="hero" id="top">
+      <div class="hero-bg" role="img" aria-label="Aerial view of Vance Brand Municipal Airport"></div>
+      <div class="hero-overlay"></div>
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <p class="eyebrow">Longmont, Colorado &bull; Vance Brand Municipal Airport (KLMO)</p>
+          <h1>How the Runway Ledger Works
+            <span class="sub">A plain-language guide to the math &mdash; showing its work</span>
+          </h1>
+          <p class="hero-lede">
+            The airport has no control tower, so no one keeps a log of who used the runway. Instead of
+            <em>estimating</em>, this ledger <strong>counts</strong> &mdash; one aircraft, one runway pass at a time
+            &mdash; from the same public ADS-B signals any flight-tracking site receives.
+          </p>
+          <p class="byline">
+            Prepared for the City of Longmont and the public. Every figure here is produced by the same code that runs
+            the public ledger; this page explains that arithmetic and shows its work.
+          </p>
+          <span class="floor-chip">Every count is a floor, never an estimate</span>
+        </div>
+      </div>
+
+      <div class="hero-meter-wrap">
+        <div class="hero-meter">
+          <div>
+            <span class="label">The billable unit</span>
+            <strong class="val-sans">One runway use</strong>
+            <span class="sub">a landing, a touch-and-go, or a low approach &mdash; never a takeoff</span>
+          </div>
+          <div>
+            <span class="label">The method</span>
+            <strong class="val-sans">Counted, not estimated</strong>
+            <span class="sub">discrete ADS-B-detected events, not an FAA Form 5010 planning figure</span>
+          </div>
+          <div>
+            <span class="label">The direction of error</span>
+            <strong class="val-sans">Always a floor</strong>
+            <span class="sub">planes without ADS-B are invisible, so real activity is higher &mdash; never lower</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PROBLEM -->
+    <section class="section-pad" id="problem">
+      <div class="split">
+        <div class="section-heading">
+          <p class="kicker">The problem we set out to solve</p>
+          <h2>An untowered field that only had estimates</h2>
+        </div>
+        <div class="prose">
+          <p>
+            Vance Brand is an <strong>untowered</strong> airport. There is no control tower keeping a log of who used the
+            runway or how often. When a field like this reports its traffic, the number is almost always an
+            <strong>FAA Form 5010 estimate</strong> &mdash; a planning figure, not a count of real events. The commonly
+            cited figure for KLMO is on the order of <strong>120,000 operations a year</strong>, and that is exactly what
+            it says it is: an estimate.
+          </p>
+          <p>
+            This ledger is different. Every airplane with an ADS-B transmitter broadcasts its position, altitude, and
+            speed several times a second. We watch those broadcasts near the airport and record each discrete event we
+            can positively identify. From that follows the single most important rule on the whole page:
+          </p>
+        </div>
+      </div>
+      <div class="floor-callout">
+        <span class="glyph" aria-hidden="true">&#9650;</span>
+        <p>
+          <strong>Every number on this ledger is a floor, never an estimate.</strong> Aircraft without ADS-B are
+          invisible to us, and coverage has gaps &mdash; so the true activity is always <em>higher</em> than what we
+          report, never lower. If we cannot prove it, we do not publish it.
+        </p>
+      </div>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- WHAT WE COUNT -->
+    <section class="section-pad" id="count">
+      <div class="section-heading">
+        <p class="kicker">What we count</p>
+        <h2>The &ldquo;runway use&rdquo;</h2>
+        <p class="dek">
+          The billable unit is a <em>runway use</em> &mdash; one arrival at the runway. It is the most important
+          definition on the page, and it comes in exactly three kinds.
+        </p>
+      </div>
+
+      <div class="method-grid">
+        <div class="method-card">
+          <h3>Landing</h3>
+          <span class="type-tag">Runway use</span>
+          <p>
+            The aircraft descended from at least 500&nbsp;ft above the field, came within 1.5&nbsp;nm of the runway at
+            200&nbsp;ft or lower, and did not climb back out within 300&nbsp;seconds.
+          </p>
+        </div>
+        <div class="method-card">
+          <h3>Touch-and-go</h3>
+          <span class="type-tag">Runway use</span>
+          <p>
+            The aircraft flew a closed pattern loop that climbed at least 300&nbsp;ft above the field and passed within
+            0.25&nbsp;nm of the runway. This is a <em>geometric</em> test &mdash; so we count it as a use of the runway,
+            not a verified touchdown.
+          </p>
+        </div>
+        <div class="method-card">
+          <h3>Low approach</h3>
+          <span class="type-tag">Runway use</span>
+          <p>
+            The aircraft approached low and slow (200&nbsp;ft or lower, 90&nbsp;knots or less), spent no more than
+            60&nbsp;seconds near the ground, and climbed back out.
+          </p>
+        </div>
+      </div>
+
+      <div class="note-pair">
+        <p class="note">
+          <strong>Why not just count &ldquo;operations&rdquo;?</strong> Because an FAA operation is one takeoff <em>or</em>
+          one landing &mdash; so a single touch-and-go is <em>two</em> operations. Multiplying a fee by an operations count
+          would double-charge every touch-and-go on the field. Counting runway uses &mdash; arrivals only, never takeoffs
+          &mdash; is what keeps the money math honest.
+        </p>
+        <p class="note">
+          <strong>We also never double-count one lap.</strong> Because the detector scans in overlapping time windows, a
+          single physical pattern lap can occasionally get written down twice. The tell is that the two records
+          <em>overlap in time</em> &mdash; you cannot fly two seven-minute circuits that start a minute apart &mdash; so
+          when laps overlap, we keep one and discard the rest. When in doubt we drop the lap, because an inflated count is
+          the one mistake the ledger cannot survive.
+        </p>
+      </div>
+    </section>
+
+    <!-- FEE MATH -->
+    <section class="section-pad dark-panel" id="fee">
+      <div class="section-heading">
+        <p class="kicker">The landing-fee math</p>
+        <h2 style="color:#fff;">What if each runway use paid something?</h2>
+        <p class="dek" style="color:#e9e0ca;">
+          The City charges nothing for the runway today. The ledger asks a simple counterfactual, with arithmetic
+          plain enough for anyone to check.
+        </p>
+      </div>
+
+      <div class="fee-top">
+        <div class="formula-stack">
+          <div class="formula">
+            <span class="lbl">Step 1 &mdash; the observed daily rate</span>
+            <span class="term">daily rate</span> <span class="eq">=</span>
+            <span class="term">runway uses in the window</span> <span class="op">&divide;</span>
+            <span class="term">30 days</span>
+          </div>
+          <div class="formula">
+            <span class="lbl">Step 2 &mdash; apply a fee you choose</span>
+            <span class="term">annual revenue</span> <span class="eq">=</span>
+            <span class="term">daily rate</span> <span class="op">&times;</span>
+            <span class="term">fee</span> <span class="op">&times;</span>
+            <span class="term">billable share</span> <span class="op">&times;</span>
+            <span class="term">365</span>
+          </div>
+        </div>
+        <div class="prose">
+          <p>
+            The <strong style="color:var(--gold2)">fee</strong> is a slider on the live site &mdash; presets of
+            <strong style="color:var(--gold2)">$5 (Conservative)</strong>,
+            <strong style="color:var(--gold2)">$10 (Fair-use, the default)</strong>, and
+            <strong style="color:var(--gold2)">$15 (Impact)</strong>, running from $0 to $30. The
+            <strong style="color:var(--gold2)">billable share</strong> is a second slider (default 100%) that models
+            exemptions such as based-aircraft discounts or training waivers &mdash; a modeling assumption you control,
+            not a figure the data reports.
+          </p>
+        </div>
+      </div>
+
+      <div class="example">
+        <div class="example-steps">
+          <div class="step"><span class="k">Runway uses counted in a 30-day window</span><span class="v">3,000</span></div>
+          <div class="step"><span class="k">&divide; 30 days &nbsp;=&nbsp; daily rate</span><span class="v">100 / day</span></div>
+          <div class="step"><span class="k">&times; $10 fee &nbsp;=&nbsp; per day</span><span class="v">$1,000</span></div>
+          <div class="step"><span class="k">&times; 30 &nbsp;=&nbsp; per month</span><span class="v">$30,000</span></div>
+          <div class="step"><span class="k">&times; 365 &nbsp;=&nbsp; per year</span><span class="v">$365,000</span></div>
+          <p class="caption">
+            Illustrative &mdash; 3,000 is a stand-in so the arithmetic is easy to follow. The live ledger runs this same
+            formula on the <em>real</em> observed count. Where zero uses are observed, it honestly shows $0: the
+            arithmetic is not broken, there was simply nothing to count.
+          </p>
+        </div>
+        <div class="money-card">
+          <span class="m-label">Illustrative annual revenue</span>
+          <span class="m-figure">$365,000</span>
+          <span class="m-sub">at the $10 default fee, 100% billable, from the observed daily rate</span>
+          <div class="m-alt">
+            <div><span class="a-fee">at $5</span><span class="a-val">$182,500</span></div>
+            <div><span class="a-fee">at $15</span><span class="a-val">$547,500</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PROJECTION -->
+    <section class="section-pad tight" id="projection">
+      <div class="section-heading">
+        <p class="kicker">The one number that is not a floor</p>
+        <h2>The projected annual figure</h2>
+      </div>
+      <div class="projection-band">
+        <span class="p-tag">Projected, not counted</span>
+        <p>
+          The headline &ldquo;projected annual&rdquo; figure extrapolates our own measured rate across a full year:
+        </p>
+        <div class="formula">
+          <span class="term">projected annual runway uses</span> <span class="eq">=</span>
+          <span class="term">(</span><span class="term">uses to date</span> <span class="op">&divide;</span>
+          <span class="term">days counting</span><span class="term">)</span> <span class="op">&times;</span>
+          <span class="term">365</span>
+        </div>
+        <p style="margin-top:14px;">
+          Unlike everything else on the page, this one carries an <strong>over-estimate</strong> risk, not a floor. Our
+          data so far sits in <strong>Colorado&rsquo;s peak flying season</strong> (mid-June into mid-July); winters are
+          quieter, so a full year at this rate is very likely <em>higher</em> than reality &mdash; and we say so plainly
+          wherever the number appears. Notably, this count-based projection lands in the <em>same order of magnitude</em>
+          as the FAA&rsquo;s independent 120,000-operations estimate: two entirely different methods, by two different
+          parties, arriving at a comparable scale.
+        </p>
+      </div>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- LOCALS -->
+    <section class="section-pad" id="locals">
+      <div class="section-heading">
+        <p class="kicker">Locals vs. visitors</p>
+        <h2>How an aircraft is classified</h2>
+        <p class="dek">
+          A common argument for a small airport is that it brings visitors who spend money in town. That is a testable
+          claim &mdash; so the ledger sorts aircraft into three buckets, under deliberately cautious rules, because
+          these labels sit next to named businesses.
+        </p>
+      </div>
+
+      <div class="locality-grid">
+        <div class="locality-card">
+          <span class="badge b-local">Local</span>
+          <h3>Based here</h3>
+          <p>Positive evidence the aircraft lives at KLMO &mdash; chiefly that we watched it stay overnight, or that it is sitting on the field right now.</p>
+        </div>
+        <div class="locality-card is-unclassified">
+          <span class="badge b-unclassified">Unclassified</span>
+          <h3>We don&rsquo;t know</h3>
+          <p>Not enough positive evidence either way. This is where <em>most</em> aircraft land &mdash; and we show that count openly rather than guessing.</p>
+        </div>
+        <div class="locality-card">
+          <span class="badge b-nonlocal">Non-local</span>
+          <h3>A visitor</h3>
+          <p>Reserved for a repeatedly observed arrival from a specific named other airport. In practice this is nearly unreachable &mdash; by design.</p>
+        </div>
+      </div>
+
+      <p class="note wide" style="margin-top:30px;">
+        Every classification ships with a <strong>receipt</strong> &mdash; the specific evidence behind it &mdash; and
+        the whole model rests on one principle: <em>absence is never evidence.</em> We never penalize an aircraft for
+        something we <em>failed</em> to see. Only things we positively observed can move a classification:
+      </p>
+
+      <ul class="signal-list">
+        <li>
+          <span class="s-name">Overnight stays</span>
+          <span class="s-body">An aircraft we watched land and not leave for 8+ hours almost certainly sleeps here. This is the <strong>strongest</strong> sign of a home aircraft.</span>
+        </li>
+        <li>
+          <span class="s-name">Still on the field</span>
+          <span class="s-body">If the last thing we saw was a landing with no departure since, we treat it as still parked here &mdash; and we will not call such an aircraft a visitor.</span>
+        </li>
+        <li>
+          <span class="s-name">Where arrivals come from</span>
+          <span class="s-body">The <strong>only</strong> signal that can argue an aircraft is a visitor &mdash; and it requires repeatedly watching it fly in from a specific named airport.</span>
+        </li>
+        <li>
+          <span class="s-name">Registered city</span>
+          <span class="s-body">If the FAA registry lists the aircraft&rsquo;s mailing city as Longmont, that nudges <em>toward</em> local. A registrant in another town is <strong>not</strong> counted against it.</span>
+        </li>
+      </ul>
+
+      <p class="note wide" style="margin-top:26px;">
+        The model is <strong>intentionally asymmetric.</strong> A false &ldquo;local&rdquo; label slightly understates
+        the ledger and costs no one anything. A false &ldquo;non-local&rdquo; label is a public accusation against a
+        named business &mdash; so we take the harmless error every time. We would rather leave a genuine visitor
+        unlabeled for another month than wrongly brand a local business a visitor for a day.
+      </p>
+    </section>
+
+    <!-- WHO STOPPED -->
+    <section class="section-pad dark-panel" id="stopped">
+      <div class="section-heading">
+        <p class="kicker">Who actually stopped</p>
+        <h2 style="color:#fff;">A runway use is not a visit</h2>
+        <p class="dek" style="color:#e9e0ca;">
+          Arriving at a runway is not the same as stopping in Longmont &mdash; and the ledger measures the difference.
+        </p>
+      </div>
+
+      <div class="visits-headline">
+        <p class="big">Most</p>
+        <p>
+          of all runway use is an aircraft that <strong>never stopped at all</strong> &mdash; touch-and-goes and low
+          approaches that touched down (or didn&rsquo;t) and were airborne again in seconds. The live figure is shown
+          as an exact percentage of the window&rsquo;s total.
+        </p>
+      </div>
+
+      <div class="prose" style="margin: 30px auto 0; max-width: 46rem;">
+        <p>
+          For the landings that <em>did</em> stop, we measure time on the ground by pairing each landing with that
+          aircraft&rsquo;s next takeoff. A stay of <strong style="color:var(--gold2)">20 minutes or more</strong> counts
+          as an aircraft that &ldquo;actually stopped and did something&rdquo; &mdash; refueled, ate, dropped someone
+          off. That 20-minute line is our own judgment call, not an FAA standard, and we label it as such.
+        </p>
+        <p>
+          We only report this for landings where we could see <em>both</em> the arrival and the departure, and we
+          publish that <strong style="color:var(--gold2)">coverage</strong> fraction openly. The real number of true
+          visits is higher than what we can prove &mdash; never lower.
+        </p>
+      </div>
+    </section>
+
+    <!-- OPERATORS -->
+    <section class="section-pad" id="operators">
+      <div class="split">
+        <div class="section-heading">
+          <p class="kicker">Naming operators &mdash; and protecting people</p>
+          <h2>Businesses are named. People are not.</h2>
+        </div>
+        <div class="prose">
+          <p>
+            The ledger ranks activity by <strong>operator</strong> (the business), never by tail number. An N-number
+            resolves to an owner&rsquo;s name and home address in a single FAA lookup, and a public per-aircraft money
+            leaderboard would be a harassment vector aimed at individual pilots &mdash; some of them students in rented
+            aircraft.
+          </p>
+          <p>
+            So <strong>only organizations are named</strong> &mdash; flight schools, skydiving operators, clubs,
+            corporations, government. Individually owned aircraft, including single-member LLCs and trusts (just how a
+            person holds a personal plane), are pooled into a &ldquo;Private / unaffiliated&rdquo; bucket and never named.
+            No registrant street address is ever published.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- WHY IT MATTERS -->
+    <section class="section-pad" id="obligation">
+      <div class="section-heading">
+        <p class="kicker">Why this matters for the City</p>
+        <h2>The excuse this ledger dissolves</h2>
+        <p class="dek">
+          When Longmont accepts federal airport money, it signs a promise about what the airport&rsquo;s fee structure
+          has to try to be.
+        </p>
+      </div>
+
+      <div class="obligation-quotes">
+        <figure class="obligation-quote art-card">
+          <blockquote>
+            &ldquo;&hellip; make the airport as self-sustaining as possible under the circumstances existing at the
+            airport, including volume of traffic and economy of collection.&rdquo;
+          </blockquote>
+          <cite>49 U.S.C. &sect; 47107(a)(13)(A)</cite>
+        </figure>
+        <figure class="obligation-quote art-card">
+          <blockquote>
+            &ldquo;&hellip; a fee and rental structure &hellip; which will make the airport as self-sustaining as
+            possible &hellip; taking into account such factors as the volume of traffic and economy of collection.&rdquo;
+          </blockquote>
+          <cite>FAA Grant Assurance 24 &mdash; signed by the City of Longmont</cite>
+        </figure>
+      </div>
+
+      <div class="grant">
+        <p class="g-figure">$725,000</p>
+        <p class="g-detail">
+          The FAA awarded Vance Brand Municipal Airport this sum in 2026, under the Airport Improvement Program, to
+          reconstruct a taxilane.
+        </p>
+        <p class="g-kicker">
+          Longmont accepted $725,000 in federal money this year to rebuild a taxilane, while charging nothing at all for
+          the runway.
+        </p>
+      </div>
+
+      <p class="note wide" style="margin-top:30px;">
+        The historic reason untowered fields charge nothing is precisely <em>economy of collection</em> &mdash; with no
+        tower and no staff, counting who used the runway once cost more than it could raise. <strong>This ledger
+        dissolves that excuse.</strong> It counts runway use with no tower, no staff, and no budget beyond public ADS-B
+        data. Collection is now an arithmetic problem, not a staffing problem &mdash; and any revenue raised would, by
+        the same federal rules, be locked to the airport itself.
+      </p>
+
+      <div class="floor-callout">
+        <span class="glyph" aria-hidden="true">&#9650;</span>
+        <p>
+          <strong>Show the work, publish the caveats, let the numbers speak.</strong> The counts are floors. The fee is
+          illustrative and set by the reader. The projection is labeled a projection. That is the whole point.
+        </p>
+      </div>
+    </section>
+
+    <footer class="site-footer">
+      <span>A civic transparency ledger for Longmont / Vance Brand Airport (KLMO)</span>
+      <span class="disclaimer">
+        This is an explanatory document about a civic-transparency tool. Fee levels, exemptions, and collection are
+        matters for the City and its aviation counsel; nothing here is a proposal, a bill, or a legal opinion.
+      </span>
+    </footer>
+  </main>
+</div>
+
+</body>
+</html>

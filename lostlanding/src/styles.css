@@ -142,6 +142,22 @@ a {
   color: var(--gold2);
 }
 
+/* Cross-page link to the "How this works" explainer — styled as a pill so it
+   reads as a distinct destination, not another in-page section anchor. */
+.topbar nav a.topbar-howto {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 5px 14px;
+  color: var(--gold2);
+  font-weight: 700;
+}
+
+.topbar nav a.topbar-howto:hover,
+.topbar nav a.topbar-howto:focus-visible {
+  background: var(--gold2);
+  color: var(--ink);
+}
+
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,

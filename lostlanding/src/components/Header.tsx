@@ -11,6 +11,7 @@ export function Header() {
         </span>
       </a>
       <nav aria-label="Section navigation">
+        <a className="topbar-howto" href="/how-it-works">How this works</a>
         <a href="#calculator">Calculator</a>
         <a href="#daily">Daily Count</a>
         <a href="#ledger">Operator Ledger</a>
