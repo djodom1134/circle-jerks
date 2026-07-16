@@ -1,6 +1,6 @@
 import type { LedgerResponse } from "../lib/types";
 import type { AircraftFeeEntry } from "../lib/liveTypes";
-import { formatCurrency, formatCurrencyCents, formatInteger, formatShortDate, formatUnixDate } from "../lib/format";
+import { formatCurrency, formatInteger, formatShortDate, formatUnixDate } from "../lib/format";
 import { useFee } from "../lib/feeContext";
 import { useAircraftFees } from "../lib/aircraftFeesContext";
 import { useLiveClock } from "../lib/useLiveClock";
@@ -61,7 +61,7 @@ export function Hero({ data }: { data: LedgerResponse }) {
         <div className="hero-ticker">
           <p className="ticker-lede">We missed out on</p>
           <div className="ticker-amount" aria-live="polite" aria-atomic="true">
-            {ready ? formatCurrencyCents(tickerDollars) : "—"}
+            {ready ? formatCurrency(tickerDollars) : "—"}
           </div>
           <p className="ticker-qualifier">— the last 24 hours of traffic</p>
           <p className="ticker-rate-note">

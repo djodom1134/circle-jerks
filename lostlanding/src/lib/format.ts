@@ -4,13 +4,6 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
 
-const currencyCentsFormatter = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
 const compactFormatter = new Intl.NumberFormat("en-US", {
   notation: "compact",
   maximumFractionDigits: 2,
@@ -20,12 +13,6 @@ const integerFormatter = new Intl.NumberFormat("en-US");
 
 export function formatCurrency(n: number): string {
   return currencyFormatter.format(n);
-}
-
-/** With cents -- for the hero's continuously-ticking debt clock, where whole
- * dollars alone would make ~10fps ticking invisible between ticks. */
-export function formatCurrencyCents(n: number): string {
-  return currencyCentsFormatter.format(n);
 }
 
 export function formatCompactCurrency(n: number): string {

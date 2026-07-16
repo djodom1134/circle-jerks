@@ -59,20 +59,21 @@ describe("Hero", () => {
     renderHero();
     expect(screen.getByText(/we missed out on/i)).toBeTruthy();
 
-    // 4 rolling-24h runway uses * $10 fee = $40.00 (rate is zero, so exact).
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    // 4 rolling-24h runway uses * $10 fee = $40, rounded to whole dollars
+    // (rate is zero, so exact). The ticker shows whole dollars, no cents.
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
     expect(screen.getByText(/the last 24 hours of traffic/i)).toBeTruthy();
   });
 
   it("shows the fee assumption adjacent to the headline, tied to the live slider value", async () => {
     renderHero();
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
     expect(document.querySelector(".hero-fee-line")?.textContent).toMatch(/at \$10 per runway use/i);
   });
 
   it("frames the figure as illustrative, never as money owed or a proposal", async () => {
     renderHero();
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
     expect(screen.getByText(/illustrative gross revenue/i)).toBeTruthy();
     expect(screen.getByText(/not money owed, not collected/i)).toBeTruthy();
   });
@@ -95,7 +96,7 @@ describe("Hero", () => {
 
   it("adds a projected-annual companion figure, labeled as projected and reactive to the fee slider", async () => {
     renderHero(FEES_FIXTURE, true);
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
 
     // SAMPLE_LEDGER_FIXTURE.projection.projected_annual_runway_uses = 3650, fee = $10 -> $36,500.
     expect(screen.getByText("$36,500")).toBeTruthy();
@@ -112,7 +113,7 @@ describe("Hero", () => {
 
   it("never lets the projected figure be mistaken for a count -- and states the seasonality limit plainly", async () => {
     renderHero();
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
 
     const note = document.querySelector(".hero-projection-note")?.textContent ?? "";
     expect(note.toLowerCase()).toContain("projected, not counted");
@@ -123,7 +124,7 @@ describe("Hero", () => {
 
   it("cites the FAA's 120,000-operations figure only as an independent cross-check, never converted or stated as fact", async () => {
     renderHero();
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
 
     const note = document.querySelector(".hero-projection-note")?.textContent ?? "";
     expect(note).toMatch(/120,000 operations a year/);
@@ -137,7 +138,7 @@ describe("Hero", () => {
 
   it("keeps the counting-methodology story (untowered, FAA 5010 estimates, floor language) as supporting copy", async () => {
     renderHero();
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
     expect(screen.getByText(/untowered/i)).toBeTruthy();
     expect(screen.getByText(/FAA Form 5010/i)).toBeTruthy();
     expect(screen.getAllByText(/floor, never an estimate/i).length).toBeGreaterThan(0);
@@ -145,19 +146,19 @@ describe("Hero", () => {
 
   it("reacts instantly to the shared fee slider with no extra plumbing", async () => {
     renderHero(FEES_FIXTURE, true);
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
 
     await act(async () => {
       screen.getByRole("button", { name: /bump fee/i }).click();
     });
 
-    // 4 rolling-24h uses * new $20 fee = $80.00
-    await waitFor(() => expect(screen.getByText("$80.00")).toBeTruthy());
+    // 4 rolling-24h uses * new $20 fee = $80 (whole dollars, no cents)
+    await waitFor(() => expect(screen.getByText("$80")).toBeTruthy());
   });
 
   it("adds the self-sustaining obligation callout directly under the ticker, linking to the full section", async () => {
     renderHero();
-    await waitFor(() => expect(screen.getByText("$40.00")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("$40")).toBeTruthy());
 
     expect(document.body.textContent).toMatch(/as self-sustaining as possible/i);
     expect(document.body.textContent).toMatch(
