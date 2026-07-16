@@ -196,6 +196,11 @@ services:
     environment:
       CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
       CADDY_LEDGER_DOMAIN: ${CADDY_LEDGER_DOMAIN:-}
+      # Second hostname the ledger site block also answers for — a mirror of
+      # ledger.circlejerks.live (e.g. lmco.airfieldeconomics.org). Empty by
+      # default; adding it later requires a one-time `caddy` recreate (env vars
+      # are only injected at container creation) — see DEPLOY-LEDGER.md.
+      CADDY_LEDGER_MIRROR_DOMAIN: ${CADDY_LEDGER_MIRROR_DOMAIN:-}
       CADDY_EMAIL: ${CADDY_EMAIL:-}
     ports:
       - "80:80"

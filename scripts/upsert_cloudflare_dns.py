@@ -96,6 +96,15 @@ def main() -> int:
     parser.add_argument("--domain", required=True, help="Apex domain, for example circlejerks.live")
     parser.add_argument("--origin-ip", required=True, help="Reserved origin IPv4 address")
     parser.add_argument("--unproxied", action="store_true", help="Disable Cloudflare proxying")
+    parser.add_argument(
+        "--no-www",
+        action="store_true",
+        help=(
+            "Upsert only the A record for --domain and skip the www CNAME. Use "
+            "this when --domain is a single host (e.g. a subdomain mirror like "
+            "lmco.airfieldeconomics.org) rather than an apex that wants www."
+        ),
+    )
     args = parser.parse_args()
 
     token = os.environ.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CLOUDFLARE_API_KEY")
@@ -107,9 +116,10 @@ def main() -> int:
     proxied = not args.unproxied
     zone_id = zone_id_for_domain(token, domain)
     root_status = upsert_record(token, zone_id, "A", domain, args.origin_ip, proxied)
-    www_status = upsert_record(token, zone_id, "CNAME", f"www.{domain}", domain, proxied)
     print(f"A {domain} -> {args.origin_ip} {root_status}")
-    print(f"CNAME www.{domain} -> {domain} {www_status}")
+    if not args.no_www:
+        www_status = upsert_record(token, zone_id, "CNAME", f"www.{domain}", domain, proxied)
+        print(f"CNAME www.{domain} -> {domain} {www_status}")
     return 0
 
 
