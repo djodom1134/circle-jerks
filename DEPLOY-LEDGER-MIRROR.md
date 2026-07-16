@@ -128,8 +128,10 @@ documented exception as when `CADDY_LEDGER_DOMAIN` was first added
 # ran first, or validate passes with an empty second host and the recreate
 # would then bind only the ledger domain.
 ssh $SSH_OPTS root@$DROPLET 'cd /srv/circlejerk/app && \
-  docker compose -f docker-compose.prod.yml run --rm --no-deps caddy \
-    validate --config /etc/caddy/Caddyfile'
+  docker compose -f docker-compose.prod.yml run --rm --no-deps \
+    --entrypoint caddy caddy validate --config /etc/caddy/Caddyfile'
+# --entrypoint caddy is required: `compose run caddy validate ...` otherwise
+# tries to exec "validate" as the binary ("executable file not found in $PATH").
 # Only proceed if that prints "Valid configuration".
 
 # Recreate just caddy (new env var + fresh Caddyfile inode), nothing else:
