@@ -180,10 +180,27 @@ ssh $SSH_OPTS root@$DROPLET 'cd /srv/circlejerk/app && \
 # with the Caddy hostname gone it just 5xxs at the edge, harmless).
 ```
 
-## Adding the next airport later
+## Adding another mirror hostname
 
-Repeat with a different subdomain, but note the current app is **hardcoded to
-KLMO** (`lostlanding/src/App.tsx`: `const AIRPORT_ICAO = "KLMO"`). A second
-airport that shows *its own* data needs the frontend to become airport-aware
-(route/host → ICAO) — that's a real feature, not another mirror. Until then,
-every extra hostname on this block shows the KLMO ledger.
+`CADDY_LEDGER_MIRROR_DOMAIN` is a **space-separated list**, so each extra
+subdomain is just one more entry — no new env var, no Caddyfile edit:
+
+1. DNS: `python3 scripts/upsert_cloudflare_dns.py --domain <sub>.airfieldeconomics.org --origin-ip 137.184.244.248 --no-www`
+2. Append the host to the list in the droplet's `.env`, e.g.
+   `CADDY_LEDGER_MIRROR_DOMAIN=lmco.airfieldeconomics.org klmo.airfieldeconomics.org`
+3. **Recreate** `caddy` (not just reload): the value is an env var, and Docker
+   only injects env at container creation, so a plain reload would re-read the
+   old value. `docker compose -f docker-compose.prod.yml up -d --no-deps caddy`
+   (~1s edge blip on circlejerks.live). Validate first with
+   `run --rm --no-deps --entrypoint caddy caddy validate ...`.
+
+Batch several subdomains into one `.env` edit + one recreate to avoid repeated
+blips. If this list grows large, consider a proxied `*.airfieldeconomics.org`
+wildcard instead — that needs wildcard TLS (a custom Caddy build with the
+Cloudflare DNS module for DNS-01, or Cloudflare-proxied on-demand TLS at the
+edge), so it's a real change, not a config tweak.
+
+**Every extra hostname still shows the KLMO ledger** — the app is hardcoded to
+KLMO (`lostlanding/src/App.tsx`: `const AIRPORT_ICAO = "KLMO"`). A subdomain
+that shows its *own* airport's data needs the frontend to become airport-aware
+(route/host → ICAO); that's a real feature, not another mirror.

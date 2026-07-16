@@ -68,8 +68,10 @@ www.{$CADDY_DOMAIN} {
 # untouched. Caddy handles automatic HTTPS per-domain on its own once DNS
 # points ledger.circlejerks.live at this box.
 #
-# CADDY_LEDGER_MIRROR_DOMAIN is a SECOND hostname this same block also answers
-# for (e.g. lmco.airfieldeconomics.org), a byte-identical mirror of the ledger.
+# CADDY_LEDGER_MIRROR_DOMAIN is one or more space-separated ADDITIONAL hostnames
+# this same block also answers for (e.g. "lmco.airfieldeconomics.org
+# klmo.airfieldeconomics.org"), each a byte-identical mirror of the ledger.
+# Caddy splits the substituted value on whitespace into separate site addresses.
 # The lostlanding frontend talks to /api and /live as same-origin RELATIVE
 # paths, so the exact same web-ledger + ledger-api containers render correctly
 # under any host Caddy serves here — no rebuild, no per-host config. Caddy
