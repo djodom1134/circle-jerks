@@ -53,7 +53,7 @@ export function Hero({ data }: { data: LedgerResponse }) {
 
   return (
     <section className="hero" id="top">
-      <div className="hero-image" role="img" aria-label="Art Deco illustration of Longmont airport of the future" />
+      <div className="hero-image" role="img" aria-label="Aerial photograph of Longmont's Vance Brand Airport (KLMO)" />
       <div className="hero-overlay" />
       <div className="hero-copy">
         <p className="eyebrow">LONGMONT, COLORADO &bull; {data.airport_icao}</p>

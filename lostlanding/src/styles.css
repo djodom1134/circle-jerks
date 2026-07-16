@@ -233,11 +233,11 @@ input:focus-visible,
 .hero-image {
   position: absolute;
   inset: 0;
-  /* Anchored right-of-centre: the terminal and the figure sit on the LEFT of
-     this painting, which is exactly where the headline goes. Pushing the frame
-     right keeps the apron, the Cessna and the range in the open half instead of
-     burying the art under the type. */
-  background: url("./assets/airport-deco.jpg") 68% 50% / cover no-repeat;
+  /* Anchored right-of-centre: in this aerial the runway, apron and hangars sit
+     centre-right, exactly the open half with no headline over it. Pushing the
+     frame right keeps the airport itself in view instead of burying it under
+     the type. */
+  background: url("./assets/airport-aerial.jpg") 68% 50% / cover no-repeat;
   filter: saturate(1.02) contrast(1.04);
 }
 
