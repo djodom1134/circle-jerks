@@ -52,9 +52,14 @@ def local_time_label(ts: int, tz_name: str) -> str:
     return _format_time_12h(datetime.fromtimestamp(ts, ZoneInfo(tz_name)), include_date=True)
 
 
-def hour_label(ts: int, tz_name: str) -> str:
-    return _format_time_12h(datetime.fromtimestamp(ts, ZoneInfo(tz_name)), include_minutes=False)
+def hour_label(ts: int, tz_name: str, include_date: bool = False) -> str:
+    return _format_time_12h(
+        datetime.fromtimestamp(ts, ZoneInfo(tz_name)),
+        include_date=include_date, include_minutes=False,
+    )
 
 
-def minute_label(ts: int, tz_name: str) -> str:
-    return _format_time_12h(datetime.fromtimestamp(ts, ZoneInfo(tz_name)))
+def minute_label(ts: int, tz_name: str, include_date: bool = False) -> str:
+    return _format_time_12h(
+        datetime.fromtimestamp(ts, ZoneInfo(tz_name)), include_date=include_date,
+    )

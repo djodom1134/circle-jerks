@@ -107,16 +107,47 @@ def parse_readsb_aircraft(row: dict, payload_now: float, source: str) -> dict | 
         "squawk": row.get("squawk"),
         "aircraft_type": row.get("t"),
         "registration": row.get("r"),
+        "emitter_category": row.get("category"),
         "source": source,
     }
 
 
+class LiveSourceStale(LiveSourceUnavailable):
+    def __init__(self, source: str, age_seconds: float):
+        super().__init__(f"{source} payload is {age_seconds:.0f}s stale")
+        self.source = source
+        self.age_seconds = age_seconds
+
+
+def readsb_payload_aircraft(payload: dict) -> list[dict]:
+    """Pull aircraft rows from any readsb-shaped payload (ac, aircraft, states)."""
+    return payload.get("ac") or payload.get("aircraft") or payload.get("states") or []
+
+
+def readsb_payload_now(payload: dict, fallback: float | None = None) -> float:
+    raw = payload.get("now") or payload.get("ctime")
+    if raw is None:
+        return float(fallback if fallback is not None else time.time())
+    value = float(raw)
+    if value > 10_000_000_000:
+        value = value / 1000.0
+    return value
+
+
 class ReadsbPointClient:
-    def __init__(self, settings: Settings, source: str, base_url: str, path_style: str):
+    def __init__(
+        self,
+        settings: Settings,
+        source: str,
+        base_url: str,
+        path_style: str,
+        extra_headers: dict[str, str] | None = None,
+    ):
         self.settings = settings
         self.source = source
         self.base_url = base_url.rstrip("/")
         self.path_style = path_style
+        self.extra_headers = dict(extra_headers or {})
         self.client = httpx.AsyncClient(timeout=settings.live_source_timeout_seconds)
 
     async def close(self) -> None:
@@ -129,22 +160,29 @@ class ReadsbPointClient:
         return f"{self.base_url}/v2/point/{lat:.5f}/{lon:.5f}/{radius_nm:.1f}"
 
     async def states_bbox(self, bbox: tuple[float, float, float, float]) -> list[dict]:
-        response = await self.client.get(
-            self.url_for_bbox(bbox),
-            headers={"User-Agent": f"circlejerk-prototype/0.1 ({self.settings.public_base_url})"},
-        )
+        headers = {
+            "User-Agent": f"circlejerk-prototype/0.1 ({self.settings.public_base_url})",
+            **self.extra_headers,
+        }
+        response = await self.client.get(self.url_for_bbox(bbox), headers=headers)
         if response.status_code == 429:
             retry = response.headers.get("Retry-After") or response.headers.get("X-Rate-Limit-Retry-After-Seconds")
             retry_after = int(float(retry)) if retry else self.settings.live_source_rate_limit_backoff_seconds
             raise LiveSourceRateLimited(self.source, retry_after)
         response.raise_for_status()
         payload = response.json()
-        payload_now = float(payload.get("now") or time.time())
+        payload_now = readsb_payload_now(payload)
+        rows = readsb_payload_aircraft(payload)
         states = []
-        for row in payload.get("ac") or []:
+        for row in rows:
             parsed = parse_readsb_aircraft(row, payload_now, self.source)
             if parsed:
                 states.append(parsed)
+        max_stale = max(0, self.settings.live_source_max_staleness_seconds)
+        if max_stale and len(states) >= max(1, self.settings.live_source_min_aircraft_for_freshness):
+            age = time.time() - payload_now
+            if age > max_stale:
+                raise LiveSourceStale(self.source, age)
         return states
 
 
@@ -165,20 +203,74 @@ class OpenSkyLiveClient:
         return await self.client.states_bbox(bbox)
 
 
+def build_live_source_client(source: str, settings: Settings):
+    if source == "adsb_lol":
+        return ReadsbPointClient(settings, "adsb_lol", settings.adsb_lol_base_url, "lat_lon_dist")
+    if source == "adsb_fi":
+        return ReadsbPointClient(settings, "adsb_fi", settings.adsb_fi_base_url, "lat_lon_dist")
+    if source == "airplanes_live":
+        return ReadsbPointClient(settings, "airplanes_live", settings.airplanes_live_base_url, "point")
+    if source == "self_hosted":
+        base_url = settings.self_hosted_feeder_base_url
+        if not base_url:
+            return None
+        return ReadsbPointClient(
+            settings,
+            "self_hosted",
+            base_url,
+            settings.self_hosted_feeder_path_style,
+        )
+    if source == "adsbx":
+        if not settings.adsbx_rapidapi_key:
+            return None
+        return ReadsbPointClient(
+            settings,
+            "adsbx",
+            f"https://{settings.adsbx_rapidapi_host}",
+            "lat_lon_dist",
+            extra_headers={
+                "x-rapidapi-key": settings.adsbx_rapidapi_key,
+                "x-rapidapi-host": settings.adsbx_rapidapi_host,
+            },
+        )
+    if source == "opensky":
+        return OpenSkyLiveClient(settings)
+    return None
+
+
+@dataclass
+class SourceHealth:
+    success_count: int = 0
+    error_count: int = 0
+    last_success_ts: float | None = None
+    last_error_ts: float | None = None
+    last_error: str | None = None
+    last_states_count: int | None = None
+    last_latency_ms: int | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "success_count": self.success_count,
+            "error_count": self.error_count,
+            "last_success_ts": int(self.last_success_ts) if self.last_success_ts else None,
+            "last_error_ts": int(self.last_error_ts) if self.last_error_ts else None,
+            "last_error": self.last_error,
+            "last_states_count": self.last_states_count,
+            "last_latency_ms": self.last_latency_ms,
+        }
+
+
 class LiveStateClient:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.backoff_until: dict[str, float] = {}
-        self.clients = {
-            "adsb_lol": ReadsbPointClient(settings, "adsb_lol", settings.adsb_lol_base_url, "lat_lon_dist"),
-            "opensky": OpenSkyLiveClient(settings),
-            "airplanes_live": ReadsbPointClient(
-                settings,
-                "airplanes_live",
-                settings.airplanes_live_base_url,
-                "point",
-            ),
-        }
+        self.clients: dict[str, Any] = {}
+        known_sources = {"adsb_lol", "adsb_fi", "airplanes_live", "opensky", "self_hosted", "adsbx"}
+        for source in known_sources:
+            instance = build_live_source_client(source, settings)
+            if instance is not None:
+                self.clients[source] = instance
+        self.health: dict[str, SourceHealth] = {source: SourceHealth() for source in self.clients}
         self.last_source: str | None = None
 
     async def close(self) -> None:
@@ -186,13 +278,42 @@ class LiveStateClient:
             await client.close()
 
     def priority(self) -> list[str]:
-        return self.settings.live_source_priority_list() or ["adsb_lol", "opensky", "airplanes_live"]
+        configured = self.settings.live_source_priority_list()
+        usable = [source for source in configured if source in self.clients]
+        if usable:
+            return usable
+        return [source for source in ("adsb_lol", "adsb_fi", "airplanes_live", "opensky") if source in self.clients]
 
     def is_backing_off(self, source: str) -> bool:
         return self.backoff_until.get(source, 0.0) > time.time()
 
     def mark_backoff(self, source: str, seconds: int | float) -> None:
         self.backoff_until[source] = time.time() + max(float(seconds), 1.0)
+
+    def health_snapshot(self) -> dict[str, dict]:
+        now = time.time()
+        return {
+            source: {
+                **stats.to_dict(),
+                "available": source in self.clients,
+                "backoff_remaining_seconds": max(0, int(self.backoff_until.get(source, 0.0) - now)),
+            }
+            for source, stats in self.health.items()
+        }
+
+    def _record_success(self, source: str, states: list[dict], latency_ms: int) -> None:
+        stats = self.health[source]
+        stats.success_count += 1
+        stats.last_success_ts = time.time()
+        stats.last_states_count = len(states)
+        stats.last_latency_ms = latency_ms
+        stats.last_error = None
+
+    def _record_error(self, source: str, message: str) -> None:
+        stats = self.health[source]
+        stats.error_count += 1
+        stats.last_error_ts = time.time()
+        stats.last_error = message[:200]
 
     async def states_bbox(self, bbox: tuple[float, float, float, float]) -> LiveFetchResult:
         failures: list[str] = []
@@ -202,21 +323,32 @@ class LiveStateClient:
                 failures.append(f"{source}:backoff")
                 continue
             client = self.clients[source]
+            started = time.monotonic()
             try:
                 states = await client.states_bbox(bbox)
+                latency_ms = int((time.monotonic() - started) * 1000)
                 self.last_source = source
+                self._record_success(source, states, latency_ms)
                 return LiveFetchResult(source=source, states=states)
+            except LiveSourceStale as exc:
+                self.mark_backoff(source, self.settings.live_source_backoff_seconds)
+                failures.append(f"{source}:stale_{int(exc.age_seconds)}s")
+                self._record_error(source, str(exc))
+                logger.warning("live source %s returned stale data (%.0fs)", source, exc.age_seconds)
             except LiveSourceRateLimited as exc:
                 self.mark_backoff(source, exc.retry_after_seconds)
                 rate_limits.append(exc)
                 failures.append(f"{source}:rate_limited")
+                self._record_error(source, f"rate limited {exc.retry_after_seconds}s")
             except OpenSkyRateLimited as exc:
                 self.mark_backoff(source, exc.retry_after_seconds)
                 rate_limits.append(LiveSourceRateLimited(source, exc.retry_after_seconds))
                 failures.append(f"{source}:rate_limited")
+                self._record_error(source, f"rate limited {exc.retry_after_seconds}s")
             except (httpx.HTTPError, ValueError) as exc:
                 self.mark_backoff(source, self.settings.live_source_backoff_seconds)
                 failures.append(f"{source}:{type(exc).__name__}")
+                self._record_error(source, f"{type(exc).__name__}: {exc}")
                 logger.warning("live source %s failed: %s", source, exc)
 
         if rate_limits and len(rate_limits) == len(self.priority()):

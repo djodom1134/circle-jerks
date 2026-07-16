@@ -51,6 +51,8 @@ Required production values:
 - `PUBLIC_BASE_URL`
 - `APP_SECRET`
 - `GROQ_API_KEY`
+- `CLOUDFLARE_API_TOKEN` with zone read and DNS edit permissions, so provisioning can keep `CADDY_DOMAIN` and `www.CADDY_DOMAIN` pointed at the reserved Droplet IP
+- Optional: `UPTIME_ALERT_EMAILS` and `UPTIME_REGIONS` for DigitalOcean uptime checks
 - Optional for enrichment and live fallback: `OPENSKY=client_id:client_secret` or `OPENSKY_CLIENT_ID` plus `OPENSKY_CLIENT_SECRET`
 - `CADDY_DOMAIN`
 
@@ -61,6 +63,8 @@ Provider priority is controlled by `CIRCLEJERK_LIVE_SOURCE_PRIORITY`, defaulting
 ```bash
 cd backend && pytest
 cd ../frontend && npm run build
+./scripts/check_production_health.sh circlejerks.live
+./scripts/provision_uptime_checks.sh circlejerks.live
 curl -f https://YOUR_DOMAIN/healthz
 curl -f https://YOUR_DOMAIN/api/healthz
 ```

@@ -1,8 +1,15 @@
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, CloudOff, Copy, ExternalLink, Github, History, LocateFixed, Search, SlidersHorizontal } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { AlertTriangle, CheckCircle2, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Route, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
+import StatsPage from "./components/StatsPage";
 import MapView from "./components/MapView";
+import OnboardingTour, { shouldShowOnboarding } from "./components/OnboardingTour";
+import PatternEditorPanel from "./components/PatternEditorPanel";
+import AircraftMapCard from "./components/AircraftMapCard";
+import WindIndicator from "./components/WindIndicator";
+import BackfillBanner from "./components/BackfillBanner";
+import FlowBadge from "./components/FlowBadge";
 import buyMeCoffeeQrUrl from "./assets/buy-me-a-coffee-qr.png";
 import logoUrl from "./assets/circle-jerks-logo.png";
 import {
@@ -11,23 +18,43 @@ import {
   complaintSummary,
   complaintForm,
   geocode,
+  reverseGeocode,
+  getAirportPatterns,
+  getAirportSosaUrl,
+  getAtcFeeds,
+  getAirportRunways,
   getConfig,
+  getOnlineCount,
+  getSponsors,
+  getTrackHistory,
+  getWorstOffenders,
   nearestAirport,
+  positions,
   recordHeartbeat,
   recordSubmission,
   scan,
   searchAirports,
   type Airport,
+  type AtcFeedsResponse,
   type ComplaintResponse,
   type ConfigResponse,
-  type MessagePreferences,
   type Offender,
+  type PatternPoint,
+  type PositionsResponse,
+  type RunwayInfo,
+  type RunwayPattern,
   type ScanParams,
   type ScanResponse,
+  type SponsorsResponse,
   type ToneSliders,
-  type WindowCode
+  type TrackHistoryResponse,
+  type WindowCode,
+  type WorstOffendersResponse
 } from "./lib/api";
+import { isWindowLoading } from "./lib/windows";
+import { averagePatternLoops, type LoopResult } from "./lib/patternLoops";
 import { formatLocalTime, numberOrDash, titleize } from "./lib/format";
+import { displayTail, habitLabel, worstOffenderTargets } from "./lib/reportTargets";
 import {
   readPreferences,
   writePreferences,
@@ -35,26 +62,38 @@ import {
   type StoredPreferences
 } from "./lib/preferences";
 import { getVisitorId } from "./lib/visitor";
+import { statsHighlightHref } from "./lib/statsLinks";
+import { buildTaglines, pickTagline } from "./lib/taglines";
+import { mergeLiveTracks } from "./lib/liveTracks";
 
 const DEFAULT_LOCATION = { lat: 40.1672, lon: -105.1019 };
 const APP_TITLE = "Automated Noise Complaint Generator";
-const APP_TAGLINE = "Small engines, big egos. The 0.0001% who control the sky and cause 80% of the noise pollution.";
 const FAA_ANCIR_URL = "https://ancir.faa.gov/ancir?id=ancir_sc_cat_item&sys_id=6149ade187a1f550b0d987b9cebb357e";
 const BUY_ME_COFFEE_URL = "https://buymeacoffee.com/djodom";
 const GITHUB_ISSUES_URL = "https://github.com/djodom1134/circle-jerks/issues";
+const SITE_URL = "https://circlejerks.live";
 const WINDOWS: Array<{ code: WindowCode; label: string }> = [
   { code: "5m", label: "5 min" },
   { code: "30m", label: "30 min" },
   { code: "1h", label: "1 hour" },
   { code: "6h", label: "6 hours" },
-  { code: "today", label: "Today" }
+  // Code stays "today" so saved preferences and shared ?window= links keep
+  // working; the window itself is a rolling 24h, so the label says so.
+  { code: "today", label: "24 hours" }
 ];
+
+// Prose and share cards read the human label, never the wire code — "today"
+// is a rolling 24h, so the code alone would misdescribe the window.
+function windowLabel(code: string): string {
+  return WINDOWS.find((item) => item.code === code)?.label ?? code;
+}
+
 
 function windowFromQuery(): WindowCode {
   const value = new URLSearchParams(window.location.search).get("window");
   if (WINDOWS.some((item) => item.code === value)) return value as WindowCode;
   const stored = readPreferences().window;
-  return stored && WINDOWS.some((item) => item.code === stored) ? stored : "1h";
+  return stored && WINDOWS.some((item) => item.code === stored) ? stored : "today";
 }
 
 function storedLocation(preferences: StoredPreferences) {
@@ -65,6 +104,7 @@ function storedLocation(preferences: StoredPreferences) {
 export default function App() {
   if (window.location.pathname.startsWith("/admin")) return <AdminDashboard />;
   if (window.location.pathname.startsWith("/about")) return <AboutPage />;
+  if (window.location.pathname.startsWith("/stats")) return <StatsPage />;
 
   const [preferences, setPreferences] = useState<StoredPreferences>(() => readPreferences());
   const [config, setConfig] = useState<ConfigResponse | null>(null);
@@ -72,23 +112,130 @@ export default function App() {
   const [userLocation, setUserLocation] = useState(() => storedLocation(preferences));
   const [windowCode, setWindowCode] = useState<WindowCode>(windowFromQuery());
   const [scanData, setScanData] = useState<ScanResponse | null>(null);
+  const [positionsData, setPositionsData] = useState<PositionsResponse | null>(null);
   const [selected, setSelected] = useState<Offender | null>(null);
+  const [focusedIcao24, setFocusedIcao24] = useState<string | null>(null);
+  const onSelectAircraft = useCallback((icao24: string | null) => setFocusedIcao24(icao24), []);
   const [formUrl, setFormUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading configuration");
-  const [airportQuery, setAirportQuery] = useState("");
+  const [tagline, setTagline] = useState<string>(() => pickTagline(buildTaglines(null)));
+  const taglineChosen = useRef(false);
+  const [airportQuery, setAirportQuery] = useState(
+    () => preferences.airport_query ?? preferences.airport_icao ?? ""
+  );
   const [airportResults, setAirportResults] = useState<Airport[]>([]);
-  const [addressQuery, setAddressQuery] = useState("");
+  const [addressQuery, setAddressQuery] = useState(() => preferences.user_address ?? "");
+  const [autoZoom, setAutoZoom] = useState(true);
+  const [mapOverlay, setMapOverlay] = useState<"none" | "noise" | "history">("none");
+  const [historyDays, setHistoryDays] = useState(3);
+  const [historyMode, setHistoryMode] = useState<"lines" | "density" | "average">("lines");
+  const [historyLineAlpha, setHistoryLineAlpha] = useState(0.2);
+  const [historySigmaK, setHistorySigmaK] = useState(1);
+  const [historyRunways, setHistoryRunways] = useState<RunwayInfo[] | null>(null);
+  const [historyData, setHistoryData] = useState<TrackHistoryResponse | null>(null);
+  const [historyError, setHistoryError] = useState(false);
+  const showHeatmap = mapOverlay === "noise";
+  const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
+  const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
+  const [worstOffenders, setWorstOffenders] = useState<WorstOffendersResponse | null>(null);
+  const [onlineCount, setOnlineCount] = useState<number | null>(null);
+  const [sosaUrl, setSosaUrl] = useState<string>("https://www.saveourskiesalliance.org/");
+  const [patternEditing, setPatternEditing] = useState(false);
+  const [editingRunwayId, setEditingRunwayId] = useState<string | null>(null);
+  const [editingPoints, setEditingPoints] = useState<PatternPoint[]>([]);
+  const [editSeedKey, setEditSeedKey] = useState(0);
+  const [patterns, setPatterns] = useState<RunwayPattern[]>([]);
+
+  function seedEditingPoints(points: PatternPoint[]) {
+    setEditingPoints(points);
+    setEditSeedKey((k) => k + 1);
+  }
+
+  function reloadPatterns() {
+    if (!airport?.icao) return;
+    getAirportPatterns(airport.icao).then((r) => setPatterns(r.patterns)).catch(() => setPatterns([]));
+  }
+
+  useEffect(() => { reloadPatterns(); /* eslint-disable-next-line */ }, [airport?.icao]);
 
   useEffect(() => {
     getConfig()
-      .then(async (result) => {
-        setConfig(result);
-        const found = await searchAirports(preferences.airport_icao ?? result.default_airport_icao);
-        setAirport(found.airports[0] ?? null);
+      .then(setConfig)
+      .catch((error) => setStatus(`Configuration failed: ${error.message}`));
+  }, []);
+
+  useEffect(() => {
+    if (taglineChosen.current) return;
+    if (scanData) {
+      setTagline(pickTagline(buildTaglines(scanData.counters.circles)));
+      taglineChosen.current = true;
+    }
+  }, [scanData]);
+
+  // Suppress browser-level zoom (Ctrl/Cmd + wheel, Ctrl/Cmd + +/-/0, pinch
+  // trackpad). The map has its own zoom controls; page zoom just breaks the
+  // grid layout and confuses users.
+  useEffect(() => {
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (["+", "-", "=", "_", "0"].includes(event.key)) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    nearestAirport(userLocation.lat, userLocation.lon)
+      .then((nearest) => {
+        if (cancelled) return;
+        setAirport(nearest);
         setStatus("Ready");
       })
-      .catch((error) => setStatus(`Configuration failed: ${error.message}`));
-  }, [preferences.airport_icao]);
+      .catch(() => {
+        if (cancelled || airport) return;
+        const fallback = config?.default_airport_icao;
+        if (!fallback) return;
+        searchAirports(fallback)
+          .then((res) => {
+            if (cancelled) return;
+            setAirport(res.airports[0] ?? null);
+          })
+          .catch(() => undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userLocation.lat, userLocation.lon, config?.default_airport_icao]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const s = await getSponsors();
+        if (!cancelled) setSponsors(s);
+      } catch {
+        // silent: decorative section
+      }
+    }
+    refresh();
+    const sectionsHandle = window.setInterval(refresh, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(sectionsHandle);
+    };
+  }, []);
 
   useEffect(() => {
     if (!navigator.geolocation || preferences.user_lat !== undefined || preferences.user_lon !== undefined) return;
@@ -118,6 +265,69 @@ export default function App() {
     }));
   }, [airport?.icao, userLocation.lat, userLocation.lon, windowCode]);
 
+  // Reflect detected/stored/recomputed airport in the input box. Updates
+  // unconditionally on every airport change — picking a new home location
+  // (geocode, right-click, or geolocation) recomputes the nearest airport,
+  // and the input must follow. If the user is in the middle of typing an
+  // airport search, the dropdown of results still appears below, and they
+  // can click a result to override.
+  useEffect(() => {
+    if (!airport) return;
+    setAirportQuery(airport.icao);
+  }, [airport?.icao]);
+
+  // Look up the Save Our Skies Alliance page for the current airport so the
+  // "Volunteer / get involved" CTA points to the right airport-specific page.
+  // Falls back to the SOSA home when no per-airport page exists yet.
+  useEffect(() => {
+    if (!airport?.icao) return;
+    let cancelled = false;
+    getAirportSosaUrl(airport.icao)
+      .then((result) => {
+        if (!cancelled && result?.url) setSosaUrl(result.url);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [airport?.icao]);
+
+  // Reverse-geocode the user's coords to fill the location input on first
+  // detection. Skip if the user already typed an address or we have one stored.
+  useEffect(() => {
+    if (addressQuery.trim() !== "") return;
+    if (!Number.isFinite(userLocation.lat) || !Number.isFinite(userLocation.lon)) return;
+    let cancelled = false;
+    reverseGeocode(userLocation.lat, userLocation.lon)
+      .then((result) => {
+        if (cancelled) return;
+        const label = result.short_name ?? result.display_name ?? "";
+        if (label) {
+          setAddressQuery((current) => (current.trim() === "" ? label : current));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [userLocation.lat, userLocation.lon]);
+
+  // Persist whatever the user (or auto-fill) put into the inputs so we can
+  // restore on the next visit.
+  useEffect(() => {
+    setPreferences((current) => {
+      if ((current.airport_query ?? "") === airportQuery) return current;
+      return { ...current, airport_query: airportQuery };
+    });
+  }, [airportQuery]);
+
+  useEffect(() => {
+    setPreferences((current) => {
+      if ((current.user_address ?? "") === addressQuery) return current;
+      return { ...current, user_address: addressQuery };
+    });
+  }, [addressQuery]);
+
   useEffect(() => {
     writePreferences(preferences);
   }, [preferences]);
@@ -137,7 +347,6 @@ export default function App() {
 
   const refreshScan = useCallback(async () => {
     if (!scanParams) return;
-    setStatus("Scanning current aircraft buffer");
     try {
       const result = await scan(scanParams);
       setScanData(result);
@@ -159,6 +368,69 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [refreshScan]);
 
+  // Fast poll of live positions only (no detector run, no cache freeze) so
+  // the map keeps moving between the slower /scan refreshes above.
+  const refreshPositions = useCallback(async () => {
+    if (!scanParams) {
+      setPositionsData(null);
+      return;
+    }
+    try {
+      const result = await positions(scanParams);
+      setPositionsData(result);
+    } catch {
+      // Swallow errors; the slow scan poll still keeps offenders/events fresh.
+    }
+  }, [scanParams]);
+
+  useEffect(() => {
+    setPositionsData(null);
+    if (!scanParams) return;
+    refreshPositions();
+    const id = window.setInterval(refreshPositions, 2500);
+    return () => window.clearInterval(id);
+  }, [scanParams, refreshPositions]);
+
+  useEffect(() => {
+    if (mapOverlay !== "history" || !airport?.icao) {
+      setHistoryData(null);
+      setHistoryError(false);
+      return;
+    }
+    let cancelled = false;
+    // Clear stale data so a day/airport switch shows "Loading…" instead of the
+    // previous range's count, and reset any prior error before refetching.
+    setHistoryData(null);
+    setHistoryError(false);
+    getTrackHistory(airport.icao, historyDays)
+      .then((data) => { if (!cancelled) setHistoryData(data); })
+      .catch(() => { if (!cancelled) setHistoryError(true); });
+    return () => { cancelled = true; };
+  }, [mapOverlay, airport?.icao, historyDays]);
+
+  // Runways (heading + threshold) power Average mode's lap classification.
+  // Fetched once per airport when the history overlay is open.
+  useEffect(() => {
+    if (mapOverlay !== "history" || !airport?.icao) {
+      setHistoryRunways(null);
+      return;
+    }
+    let cancelled = false;
+    getAirportRunways(airport.icao)
+      .then((r) => { if (!cancelled) setHistoryRunways(r.runways); })
+      .catch(() => { if (!cancelled) setHistoryRunways([]); });
+    return () => { cancelled = true; };
+  }, [mapOverlay, airport?.icao]);
+
+  // Average mode: reconstruct closed pattern ovals from the full ADS-B tracks
+  // (the same data Lines mode already fetched) — no extra request. Recomputed
+  // only when the tracks/runways change; the sigma control scales the band at
+  // render, so it needs no recompute here.
+  const historyAverage = useMemo<LoopResult | null>(() => {
+    if (historyMode !== "average" || !historyData || !airport || !historyRunways?.length) return null;
+    return averagePatternLoops(historyData.tracks, { lat: airport.lat, lon: airport.lon }, historyRunways);
+  }, [historyMode, historyData, airport, historyRunways]);
+
   useEffect(() => {
     if (!scanParams) return;
     const sendHeartbeat = () => {
@@ -174,6 +446,27 @@ export default function App() {
     const id = window.setInterval(sendHeartbeat, 30000);
     return () => window.clearInterval(id);
   }, [scanParams]);
+
+  useEffect(() => {
+    const poll = () => {
+      getOnlineCount().then((d) => setOnlineCount(d.count)).catch(() => undefined);
+    };
+    poll();
+    const id = window.setInterval(poll, 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (!airport?.icao) {
+      setWorstOffenders(null);
+      return;
+    }
+    let cancelled = false;
+    getWorstOffenders(airport.icao, 5)
+      .then((data) => { if (!cancelled) setWorstOffenders(data); })
+      .catch(() => { if (!cancelled) setWorstOffenders(null); });
+    return () => { cancelled = true; };
+  }, [airport?.icao]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -198,7 +491,29 @@ export default function App() {
     setAirport(nearest);
   }
 
-  const activeNow = scanData?.counters.offenders_active_now ?? 0;
+  // True once at least one runway has enough laps to draw an averaged oval.
+  const averageDrawable = !!historyAverage && historyAverage.classes.length > 0;
+  const averageLapTotal = historyAverage
+    ? historyAverage.classes.reduce((a, c) => a + c.count, 0)
+    : 0;
+  const activeNow = positionsData?.active_now ?? scanData?.counters.offenders_active_now ?? 0;
+  // The map reads fast-polled positions for live aircraft movement while
+  // keeping offenders/selection/window/counters from the slower /scan data.
+  // MERGE (not replace) the fast live positions into the full-history scan
+  // tracks: keep the historical trails and extend live planes' tails between
+  // scan refreshes, instead of dropping history when the first /positions lands.
+  const mapScanData = useMemo(
+    () =>
+      scanData
+        ? {
+            ...scanData,
+            tracks: positionsData
+              ? mergeLiveTracks(scanData.tracks, positionsData.tracks)
+              : scanData.tracks,
+          }
+        : null,
+    [scanData, positionsData],
+  );
 
   return (
     <div className="app-shell">
@@ -210,15 +525,30 @@ export default function App() {
           <div className="brand-copy">
             <div className="eyebrow">{airport ? `${airport.city} | Airport: ${airport.icao}` : "Select airport"}</div>
             <h1>{APP_TITLE}</h1>
-            <p className="tagline">{APP_TAGLINE}</p>
+            <p className="tagline">{tagline}</p>
           </div>
         </div>
         <div className="topbar-actions">
-          <BackfillStatusIcon backfill={scanData?.historical_backfill} />
-          <div className="live-pill">
-            <span aria-hidden="true" />
-            live · {activeNow} circling now
-          </div>
+          <span
+            className="count-badge"
+            data-tooltip="Aircraft flying repetitive patterns near this airport right now"
+            title="Aircraft flying repetitive patterns near this airport right now"
+            tabIndex={0}
+            role="status"
+            aria-label={`${activeNow} aircraft in the pattern right now`}
+          >
+            {activeNow}
+          </span>
+          <span
+            className="count-badge square"
+            data-tooltip="People viewing circlejerks.live right now"
+            title="People viewing circlejerks.live right now"
+            tabIndex={0}
+            role="status"
+            aria-label={`${onlineCount ?? 0} people online right now`}
+          >
+            {onlineCount ?? "–"}
+          </span>
           <div className="status">{status}</div>
         </div>
       </header>
@@ -244,11 +574,12 @@ export default function App() {
           <div className="input-row">
             <input value={airportQuery} onChange={(event) => setAirportQuery(event.target.value)} placeholder="ICAO, IATA, or name" />
             <button className="icon-button" onClick={handleAirportSearch} title="Search airports"><Search size={18} /></button>
+            <a className="icon-button" href={`/stats?airport=${encodeURIComponent(airport?.icao ?? "KBJC")}`} title="Airport history & stats" aria-label="Airport history & stats"><History size={18} /></a>
           </div>
           {airportResults.length > 0 && (
             <div className="result-menu">
               {airportResults.map((candidate) => (
-                <button key={candidate.icao} onClick={() => { setAirport(candidate); setAirportResults([]); }}>
+                <button key={candidate.icao} onClick={() => { setAirport(candidate); setAirportQuery(candidate.icao); setAirportResults([]); }}>
                   <strong>{candidate.icao}</strong> {candidate.name}
                 </button>
               ))}
@@ -267,13 +598,198 @@ export default function App() {
 
       <main className="main-grid">
         <section className="map-panel">
+          <div className="map-controls">
+            <label className="map-toggle" title="When on, the map re-centers on activity. Uncheck to pan and zoom freely.">
+              <input
+                type="checkbox"
+                checked={autoZoom}
+                onChange={(event) => setAutoZoom(event.target.checked)}
+              />
+              <span>Auto-zoom</span>
+            </label>
+            <button
+              type="button"
+              className={`map-icon-toggle${showHeatmap ? " active" : ""}`}
+              onClick={() => setMapOverlay((o) => (o === "noise" ? "none" : "noise"))}
+              title={showHeatmap ? "Showing noise-intensity heatmap. Click to return to individual tracks." : "Show a noise-intensity heatmap (lower aircraft = brighter)."}
+              aria-label="Toggle noise heatmap"
+              aria-pressed={showHeatmap}
+            >
+              <Flame size={16} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className={`map-icon-toggle${mapOverlay === "history" ? " active" : ""}`}
+              onClick={() => setMapOverlay((o) => (o === "history" ? "none" : "history"))}
+              title={mapOverlay === "history" ? "Showing historical track density. Click to hide." : "Show 1–7 days of historical flight paths."}
+              aria-label="Toggle historical track density"
+              aria-pressed={mapOverlay === "history"}
+            >
+              <Route size={16} aria-hidden="true" />
+            </button>
+            <button
+              className={`map-icon-toggle${patternEditing ? " active" : ""}`}
+              title="Edit VNAP patterns"
+              aria-label="Edit VNAP patterns"
+              onClick={() => { setPatternEditing((v) => !v); if (patternEditing) { setEditingRunwayId(null); setEditingPoints([]); } }}
+              disabled={!airport?.icao}
+            >
+              <MapPin size={16} />
+            </button>
+            <AtcListenButton airportIcao={airport?.icao} />
+          </div>
+          {mapOverlay === "history" && (
+            <div className="history-controls" role="group" aria-label="Historical track density controls">
+              <div className="history-controls-row">
+                <span className="history-controls-label">Days</span>
+                <div className="segmented history-days">
+                  {[1, 2, 3, 4, 5, 6, 7].map((d) => (
+                    <button
+                      key={d}
+                      className={historyDays === d ? "active" : ""}
+                      onClick={() => setHistoryDays(d)}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="history-controls-row">
+                <span className="history-controls-label">View</span>
+                <div className="segmented history-mode">
+                  {([["lines", "Lines"], ["density", "Density"], ["average", "Average"]] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      className={historyMode === mode ? "active" : ""}
+                      onClick={() => setHistoryMode(mode)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {historyMode === "average" && (
+                <>
+                  <div className="history-controls-row">
+                    <span className="history-controls-label">Spread</span>
+                    <div className="segmented history-sigma">
+                      {[1, 2, 3].map((k) => (
+                        <button
+                          key={k}
+                          className={historySigmaK === k ? "active" : ""}
+                          onClick={() => setHistorySigmaK(k)}
+                        >
+                          {k}σ
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {historyAverage && averageDrawable && (
+                    <div className="history-key">
+                      {[...historyAverage.classes]
+                        .sort((a, b) => Number(a.class.replace(/[^0-9]/g, "")) - Number(b.class.replace(/[^0-9]/g, "")))
+                        .map((c) => (
+                          <span key={c.class} className="history-key-item">
+                            <i className="history-key-dot cls-rwy" />
+                            Rwy {c.class} ({c.count})
+                          </span>
+                        ))}
+                      {historyAverage.laps.length > averageLapTotal && (
+                        <span className="history-key-item history-key-context">
+                          <i className="history-key-dot cls-context" />
+                          Other laps ({historyAverage.laps.length - averageLapTotal})
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              {historyMode === "lines" && (
+                <div className="history-controls-row">
+                  <span className="history-controls-label">Opacity</span>
+                  <input
+                    className="history-alpha"
+                    type="range"
+                    min={0.03}
+                    max={1}
+                    step={0.01}
+                    value={historyLineAlpha}
+                    onChange={(e) => setHistoryLineAlpha(Number(e.target.value))}
+                    aria-label="Line opacity"
+                    title="Adjust how faint or bold the individual track lines are"
+                  />
+                  <span className="history-alpha-value">{Math.round(historyLineAlpha * 100)}%</span>
+                </div>
+              )}
+              <div className="history-controls-caption">
+                {historyError
+                  ? "Couldn't load history"
+                  : historyMode === "average"
+                    ? (!historyData || !historyRunways)
+                      ? "Loading tracks…"
+                      : !averageDrawable
+                        ? "Not enough repeated laps to average yet"
+                        : `${averageLapTotal.toLocaleString()} laps · ${[...historyAverage!.classes].sort((a, b) => Number(a.class.replace(/[^0-9]/g, "")) - Number(b.class.replace(/[^0-9]/g, ""))).map((c) => `Rwy ${c.class}`).join(", ")}`
+                    : !historyData
+                      ? "Loading history…"
+                      : historyData.truncated
+                        ? `Showing ${historyData.tracks.length.toLocaleString()} of ${historyData.total_tracks.toLocaleString()} flights`
+                        : `${historyData.tracks.length.toLocaleString()} flights`}
+              </div>
+            </div>
+          )}
+          <WindIndicator airportIcao={airport?.icao ?? null} windowCode={windowCode} />
+          <BackfillBanner
+            airportIcao={airport?.icao ?? null}
+            windowCode={windowCode}
+            onShortenWindow={() => setWindowCode("1h")}
+          />
           <MapView
             airport={airport}
             userLocation={userLocation}
-            scanData={scanData}
-            selectedIcao24={selected?.icao24}
+            scanData={mapScanData}
+            windowLoading={isWindowLoading(windowCode, scanData?.window.code)}
+            windowLoadingLabel={windowLabel(windowCode).toLowerCase()}
+            selectedIcao24={focusedIcao24}
+            autoZoom={autoZoom}
+            showHeatmap={showHeatmap}
+            historyTracks={mapOverlay === "history" ? historyData?.tracks ?? null : null}
+            historyMode={mapOverlay === "history" ? historyMode : null}
+            historyLineAlpha={historyLineAlpha}
+            historyAverage={mapOverlay === "history" && historyMode === "average" ? historyAverage : null}
+            historySigmaK={historySigmaK}
             onPickLocation={(lat, lon) => setUserLocation({ lat, lon })}
+            onSelectAircraft={onSelectAircraft}
+            patterns={patterns}
+            editingRunwayId={patternEditing ? editingRunwayId : null}
+            editingPoints={editingPoints}
+            editingClosed={true}
+            editSeedKey={editSeedKey}
+            onEditingPointsChange={setEditingPoints}
           />
+          {patternEditing && airport?.icao && (
+            <PatternEditorPanel
+              airportIcao={airport.icao}
+              runwayId={editingRunwayId}
+              points={editingPoints}
+              onSelectRunway={(rwy) => { setEditingRunwayId(rwy); setEditingPoints([]); setEditSeedKey((k) => k + 1); }}
+              onSeedPoints={seedEditingPoints}
+              onClose={() => { setPatternEditing(false); setEditingRunwayId(null); setEditingPoints([]); }}
+              onSaved={reloadPatterns}
+            />
+          )}
+          {(() => {
+            const focusedOffender = focusedIcao24
+              ? scanData?.offenders.find((o) => o.icao24 === focusedIcao24) ?? null
+              : null;
+            return focusedOffender && !patternEditing && mapOverlay !== "history" ? (
+              <AircraftMapCard
+                offender={focusedOffender}
+                offenders={scanData?.offenders ?? []}
+                onClose={() => setFocusedIcao24(null)}
+              />
+            ) : null;
+          })()}
         </section>
 
         <section className="side-panel">
@@ -314,12 +830,12 @@ export default function App() {
               Prepare complaint
             </button>
           </div>
-          <Counters data={scanData} />
+          <Counters data={scanData} status={status} onRefresh={refreshScan} airportIcao={airport?.icao} />
           <OffenderTable
             offenders={scanData?.offenders ?? []}
             selected={selected}
             reportCounts={preferences.report_counts}
-            onSelect={setSelected}
+            onSelect={(o) => { setSelected(o); setFocusedIcao24(o.icao24); }}
           />
           <Histogram rows={scanData?.histogram ?? []} />
         </section>
@@ -329,88 +845,293 @@ export default function App() {
         offender={selected}
         offenders={scanData?.offenders ?? []}
         scanParams={scanParams}
+        scanData={scanData}
         config={config}
         formUrl={formUrl}
         preferences={preferences}
         onPreferencesChange={setPreferences}
       />
+
+      <WorstOffenderCards data={worstOffenders} />
+
+      <MovementSection
+        supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL}
+        volunteerUrl={sosaUrl}
+        airportLabel={airport ? `${airport.name}${airport.iata ? ` (${airport.iata})` : ""}` : null}
+      />
+
+      <SponsorsSection sponsors={sponsors} supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL} />
+
+      {showOnboarding && <OnboardingTour onClose={() => setShowOnboarding(false)} />}
     </div>
   );
 }
 
-function backfillStatus(backfill?: ScanResponse["historical_backfill"]) {
-  if (!backfill) return null;
-  const retryMinutes = backfill.retry_after_seconds ? Math.ceil(backfill.retry_after_seconds / 60) : null;
-  if (backfill.enabled === false) {
-    return {
-      tone: "info",
-      icon: History,
-      message: backfill.reason ?? "Historical coverage is built from live polling for this airport."
-    };
+function WorstOffenderCards({ data }: { data: WorstOffendersResponse | null }) {
+  if (!data || data.offenders.length === 0) {
+    return (
+      <section className="bottom-section repeat-offenders empty">
+        <h2>Hall of Shame</h2>
+        <p>No aircraft has flown enough abusive patterns here yet. As offenders rack up circles, the worst five show up here.</p>
+      </section>
+    );
   }
-  if (backfill.available === false) {
-    return {
-      tone: "error",
-      icon: CloudOff,
-      message: backfill.reason ?? "Historical coverage is unavailable."
-    };
-  }
-  if (backfill.backing_off) {
-    return {
-      tone: "warning",
-      icon: AlertTriangle,
-      message: `OpenSky historical backfill is backing off after rate limiting${retryMinutes ? `; retry in about ${retryMinutes} min.` : "."}`
-    };
-  }
-  if (backfill.complete_for_requested_window) {
-    return {
-      tone: "ok",
-      icon: CheckCircle2,
-      message: "Historical coverage is complete for this window."
-    };
-  }
-  return {
-    tone: "pending",
-    icon: Clock3,
-    message: `Historical coverage is still filling at ${backfill.resolution_seconds ?? "?"}s resolution.`
-  };
-}
-
-function BackfillStatusIcon({ backfill }: { backfill?: ScanResponse["historical_backfill"] }) {
-  const status = backfillStatus(backfill);
-  if (!status) return null;
-  const Icon = status.icon;
   return (
-    <span
-      className={`status-icon ${status.tone}`}
-      title={status.message}
-      data-tooltip={status.message}
-      role="status"
-      tabIndex={0}
-      aria-label={status.message}
-    >
-      <Icon size={18} aria-hidden="true" />
-    </span>
+    <section className="bottom-section repeat-offenders">
+      <header>
+        <h2>Hall of Shame</h2>
+        <p>
+          The five worst offenders{data.is_fallback ? "" : " at this airport"}, ranked by VNAP violations × circles flown.
+          {data.is_fallback && (
+            <span className="worst-offenders-fallback"> No data here yet — showing the nearest airport, {data.resolved_label} ({data.resolved_icao}).</span>
+          )}
+        </p>
+      </header>
+      <ol className="offender-leaderboard">
+        {data.offenders.map((row, index) => (
+          <li key={row.icao24}>
+            <a
+              className="offender-card"
+              href={statsHighlightHref(data.resolved_icao, row.icao24)}
+              title="Open this aircraft in the airport stats (VNAP compliance)"
+            >
+              <div className="offender-rank" aria-hidden="true">
+                {index === 0 ? <span className="offender-clown">🤡</span> : `#${index + 1}`}
+              </div>
+              <div className="offender-body">
+                <div className="offender-card-head">
+                  <strong>{row.tail}</strong>
+                  <span className="offender-circles" title="Total circles flown at this airport">
+                    {row.total_circles}× circles
+                  </span>
+                </div>
+                <div className="offender-habit" title={`Worst VNAP axis: ${row.worst_axis ?? "n/a"} (${row.worst_axis_score ?? 0})`}>
+                  {habitLabel(row.worst_axis)}
+                </div>
+                <div className="offender-meta">
+                  {row.report_count}× reported
+                  {row.last_reported_at ? ` · last reported ${formatLocalTime(row.last_reported_at)}` : ""}
+                </div>
+              </div>
+            </a>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
-function Counters({ data }: { data: ScanResponse | null }) {
+function MovementSection({
+  supportUrl,
+  volunteerUrl,
+  airportLabel,
+}: {
+  supportUrl: string;
+  volunteerUrl: string;
+  airportLabel: string | null;
+}) {
+  const isAirportSpecific = volunteerUrl !== "https://www.saveourskiesalliance.org/";
+  return (
+    <section className="bottom-section movement">
+      <header>
+        <h2>Take back the skies.</h2>
+        <p>
+          A handful of pilots and special-interest lobbyists treat the airspace
+          over your house as their personal practice yard. We're a grass-roots
+          effort to balance the scales — and to remind the people in the sky
+          that the rest of us live, sleep, and raise kids underneath it.
+        </p>
+      </header>
+
+      <div className="movement-pillars">
+        <article className="movement-card">
+          <h3>Educate the cockpit</h3>
+          <p>
+            Donations fund outreach to flight schools and student pilots:
+            noise-abatement procedures, safer departure tracks over populated
+            areas, and the basic civic awareness that "legal" is not the same
+            as "neighborly."
+          </p>
+        </article>
+
+        <article className="movement-card">
+          <h3>Speak louder than the lobby</h3>
+          <p>
+            AOPA and friends are organized, funded, and loud. We're catching up.
+            Every complaint filed, every neighbor signed up, every dollar in the
+            jar makes it harder for our elected officials to keep pretending
+            this isn't a public-health issue.
+          </p>
+        </article>
+
+        <article className="movement-card">
+          <h3>Volunteer</h3>
+          <p>
+            We need analysts, designers, organizers, lawyers, and locals in
+            every airport community. If you can spare an evening — or a
+            lifetime — we'd love your help.
+          </p>
+        </article>
+      </div>
+
+      <div className="movement-actions">
+        <a className="movement-cta primary" href={supportUrl} target="_blank" rel="noreferrer">
+          Donate to the effort
+        </a>
+        <a
+          className="movement-cta secondary"
+          href={volunteerUrl}
+          target="_blank"
+          rel="noreferrer"
+          title={
+            isAirportSpecific && airportLabel
+              ? `Save Our Skies Alliance page for ${airportLabel}`
+              : "Save Our Skies Alliance"
+          }
+        >
+          {isAirportSpecific && airportLabel
+            ? `Volunteer at ${airportLabel}`
+            : "Volunteer / get involved"}
+        </a>
+      </div>
+
+    </section>
+  );
+}
+
+function SponsorsSection({
+  sponsors,
+  supportUrl,
+}: {
+  sponsors: SponsorsResponse | null;
+  supportUrl: string;
+}) {
+  const supporters = sponsors?.supporters ?? [];
+  return (
+    <section className="bottom-section sponsors">
+      <header>
+        <h2>Thanks to our supporters</h2>
+        <p>
+          Circle Jerks is free to use. Server bills, ADS-B feeds, and AI calls are paid for by{" "}
+          <a href={supportUrl} target="_blank" rel="noreferrer">
+            generous folks
+          </a>{" "}
+          on Buy Me a Coffee.
+        </p>
+      </header>
+      {supporters.length === 0 ? (
+        <div className="sponsors-empty">
+          <p>
+            {sponsors?.configured
+              ? "No supporters yet — be the first!"
+              : "Be the first to chip in for the next month of feeds."}
+          </p>
+          <a className="sponsor-cta" href={supportUrl} target="_blank" rel="noreferrer">
+            Buy me a coffee
+          </a>
+        </div>
+      ) : (
+        <>
+          <div className="sponsor-grid">
+            {supporters.slice(0, 24).map((supporter, idx) => (
+              <div key={`${supporter.name}-${idx}`} className="sponsor-card">
+                <div className="sponsor-name">{supporter.name}</div>
+                <div className="sponsor-coffees">
+                  {supporter.coffees}× {supporter.coffees === 1 ? "coffee" : "coffees"}
+                </div>
+                {supporter.message && <div className="sponsor-message">"{supporter.message}"</div>}
+              </div>
+            ))}
+          </div>
+          <a className="sponsor-cta" href={supportUrl} target="_blank" rel="noreferrer">
+            Become a supporter
+          </a>
+        </>
+      )}
+    </section>
+  );
+}
+
+function Counters({
+  data,
+  status,
+  onRefresh,
+  airportIcao,
+}: {
+  data: ScanResponse | null;
+  status: string;
+  onRefresh: () => Promise<void> | void;
+  airportIcao?: string | null;
+}) {
   const counters = data?.counters;
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  };
   return (
-    <div className="counter-strip">
-      <div><strong>{counters?.circles ?? 0}</strong><span>circles</span></div>
-      <div><strong>{counters?.touch_and_gos ?? 0}</strong><span>touch-and-gos</span></div>
-      <div><strong>{counters?.passes ?? 0}</strong><span>passes over you</span></div>
-      <div><strong>{counters?.offenders_active_now ?? 0}</strong><span>circling now</span></div>
-      <div><strong>{data?.tracks.length ?? 0}</strong><span>tracked paths {counters?.label ?? ""}</span></div>
+    <div className="panel-block counters-block">
+      <div className="counters-header">
+        <span className="counters-status" title={status}>{status}</span>
+        <button
+          type="button"
+          className="counters-refresh"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          title="Force a fresh scan now (otherwise auto-refreshes every 5s)"
+          aria-label="Refresh scan data"
+        >
+          <RotateCw size={14} aria-hidden="true" className={refreshing ? "spin" : undefined} />
+          <span>{refreshing ? "Refreshing…" : "Refresh"}</span>
+        </button>
+      </div>
+      <div className="counter-strip">
+        <div><strong>{counters?.circles ?? 0}</strong><span>circles</span></div>
+        <div><strong>{counters?.touch_and_gos ?? 0}</strong><span>touch-and-gos</span></div>
+        <div><strong>{counters?.passes ?? 0}</strong><span>passes over you</span></div>
+        <div><strong>{counters?.offenders_active_now ?? 0}</strong><span>planes tracked</span></div>
+        <div><strong>{data?.tracks.length ?? 0}</strong><span>tracked paths {counters?.label ?? ""}</span></div>
+      </div>
+      <FlowBadge airportIcao={airportIcao} />
     </div>
   );
+}
+
+function runwayBreakdownLabel(breakdown: Record<string, number>): string {
+  const entries = Object.entries(breakdown);
+  if (entries.length === 0) return "";
+  // Sorted descending by count so the most-used runway leads.
+  entries.sort((a, b) => b[1] - a[1]);
+  if (entries.length === 1) {
+    return `rwy ${entries[0][0]}`;
+  }
+  return entries.map(([rwy, n]) => `${n}×${rwy}`).join(" ");
 }
 
 function originDisplay(row: Offender) {
   const label = row.origin_label ?? row.origin_city ?? row.origin_airport_icao ?? "unknown";
   const detail = row.origin_airport_icao && !label.includes(row.origin_airport_icao) ? row.origin_airport_icao : "";
   return { label, detail };
+}
+
+const OFFENDER_OWNER_LABELS: Record<string, string> = {
+  individual: "Individual", llc: "LLC", corporation: "Corp", government: "Gov",
+  flight_school: "Flight school", university: "University", club: "Club",
+  trust: "Trust", skydiving: "Skydiving", commercial_airline: "Airline",
+  unknown: "Unknown",
+};
+
+function offenderHoverTitle(row: Offender): string {
+  return [
+    `Type: ${row.aircraft_type ?? "unknown"}`,
+    `Owner: ${OFFENDER_OWNER_LABELS[row.owner_class ?? "unknown"] ?? row.owner_class}${row.owner_source === "community" ? " (community)" : ""}`,
+    `Flight school: ${row.is_flight_school ? "yes" : "no"}`,
+  ].join(" · ");
 }
 
 function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
@@ -424,25 +1145,28 @@ function OffenderTable({ offenders, selected, reportCounts, onSelect }: {
       <div className="section-title">Worst Offenders</div>
       <div className="table">
         <div className="table-row header">
-          <span>Callsign</span><span>Origin</span><span>Score</span><span>Cir</span><span>TG</span><span>Pass</span><span>Avg over you</span>
+          <span>Callsign</span><span>Origin</span><span>TG</span><span title="VNAP infraction score: starts at 0 (clean) and climbs toward 100 as noise-abatement violations pile up. Higher = worse.">VNAP</span>
         </div>
         {offenders.length === 0 && <div className="empty-row">No events in this window yet.</div>}
-        {offenders.map((row) => (
+        {offenders.slice(0, 10).map((row) => (
           <button
             key={row.icao24}
             className={`table-row ${selected?.icao24 === row.icao24 ? "selected" : ""}`}
             onClick={() => onSelect(row)}
+            title={offenderHoverTitle(row)}
           >
             <span>
-              <strong>{row.callsign}</strong>
+              <strong>{row.callsign}{row.is_cowboy ? " 🤠" : ""}{row.is_flight_school ? " ✈" : ""}</strong>
               <small>{row.icao24}{reportCounts[row.icao24] ? ` | reported ${reportCounts[row.icao24]}x` : ""}</small>
             </span>
             <span>{originDisplay(row).label}<small>{originDisplay(row).detail}</small></span>
-            <span>{row.score}</span>
-            <span>{row.circles}</span>
-            <span>{row.touch_and_gos}</span>
-            <span>{row.passes}</span>
-            <span>{numberOrDash(row.avg_altitude_over_user_ft_agl, " ft")}</span>
+            <span>
+              {row.touch_and_gos}
+              {row.runway_breakdown && Object.keys(row.runway_breakdown).length > 0 && (
+                <small>{runwayBreakdownLabel(row.runway_breakdown)}</small>
+              )}
+            </span>
+            <span>{row.vnap_score != null ? row.vnap_score : "—"}</span>
           </button>
         ))}
       </div>
@@ -495,27 +1219,24 @@ function complaintErrorLabel(error: unknown) {
   if (error instanceof ApiError && error.status === 404) {
     return "Combined complaint endpoint was not available, so a local combined draft was generated.";
   }
-  if (error instanceof Error) return error.message;
-  return "Combined complaint failed";
+  if (error instanceof ApiError && error.status === 408) {
+    return "AI request timed out; generated a local draft instead.";
+  }
+  if (error instanceof Error) return `${error.message}; generated a local draft instead.`;
+  return "Combined complaint failed; generated a local draft instead.";
 }
 
 function localCombinedComplaint(
   targets: Offender[],
   scanParams: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
-  messagePrefs: MessagePreferences,
   reportCounts: Record<string, number>
 ) {
-  const callsigns = targets.map((target) => target.callsign || target.icao24.toUpperCase());
+  const callsigns = targets.map((target) => displayTail(target.callsign, target.icao24));
   const first = Math.min(...targets.map((target) => target.first_event_at).filter(Boolean));
   const last = Math.max(...targets.map((target) => target.last_event_at).filter(Boolean));
-  const totalCircles = targets.reduce((sum, target) => sum + target.circles, 0);
   const totalTouchAndGos = targets.reduce((sum, target) => sum + target.touch_and_gos, 0);
-  const totalLowApproaches = targets.reduce((sum, target) => sum + target.low_approaches, 0);
   const totalPasses = targets.reduce((sum, target) => sum + target.passes, 0);
   const previousReports = targets.reduce((sum, target) => sum + (reportCounts[target.icao24] ?? 0), 0);
-  const avgAltitudes = targets
-    .map((target) => target.avg_altitude_over_user_ft_agl)
-    .filter((value): value is number => value != null);
   const minAltitudes = targets
     .map((target) => target.min_altitude_over_user_ft_agl)
     .filter((value): value is number => value != null);
@@ -525,9 +1246,9 @@ function localCombinedComplaint(
       .filter((value): value is string => Boolean(value && value !== "unknown"))
   ));
   const parts = [
-    `In the selected ${scanParams.window} window, I observed ${targets.length} aircraft near ${scanParams.airport_icao}: ${listLabel(callsigns.slice(0, 8))}.`
+    `In the selected ${windowLabel(scanParams.window)} window, I observed ${targets.length} aircraft near ${scanParams.airport_icao}: ${listLabel(callsigns.slice(0, 8))}.`
   ];
-  if (messagePrefs.include_all_detail && Number.isFinite(first) && Number.isFinite(last)) {
+  if (Number.isFinite(first) && Number.isFinite(last)) {
     parts.push(`The relevant activity was observed from ${formatLocalTime(first)} to ${formatLocalTime(last)} local time.`);
   }
   if (origins.length > 0) {
@@ -537,20 +1258,11 @@ function localCombinedComplaint(
     const plural = previousReports === 1 ? "prior complaint" : "prior complaints";
     parts.push(`My browser records show ${previousReports} ${plural} for aircraft in this group.`);
   }
-  if (messagePrefs.include_all_detail) {
-    const activity = [];
-    if (messagePrefs.include_circles) activity.push(`${totalCircles} total circles`);
-    activity.push(`${totalTouchAndGos} touch-and-go operations`);
-    activity.push(`${totalLowApproaches} low approaches`);
-    activity.push(`${totalPasses} direct overflights of my location`);
-    parts.push(`The combined activity included ${activity.join(", ")}.`);
-  } else if (messagePrefs.include_circles) {
-    parts.push(`Together, these aircraft were detected circling ${totalCircles} times.`);
-  }
-  if (messagePrefs.include_altitude_over_house && avgAltitudes.length > 0) {
-    const avg = Math.round(avgAltitudes.reduce((sum, value) => sum + value, 0) / avgAltitudes.length);
-    const lowest = minAltitudes.length > 0 ? `, with the lowest observed pass at ${Math.min(...minAltitudes)} ft AGL` : "";
-    parts.push(`The average observed altitude over my location was ${avg} ft AGL${lowest}.`);
+  parts.push(
+    `Together they made ${totalTouchAndGos} touch-and-go operations and ${totalPasses} direct overflights of my location.`
+  );
+  if (minAltitudes.length > 0) {
+    parts.push(`The lowest overflight of my home was about ${Math.min(...minAltitudes)} ft above ground.`);
   }
   parts.push("Please review this combined aircraft activity and consider appropriate noise-abatement follow-up.");
   return parts.join(" ");
@@ -559,14 +1271,13 @@ function localCombinedComplaint(
 function localSingleComplaint(
   target: Offender,
   scanParams: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window">,
-  messagePrefs: MessagePreferences,
   reportCount: number
 ) {
-  const callsign = target.callsign || target.icao24.toUpperCase();
+  const callsign = displayTail(target.callsign, target.icao24);
   const parts = [
-    `In the selected ${scanParams.window} window, aircraft ${callsign} (${target.icao24}) was observed near ${scanParams.airport_icao}.`
+    `In the selected ${windowLabel(scanParams.window)} window, aircraft ${callsign} was observed near ${scanParams.airport_icao}.`
   ];
-  if (messagePrefs.include_all_detail && target.first_event_at && target.last_event_at) {
+  if (target.first_event_at && target.last_event_at) {
     parts.push(`The relevant activity was observed from ${formatLocalTime(target.first_event_at)} to ${formatLocalTime(target.last_event_at)} local time.`);
   }
   if (target.origin_label && target.origin_label !== "unknown") {
@@ -576,57 +1287,420 @@ function localSingleComplaint(
     const plural = reportCount === 1 ? "prior complaint" : "prior complaints";
     parts.push(`My browser records show ${reportCount} ${plural} for this aircraft.`);
   }
-  if (messagePrefs.include_all_detail) {
-    const activity = [];
-    if (messagePrefs.include_circles) activity.push(`${target.circles} circles`);
-    activity.push(`${target.touch_and_gos} touch-and-go operations`);
-    activity.push(`${target.low_approaches} low approaches`);
-    activity.push(`${target.passes} direct overflights of my location`);
-    parts.push(`The activity included ${activity.join(", ")}.`);
-  } else if (messagePrefs.include_circles) {
-    parts.push(`The aircraft was detected circling ${target.circles} times.`);
-  }
-  if (messagePrefs.include_altitude_over_house && target.avg_altitude_over_user_ft_agl != null) {
-    const lowest = target.min_altitude_over_user_ft_agl != null
-      ? `, with the lowest observed pass at ${target.min_altitude_over_user_ft_agl} ft AGL`
-      : "";
-    parts.push(`The average observed altitude over my location was ${target.avg_altitude_over_user_ft_agl} ft AGL${lowest}.`);
+  parts.push(
+    `It performed ${target.touch_and_gos} touch-and-go operations and made ${target.passes} direct overflights of my location.`
+  );
+  if (target.min_altitude_over_user_ft_agl != null) {
+    parts.push(`The lowest overflight of my home was about ${target.min_altitude_over_user_ft_agl} ft above ground.`);
+  } else if (target.avg_altitude_over_user_ft_agl != null) {
+    parts.push(`The average overflight of my home was about ${target.avg_altitude_over_user_ft_agl} ft above ground.`);
   }
   parts.push("Please review this activity and consider appropriate noise-abatement follow-up.");
   return parts.join(" ");
 }
 
-function DetailPanel({ offender, offenders, scanParams, config, formUrl, preferences, onPreferencesChange }: {
+function loadCanvasImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+function drawWrappedText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines: number
+) {
+  const words = text.replace(/\s+/g, " ").trim().split(" ");
+  let line = "";
+  let lines = 0;
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (ctx.measureText(next).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      y += lineHeight;
+      lines += 1;
+      line = word;
+      if (lines >= maxLines) {
+        ctx.fillText("...", x, y);
+        return y + lineHeight;
+      }
+    } else {
+      line = next;
+    }
+  }
+  if (line && lines < maxLines) {
+    ctx.fillText(line, x, y);
+    y += lineHeight;
+  }
+  return y;
+}
+
+function captureMapSnapshot() {
+  const mapElement = document.querySelector(".openlayers-map") as HTMLElement | null;
+  if (!mapElement) return null;
+  const canvases = Array.from(mapElement.querySelectorAll("canvas"))
+    .filter((canvas) => canvas.width > 0 && canvas.height > 0);
+  if (canvases.length === 0) return null;
+
+  const mapRect = mapElement.getBoundingClientRect();
+  const output = document.createElement("canvas");
+  output.width = 1000;
+  output.height = 520;
+  const ctx = output.getContext("2d");
+  if (!ctx || mapRect.width <= 0 || mapRect.height <= 0) return null;
+  ctx.fillStyle = "#e8eaed";
+  ctx.fillRect(0, 0, output.width, output.height);
+
+  try {
+    for (const canvas of canvases) {
+      const rect = canvas.getBoundingClientRect();
+      const style = window.getComputedStyle(canvas);
+      const x = ((rect.left - mapRect.left) / mapRect.width) * output.width;
+      const y = ((rect.top - mapRect.top) / mapRect.height) * output.height;
+      const width = (rect.width / mapRect.width) * output.width;
+      const height = (rect.height / mapRect.height) * output.height;
+      ctx.globalAlpha = Number(style.opacity || 1);
+      ctx.drawImage(canvas, x, y, width, height);
+    }
+    ctx.globalAlpha = 1;
+    output.toDataURL("image/png");
+    return output;
+  } catch {
+    return null;
+  }
+}
+
+function reportCountLabel(count: number) {
+  return count === 1 ? "1 report" : `${count} reports`;
+}
+
+function targetDisplay(target: Offender) {
+  return target.callsign || target.icao24.toUpperCase();
+}
+
+function shareStats(targets: Offender[], reportCounts: Record<string, number>) {
+  return targets.map((target) => ({
+    label: targetDisplay(target),
+    icao24: target.icao24,
+    count: (target.report_count ?? 0) + (reportCounts[target.icao24] ?? 0)
+  }));
+}
+
+function defaultShareText(
+  complaintText: string,
+  scanData: ScanResponse | null,
+  scanParams: Pick<ScanParams, "airport_icao" | "window">
+) {
+  const counters = scanData?.counters;
+  const airportLabel = scanData?.airport
+    ? `${scanData.airport.city} (${scanData.airport.icao})`
+    : scanParams.airport_icao;
+  const stats = counters
+    ? `${counters.circles} circles, ${counters.touch_and_gos} touch-and-gos, ${counters.passes} passes over my location, and ${counters.offenders_active_now} planes tracked nearby`
+    : "repeated aircraft activity";
+  return [
+    "Share on social media!",
+    "",
+    `Circle Jerks tracked ${stats} near ${airportLabel} in the selected ${windowLabel(scanParams.window)} window.`,
+    "",
+    complaintText,
+    "",
+    `See what is circling overhead: ${SITE_URL}`
+  ].join("\n");
+}
+
+async function makeShareImage(input: {
+  text: string;
+  scanData: ScanResponse | null;
+  scanParams: Pick<ScanParams, "airport_icao" | "window">;
+  targetStats: Array<{ label: string; icao24: string; count: number }>;
+}) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1080;
+  canvas.height = 1350;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  const counters = input.scanData?.counters;
+  const airportLabel = input.scanData?.airport
+    ? `${input.scanData.airport.city} (${input.scanData.airport.icao})`
+    : input.scanParams.airport_icao;
+  const logo = await loadCanvasImage(logoUrl);
+  const map = captureMapSnapshot();
+
+  ctx.fillStyle = "#f6f4ef";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const gradient = ctx.createLinearGradient(0, 0, canvas.width, 360);
+  gradient.addColorStop(0, "#ffffff");
+  gradient.addColorStop(1, "#eef5fa");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, 360);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#e6e1d6";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(46, 44, 988, 1260, 24);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(134, 128, 56, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(logo, 78, 72, 112, 112);
+  ctx.restore();
+
+  ctx.fillStyle = "#1b3a6b";
+  ctx.font = "800 42px Inter, Arial, sans-serif";
+  ctx.fillText("Circle Jerks", 216, 116);
+  ctx.fillStyle = "#6b7185";
+  ctx.font = "700 24px Inter, Arial, sans-serif";
+  ctx.fillText(SITE_URL, 216, 154);
+  ctx.fillStyle = "#d64b2c";
+  ctx.font = "900 32px Inter, Arial, sans-serif";
+  ctx.fillText("Share on social media!", 710, 122);
+
+  ctx.fillStyle = "#6b7185";
+  ctx.font = "800 20px Inter, Arial, sans-serif";
+  ctx.fillText(`${airportLabel} | ${windowLabel(input.scanParams.window)}`, 66, 218);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(66, 244, 948, 480, 18);
+  ctx.clip();
+  if (map) {
+    ctx.drawImage(map, 66, 244, 948, 480);
+  } else {
+    ctx.fillStyle = "#e8eaed";
+    ctx.fillRect(66, 244, 948, 480);
+    ctx.fillStyle = "#1b3a6b";
+    ctx.font = "800 28px Inter, Arial, sans-serif";
+    ctx.fillText("Map snapshot unavailable in this browser.", 120, 456);
+    ctx.fillStyle = "#6b7185";
+    ctx.font = "600 20px Inter, Arial, sans-serif";
+    ctx.fillText("The live map is available at circlejerks.live.", 120, 494);
+  }
+  ctx.restore();
+
+  const statRows = [
+    ["Circles", counters?.circles ?? 0],
+    ["T&Gs", counters?.touch_and_gos ?? 0],
+    ["Passes", counters?.passes ?? 0],
+    ["Tracked now", counters?.offenders_active_now ?? 0]
+  ];
+  statRows.forEach(([label, value], index) => {
+    const x = 66 + index * 237;
+    ctx.fillStyle = "#fbfaf6";
+    ctx.strokeStyle = "#e6e1d6";
+    ctx.beginPath();
+    ctx.roundRect(x, 748, 214, 118, 16);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#1b3a6b";
+    ctx.font = "900 42px Inter, Arial, sans-serif";
+    ctx.fillText(String(value), x + 22, 804);
+    ctx.fillStyle = "#6b7185";
+    ctx.font = "800 20px Inter, Arial, sans-serif";
+    ctx.fillText(String(label), x + 22, 838);
+  });
+
+  ctx.fillStyle = "#1f2330";
+  ctx.font = "800 24px Inter, Arial, sans-serif";
+  ctx.fillText("Repeat offender reports", 66, 918);
+  ctx.fillStyle = "#6b7185";
+  ctx.font = "700 20px Inter, Arial, sans-serif";
+  const statText = input.targetStats.length > 0
+    ? input.targetStats.slice(0, 6).map((row) => `${row.label}: ${reportCountLabel(row.count)}`).join("  |  ")
+    : "No repeat offender stats yet.";
+  drawWrappedText(ctx, statText, 66, 952, 948, 28, 2);
+
+  ctx.fillStyle = "#1f2330";
+  ctx.font = "800 24px Inter, Arial, sans-serif";
+  ctx.fillText("Description", 66, 1034);
+  ctx.fillStyle = "#253044";
+  ctx.font = "500 25px Inter, Arial, sans-serif";
+  drawWrappedText(ctx, input.text, 66, 1074, 948, 34, 5);
+
+  ctx.fillStyle = "#d64b2c";
+  ctx.font = "900 28px Inter, Arial, sans-serif";
+  ctx.fillText("Document the noise. Share the pattern. Push for change.", 66, 1258);
+
+  return canvas.toDataURL("image/png");
+}
+
+function ShareComposerModal({
+  complaintText,
+  scanData,
+  scanParams,
+  targets,
+  reportCounts,
+  onClose
+}: {
+  complaintText: string;
+  scanData: ScanResponse | null;
+  scanParams: Pick<ScanParams, "airport_icao" | "window">;
+  targets: Offender[];
+  reportCounts: Record<string, number>;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState(() => defaultShareText(complaintText, scanData, scanParams));
+  const [approved, setApproved] = useState(false);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState("Rendering share card");
+  const targetStats = useMemo(() => shareStats(targets, reportCounts), [targets, reportCounts]);
+
+  useEffect(() => {
+    setText(defaultShareText(complaintText, scanData, scanParams));
+    setApproved(false);
+  }, [complaintText, scanData?.airport.icao, scanParams.airport_icao, scanParams.window]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("Rendering share card");
+    makeShareImage({ text, scanData, scanParams, targetStats })
+      .then((result) => {
+        if (cancelled) return;
+        setImageUrl(result);
+        setStatus(result ? "Preview ready" : "Preview unavailable");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setImageUrl(null);
+        setStatus("Preview unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [text, scanData, scanParams, targetStats]);
+
+  async function copyShareText() {
+    await navigator.clipboard.writeText(text);
+    setStatus("Post text copied");
+  }
+
+  function downloadImage() {
+    if (!imageUrl) return;
+    const link = document.createElement("a");
+    link.href = imageUrl;
+    link.download = "circle-jerks-social-post.png";
+    link.click();
+    setStatus("Image downloaded");
+  }
+
+  async function shareViaDevice() {
+    if (!navigator.share) {
+      await copyShareText();
+      setStatus("Web Share is unavailable; copied text instead");
+      return;
+    }
+    if (imageUrl) {
+      const blob = await fetch(imageUrl).then((response) => response.blob());
+      const file = new File([blob], "circle-jerks-social-post.png", { type: "image/png" });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ title: "Circle Jerks", text, url: SITE_URL, files: [file] });
+        setStatus("Share sheet opened");
+        return;
+      }
+    }
+    await navigator.share({ title: "Circle Jerks", text, url: SITE_URL });
+    setStatus("Share sheet opened");
+  }
+
+  return (
+    <div className="share-modal-backdrop" role="dialog" aria-modal="true" aria-label="Social media share composer">
+      <div className="share-modal">
+        <div className="share-modal-header">
+          <div>
+            <div className="eyebrow">Share on social media</div>
+            <h2>Preview and approve your post</h2>
+          </div>
+          <button className="share-close" onClick={onClose} aria-label="Close share composer"><X size={18} /></button>
+        </div>
+
+        <div className="share-modal-grid">
+          <div className="share-preview">
+            {imageUrl ? <img src={imageUrl} alt="Generated Circle Jerks social post preview" /> : <div>{status}</div>}
+          </div>
+          <div className="share-editor">
+            <div className="section-title">Post text</div>
+            <textarea
+              value={text}
+              onChange={(event) => {
+                setText(event.target.value);
+                setApproved(false);
+              }}
+            />
+            <div className="section-title offender-share-title">Repeat offender report counts</div>
+            <div className="share-offender-stats">
+              {targetStats.length === 0 && <span>No selected offenders.</span>}
+              {targetStats.map((row) => (
+                <span key={row.icao24}>
+                  <strong>{row.label}</strong>
+                  {reportCountLabel(row.count)}
+                </span>
+              ))}
+            </div>
+            <div className="share-status">{approved ? "Approved for posting" : status}</div>
+            <div className="share-actions">
+              <button onClick={() => { setApproved(true); setStatus("Approved for posting"); }}>
+                <CheckCircle2 size={17} /> Approve text
+              </button>
+              <button onClick={copyShareText} disabled={!approved}>
+                <Copy size={17} /> Copy text
+              </button>
+              <button onClick={downloadImage} disabled={!approved || !imageUrl}>
+                <Download size={17} /> Download image
+              </button>
+              <button className="external-action" onClick={shareViaDevice} disabled={!approved}>
+                <Share2 size={17} /> Share
+              </button>
+            </div>
+            <p className="share-note">
+              Facebook, Instagram, and Snapchat do not reliably allow web apps to prefill image posts.
+              Use the copied text and downloaded image, or the device share sheet where supported.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailPanel({ offender, offenders, scanParams, scanData, config, formUrl, preferences, onPreferencesChange }: {
   offender: Offender | null;
   offenders: Offender[];
   scanParams: Pick<ScanParams, "airport_icao" | "user_lat" | "user_lon" | "window"> | null;
+  scanData: ScanResponse | null;
   config: ConfigResponse | null;
   formUrl: string | null;
   preferences: StoredPreferences;
   onPreferencesChange: Dispatch<SetStateAction<StoredPreferences>>;
 }) {
   const sliders = preferences.sliders;
-  const messagePrefs = preferences.message;
   const complaintMode = preferences.complaint_mode;
   const reportCounts = preferences.report_counts;
+  const systemPrompt = preferences.system_prompt;
   const [complaint, setComplaint] = useState<GeneratedComplaint | null>(null);
   const [detailStatus, setDetailStatus] = useState("Select an offender");
+  const [shareOpen, setShareOpen] = useState(false);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const targets = useMemo(() => {
-    if (complaintMode === "all") return offenders;
+    if (complaintMode === "all") return worstOffenderTargets(offenders, 10);
     return offender ? [offender] : [];
   }, [complaintMode, offender, offenders]);
-  const targetKey = targets.map((target) => [
-    target.icao24,
-    target.first_event_at,
-    target.last_event_at,
-    target.circles,
-    target.touch_and_gos,
-    target.low_approaches,
-    target.passes,
-    target.avg_altitude_over_user_ft_agl ?? "",
-    target.min_altitude_over_user_ft_agl ?? "",
-    target.origin_label ?? ""
-  ].join(":")).join(",");
+  const truncatedFrom = complaintMode === "all" && offenders.length > targets.length ? offenders.length : 0;
+  // Intentionally keyed on icao24 only (not live metrics) so polling refreshes
+  // of scanData don't re-trigger Groq calls. Use the Regenerate button to
+  // rebuild the draft against the latest observations.
+  const targetIdsKey = targets.map((target) => target.icao24).join(",");
   const targetCountKey = targets.map((target) => `${target.icao24}:${reportCounts[target.icao24] ?? 0}`).join(",");
 
   useEffect(() => {
@@ -637,25 +1711,29 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
     }
     let cancelled = false;
     setComplaint(null);
-    setDetailStatus(complaintMode === "all" ? `Generating one complaint for ${targets.length} offenders` : "Generating description");
+    setDetailStatus(
+      complaintMode === "all"
+        ? `Generating one complaint for ${targets.length}${truncatedFrom ? ` of ${truncatedFrom}` : ""} offenders`
+        : "Generating description",
+    );
     const id = window.setTimeout(() => {
       if (complaintMode === "all") {
         complaintSummary(
           targets.map((target) => target.icao24),
           scanParams,
           sliders,
-          messagePrefs,
-          reportCounts
+          reportCounts,
+          systemPrompt
         )
           .then((result) => {
             if (cancelled) return;
             setComplaint({ text: result.text, source: result.source });
-            setDetailStatus(`Generated one complaint for ${targets.length} offenders`);
+            setDetailStatus(`Generated one complaint for ${targets.length}${truncatedFrom ? ` of ${truncatedFrom}` : ""} offenders`);
           })
           .catch((error) => {
             if (cancelled) return;
             setComplaint({
-              text: localCombinedComplaint(targets, scanParams, messagePrefs, reportCounts),
+              text: localCombinedComplaint(targets, scanParams, reportCounts),
               source: "local fallback"
             });
             setDetailStatus(complaintErrorLabel(error));
@@ -666,41 +1744,34 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
         target.icao24,
         scanParams,
         sliders,
-        messagePrefs,
-        reportCounts[target.icao24] ?? 0
+        reportCounts[target.icao24] ?? 0,
+        systemPrompt
       )))
         .then((results: ComplaintResponse[]) => {
           if (cancelled) return;
           setComplaint({ text: results[0]?.text ?? "", source: results[0]?.source ?? "unknown" });
-          setDetailStatus(`Description source: ${results[0]?.source ?? "unknown"}`);
+          setDetailStatus("Generated description");
         })
         .catch((error) => {
           if (cancelled) return;
           const target = targets[0];
           setComplaint({
-            text: localSingleComplaint(target, scanParams, messagePrefs, reportCounts[target.icao24] ?? 0),
+            text: localSingleComplaint(target, scanParams, reportCounts[target.icao24] ?? 0),
             source: "local fallback"
           });
-          setDetailStatus(error instanceof Error ? error.message : "Description failed; generated a local draft instead.");
+          setDetailStatus(complaintErrorLabel(error));
         });
-    }, 300);
+    }, 600);
     return () => {
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [complaintMode, targetKey, targetCountKey, scanParams, sliders, messagePrefs, reportCounts]);
+  }, [complaintMode, targetIdsKey, targetCountKey, refreshNonce, scanParams, sliders, systemPrompt]);
 
   function updateSlider(name: keyof ToneSliders, value: number) {
     onPreferencesChange((current) => ({
       ...current,
       sliders: { ...current.sliders, [name]: value }
-    }));
-  }
-
-  function updateMessagePreference(name: keyof MessagePreferences, value: boolean) {
-    onPreferencesChange((current) => ({
-      ...current,
-      message: { ...current.message, [name]: value }
     }));
   }
 
@@ -732,7 +1803,16 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
         window: scanParams.window,
         mode: complaintMode,
         text: complaint.text,
-        targets: targets.map((target) => ({ icao24: target.icao24, callsign: target.callsign }))
+        targets: targets.map((target) => ({
+          icao24: target.icao24,
+          callsign: target.callsign,
+          circles: target.circles,
+          touch_and_gos: target.touch_and_gos,
+          low_approaches: target.low_approaches,
+          passes_over_user: target.passes,
+          origin_airport_icao: target.origin_airport_icao ?? null,
+          origin_label: target.origin_label ?? null,
+        }))
       }).catch(() => undefined);
     }
     setDetailStatus("Copied description");
@@ -758,6 +1838,9 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
           )}
         </div>
         <div className="detail-actions">
+          <button onClick={() => setShareOpen(true)} disabled={!complaint?.text || targets.length === 0}>
+            <Share2 size={17} /> Share
+          </button>
           <button onClick={copyText} disabled={!complaint?.text}><Copy size={17} /> Copy</button>
           <button onClick={markReported} disabled={targets.length === 0}>
             <CheckCircle2 size={17} /> Mark reported
@@ -771,6 +1854,17 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
         </div>
       </div>
 
+      {shareOpen && complaint && scanParams && (
+        <ShareComposerModal
+          complaintText={complaint.text}
+          scanData={scanData}
+          scanParams={scanParams}
+          targets={targets}
+          reportCounts={reportCounts}
+          onClose={() => setShareOpen(false)}
+        />
+      )}
+
       <div className="mode-switch" role="group" aria-label="Complaint target">
         <button className={complaintMode === "one" ? "active" : ""} onClick={() => updateComplaintMode("one")}>
           Selected offender
@@ -779,6 +1873,21 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
           All offenders
         </button>
       </div>
+
+      <details className="grok-prompt">
+        <summary>AI system prompt (advanced)</summary>
+        <p className="grok-prompt-hint">Tune how the AI writes your complaints. Saved in your browser only. Leave blank for the default. Click Regenerate to apply.</p>
+        <textarea
+          className="grok-prompt-input"
+          rows={3}
+          value={preferences.system_prompt ?? ""}
+          placeholder="You produce factual, civil aviation noise complaint descriptions. Use 12-hour AM/PM time, never military time."
+          onChange={(event) => onPreferencesChange((current) => ({ ...current, system_prompt: event.target.value || undefined }))}
+        />
+        {preferences.system_prompt ? (
+          <button className="grok-prompt-reset" onClick={() => onPreferencesChange((current) => ({ ...current, system_prompt: undefined }))}>Reset to default</button>
+        ) : null}
+      </details>
 
       <div className="detail-grid">
         <div className="slider-panel">
@@ -806,49 +1915,240 @@ function DetailPanel({ offender, offenders, scanParams, config, formUrl, prefere
               <b>{sliders[name]}</b>
             </label>
           ))}
-          <div className="section-title message-title">Message includes</div>
-          <div className="preference-grid">
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_all_detail}
-                onChange={(event) => updateMessagePreference("include_all_detail", event.target.checked)}
-              />
-              <span>Full detail</span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_elevation}
-                onChange={(event) => updateMessagePreference("include_elevation", event.target.checked)}
-              />
-              <span>Elevation</span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_circles}
-                onChange={(event) => updateMessagePreference("include_circles", event.target.checked)}
-              />
-              <span>Number of circles</span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={messagePrefs.include_altitude_over_house}
-                onChange={(event) => updateMessagePreference("include_altitude_over_house", event.target.checked)}
-              />
-              <span>Altitude over house</span>
-            </label>
-          </div>
         </div>
 
         <div className="complaint-output">
-          <div className="section-title">Ready to submit complaint</div>
+          <div className="complaint-output-header">
+            <div className="section-title">Ready to submit complaint</div>
+            <div className="complaint-output-actions">
+              <button
+                type="button"
+                className="complaint-icon-button"
+                onClick={() => setRefreshNonce((value) => value + 1)}
+                disabled={targets.length === 0}
+                title="Regenerate complaint from latest observations"
+                aria-label="Regenerate complaint"
+              >
+                <RotateCw size={15} aria-hidden="true" />
+              </button>
+              <CopyButton text={complaint?.text} />
+            </div>
+          </div>
+          <ComplaintSourceBanner source={complaint?.source} />
           <div className="output-status">{detailStatus}</div>
           <p>{complaint?.text ?? "Complaint text will appear here after an offender is selected."}</p>
         </div>
       </div>
+
     </section>
+  );
+}
+
+function AtcListenButton({ airportIcao }: { airportIcao?: string }) {
+  const [open, setOpen] = useState(false);
+  const [feeds, setFeeds] = useState<AtcFeedsResponse | null>(null);
+  const [activeFeedId, setActiveFeedId] = useState<string | null>(null);
+  const [feedStatus, setFeedStatus] = useState<Record<string, "idle" | "loading" | "playing" | "error">>({});
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (!open || !airportIcao) return;
+    setFeeds(null);
+    setActiveFeedId(null);
+    setFeedStatus({});
+    getAtcFeeds(airportIcao)
+      .then(setFeeds)
+      .catch(() => setFeeds({ airport_icao: airportIcao, feeds: [], external_search_url: `https://www.liveatc.net/search/?icao=${airportIcao}` }));
+  }, [open, airportIcao]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const playFeed = (feedId: string, streamUrl: string) => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    const audio = new Audio(streamUrl);
+    audio.preload = "none";
+    audioRef.current = audio;
+    setActiveFeedId(feedId);
+    setFeedStatus((prev) => ({ ...prev, [feedId]: "loading" }));
+    audio.addEventListener("playing", () => {
+      setFeedStatus((prev) => ({ ...prev, [feedId]: "playing" }));
+    });
+    audio.addEventListener("error", () => {
+      setFeedStatus((prev) => ({ ...prev, [feedId]: "error" }));
+      setActiveFeedId((current) => (current === feedId ? null : current));
+    });
+    audio.play().catch(() => {
+      setFeedStatus((prev) => ({ ...prev, [feedId]: "error" }));
+    });
+  };
+
+  const stopFeed = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    setActiveFeedId(null);
+  };
+
+  useEffect(() => () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+  }, []);
+
+  const buttonTitle = airportIcao
+    ? `Listen to ATC for ${airportIcao} on LiveATC`
+    : "Pick an airport to listen to its ATC";
+
+  return (
+    <div className="atc-listen">
+      <button
+        type="button"
+        className={`atc-listen-button${activeFeedId ? " active" : ""}`}
+        disabled={!airportIcao}
+        onClick={() => setOpen((value) => !value)}
+        title={buttonTitle}
+        aria-label={buttonTitle}
+      >
+        <Headphones size={16} aria-hidden="true" />
+      </button>
+      {open && airportIcao && (
+        <div className="atc-popover" role="dialog" aria-label={`Listen to ATC for ${airportIcao}`}>
+          <header>
+            <div>
+              <strong>Live ATC — {airportIcao}</strong>
+              <p>Streamed from LiveATC. Click a feed to start; not every airport has every feed.</p>
+            </div>
+            <button type="button" className="atc-close" onClick={() => { stopFeed(); setOpen(false); }} aria-label="Close">
+              <X size={16} aria-hidden="true" />
+            </button>
+          </header>
+          {!feeds ? (
+            <p className="atc-loading">Loading feeds…</p>
+          ) : feeds.feeds.length === 0 ? (
+            <p className="atc-empty">No candidate feeds for this airport.</p>
+          ) : (
+            <ul className="atc-feed-list">
+              {feeds.feeds.map((feed) => {
+                const status = feedStatus[feed.id] ?? "idle";
+                const isActive = activeFeedId === feed.id;
+                return (
+                  <li key={feed.id} className={`atc-feed${isActive ? " active" : ""}`}>
+                    <div className="atc-feed-meta">
+                      <div className="atc-feed-label">{feed.label}</div>
+                      <div className="atc-feed-id">{feed.id}</div>
+                    </div>
+                    {isActive ? (
+                      <button type="button" className="atc-feed-stop" onClick={stopFeed}>
+                        Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="atc-feed-play"
+                        onClick={() => playFeed(feed.id, feed.stream_url)}
+                      >
+                        {status === "loading"
+                          ? "Loading…"
+                          : status === "error"
+                            ? "No feed"
+                            : status === "playing"
+                              ? "Playing"
+                              : "Play"}
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {feeds && (
+            <a
+              className="atc-external"
+              href={feeds.external_search_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <ExternalLink size={12} aria-hidden="true" />
+              Search all feeds on LiveATC
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComplaintSourceBanner({ source }: { source?: string }) {
+  if (!source) return null;
+  if (source === "groq" || source === "cache") {
+    return (
+      <div className="complaint-source-banner ok" role="status">
+        <CheckCircle2 size={14} aria-hidden="true" />
+        <span>AI-generated from your real observations.</span>
+      </div>
+    );
+  }
+  if (source === "fallback") {
+    return (
+      <div className="complaint-source-banner warn" role="status">
+        <AlertTriangle size={14} aria-hidden="true" />
+        <span>
+          <strong>AI is temporarily unavailable.</strong> Text below is a plain-template draft using the real
+          call sign, times, and altitudes the worker recorded — no values fabricated.
+        </span>
+      </div>
+    );
+  }
+  if (source === "local fallback") {
+    return (
+      <div className="complaint-source-banner error" role="status">
+        <CloudOff size={14} aria-hidden="true" />
+        <span>
+          <strong>Server unreachable.</strong> This is a draft built in your browser from the data already on
+          screen — same real observations, no AI involved.
+        </span>
+      </div>
+    );
+  }
+  return null;
+}
+
+function CopyButton({ text }: { text?: string | null }) {
+  const [copied, setCopied] = useState(false);
+  const disabled = !text || !text.trim();
+  return (
+    <button
+      type="button"
+      className={`copy-button${copied ? " copied" : ""}`}
+      disabled={disabled}
+      onClick={async () => {
+        if (!text) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1800);
+        } catch {
+          // ignore — older browsers without clipboard access
+        }
+      }}
+      title="Copy complaint text"
+      aria-label="Copy complaint text"
+    >
+      <Copy size={14} aria-hidden="true" />
+      <span>{copied ? "Copied!" : "Copy"}</span>
+    </button>
   );
 }

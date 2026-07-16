@@ -32,6 +32,19 @@ class Store(ABC):
     async def get_track(self, icao24: str, start_ts: int | None = None, end_ts: int | None = None) -> list[dict]:
         ...
 
+    async def bulk_get_tracks(
+        self,
+        icao24s: list[str],
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list[list[dict]]:
+        """Default implementation calls get_track per icao24. Concrete stores
+        (e.g. RedisStore) should override with a single batched round-trip."""
+        results: list[list[dict]] = []
+        for icao24 in icao24s:
+            results.append(await self.get_track(icao24, start_ts, end_ts))
+        return results
+
     @abstractmethod
     async def list_aircraft(self) -> list[str]:
         ...
@@ -47,6 +60,11 @@ class Store(ABC):
     @abstractmethod
     async def event_exists(self, monitor_hash: str, event_id: str) -> bool:
         ...
+
+    async def existing_event_ids(self, monitor_hash: str) -> set[str]:
+        """Default: derived from get_events. Subclasses may override for speed."""
+        events = await self.get_events(monitor_hash, 0, 2_000_000_000)
+        return {e["id"] for e in events if e.get("id")}
 
     @abstractmethod
     async def recent_event_exists(self, monitor_hash: str, icao24: str, event_type: str, since_ts: int) -> bool:
@@ -98,8 +116,33 @@ class RedisStore(Store):
         values = await self.redis.zrangebyscore(key, start, end)
         return [loads(value) for value in values]
 
+    async def bulk_get_tracks(
+        self,
+        icao24s: list[str],
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list[list[dict]]:
+        if not icao24s:
+            return []
+        start = "-inf" if start_ts is None else start_ts
+        end = "+inf" if end_ts is None else end_ts
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for icao24 in icao24s:
+                pipe.zrangebyscore(f"track:{icao24.lower()}", start, end)
+            raw_results = await pipe.execute()
+        return [[loads(value) for value in (group or [])] for group in raw_results]
+
     async def list_aircraft(self) -> list[str]:
-        return sorted(await self.redis.smembers("aircraft"))
+        # Derive from live track keys, NOT the "aircraft" set: that set is
+        # appended to on every sample and never shrinks, so it accumulates
+        # thousands of expired icao24 (4000+ vs ~900 live). Reading tracks for
+        # all of them pipelined thousands of empty Redis ops per scan and was a
+        # primary cause of multi-second scans. SCAN of track:* is accurate and
+        # self-cleaning.
+        icao24s: list[str] = []
+        async for key in self.redis.scan_iter("track:*", count=1000):
+            icao24s.append(key.split(":", 1)[1])
+        return sorted(icao24s)
 
     async def add_event(self, monitor_hash: str, event: dict, ttl: int) -> None:
         key = f"events:{monitor_hash}"
@@ -114,6 +157,17 @@ class RedisStore(Store):
     async def event_exists(self, monitor_hash: str, event_id: str) -> bool:
         values = await self.redis.zrange(f"events:{monitor_hash}", 0, -1)
         return any(loads(value).get("id") == event_id for value in values)
+
+    async def existing_event_ids(self, monitor_hash: str) -> set[str]:
+        """All event IDs currently stored — fetched once so callers can do
+        O(1) in-memory existence checks instead of re-scanning per event."""
+        values = await self.redis.zrange(f"events:{monitor_hash}", 0, -1)
+        ids: set[str] = set()
+        for value in values:
+            event_id = loads(value).get("id")
+            if event_id:
+                ids.add(event_id)
+        return ids
 
     async def recent_event_exists(self, monitor_hash: str, icao24: str, event_type: str, since_ts: int) -> bool:
         events = await self.get_events(monitor_hash, since_ts, int(time.time()) + 60)

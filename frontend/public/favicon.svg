@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <circle cx="32" cy="32" r="22" fill="none" stroke="#d64b2c" stroke-width="2.5" stroke-dasharray="3 4" opacity="0.72"/>
+  <g>
+    <animateTransform attributeName="transform" type="rotate" from="0 32 32" to="360 32 32" dur="2.6s" repeatCount="indefinite"/>
+    <g transform="translate(54 32)">
+      <path d="M0,8 L2.5,4.5 L8,2.5 L8,0 L2.5,-1 L1.5,-5 L4.5,-5 L4.5,-7.5 L-4.5,-7.5 L-4.5,-5 L-1.5,-5 L-2.5,-1 L-8,0 L-8,2.5 L-2.5,4.5 Z" fill="#1b1a17"/>
+    </g>
+  </g>
+</svg>

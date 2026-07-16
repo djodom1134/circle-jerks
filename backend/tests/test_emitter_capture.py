@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from app.live_sources import parse_readsb_aircraft
+from app.opensky import parse_state_vector, OPENSKY_CATEGORY_CODES
+
+
+def test_readsb_captures_category():
+    row = {"hex": "a1b2c3", "lat": 40.1, "lon": -105.1, "flight": "N123",
+           "alt_baro": 5000, "gs": 80, "track": 120, "t": "C172", "category": "A1"}
+    sample = parse_readsb_aircraft(row, payload_now=1_700_000_000, source="adsbfi")
+    assert sample["emitter_category"] == "A1"
+
+
+def test_readsb_missing_category_is_none():
+    row = {"hex": "a1b2c3", "lat": 40.1, "lon": -105.1}
+    sample = parse_readsb_aircraft(row, payload_now=1_700_000_000, source="adsbfi")
+    assert sample["emitter_category"] is None
+
+
+def test_opensky_maps_numeric_category():
+    # 17-element rows previously returned None; index 17 = emitter category (2 = Light).
+    row = ["abc123", "N1  ", "US", 1_700_000_000, 1_700_000_000,
+           -105.1, 40.1, 1500.0, False, 40.0, 120.0, 0.0, None, 1600.0, None, False, 0, 2]
+    sample = parse_state_vector(row, fallback_ts=1_700_000_000)
+    assert sample["emitter_category"] == "A1"
+    assert OPENSKY_CATEGORY_CODES[9] == "B1"  # glider
+    assert OPENSKY_CATEGORY_CODES[16] == "C1"  # surface emergency vehicle
+    assert OPENSKY_CATEGORY_CODES[20] == "C5"  # line obstacle
+
+
+def test_opensky_short_row_has_no_category():
+    row = ["abc123", "N1  ", "US", 1_700_000_000, 1_700_000_000,
+           -105.1, 40.1, 1500.0, False, 40.0, 120.0, 0.0, None, 1600.0]  # len 14
+    sample = parse_state_vector(row, fallback_ts=1_700_000_000)
+    assert sample is not None
+    assert sample["emitter_category"] is None
+
+
+from app import db
+from app.db import Airport
+from app.detectors import _build_runway_event
+
+
+def _airport():
+    return Airport(icao="KBJC", iata="BJC", name="RMMA", city="Broomfield, CO",
+                   country="US", lat=39.9088, lon=-105.1172, elevation_ft=5673, is_towered=True)
+
+
+def test_runway_event_carries_emitter():
+    ep = {
+        "bucket": 42,
+        "lowest_sample": {"icao24": "abc123", "callsign": "N1", "timestamp": 1000,
+                          "emitter_category": "A1"},
+        "lowest_agl": 20.0,
+        "runway": {"runway_id": "30R", "heading_deg": 300},
+        "speed": 60,
+    }
+    event = _build_runway_event("landing", ep, _airport(), [])
+    assert event["emitter_category"] == "A1"
+
+
+def test_operation_row_persists_emitter(tmp_path):
+    conn = db.connect(str(tmp_path / "t.sqlite3"))
+    conn.executescript(db.SCHEMA)
+    db.seed_db(conn)
+    op = db.operation_from_event({
+        "id": "op1", "type": "landing", "icao24": "abc123", "callsign": "N1",
+        "timestamp": 1000, "airport_icao": "KBJC", "emitter_category": "A2",
+    })
+    db.upsert_operation(conn, op)
+    row = conn.execute("SELECT emitter_category FROM operations WHERE id='op1'").fetchone()
+    assert row["emitter_category"] == "A2"

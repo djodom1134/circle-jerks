@@ -124,8 +124,17 @@ class OpenSkyClient:
         return response.json()
 
 
+# OpenSky state-vector index 17 is the ADS-B emitter category as a 0-20 integer.
+# Map it to the standard ADS-B string codes used elsewhere (A0-A7, B1-B7, C1-C4).
+OPENSKY_CATEGORY_CODES = {
+    0: None, 1: "A0", 2: "A1", 3: "A2", 4: "A3", 5: "A4", 6: "A5", 7: "A6",
+    8: "A7", 9: "B1", 10: "B2", 11: "B3", 12: "B4", 14: "B6", 15: "B7",
+    16: "C1", 17: "C2", 18: "C3", 19: "C4", 20: "C5",
+}
+
+
 def parse_state_vector(row: list[Any], fallback_ts: int) -> dict | None:
-    if len(row) < 17:
+    if len(row) < 14:
         return None
     icao24 = row[0]
     lon = row[5]
@@ -146,5 +155,6 @@ def parse_state_vector(row: list[Any], fallback_ts: int) -> dict | None:
         "heading_deg": row[10],
         "vertical_rate_fpm": mps_to_fpm(row[11]),
         "geo_altitude_ft": meters_to_feet(row[13]),
+        "emitter_category": OPENSKY_CATEGORY_CODES.get(row[17]) if len(row) > 17 else None,
         "source": "opensky",
     }

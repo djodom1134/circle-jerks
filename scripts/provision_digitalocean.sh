@@ -55,6 +55,8 @@ env_quote() {
 }
 
 DIGITAL_OCEAN_API_KEY="$(env_value DIGITAL_OCEAN_API_KEY)"
+CLOUDFLARE_API_TOKEN="$(env_value CLOUDFLARE_API_TOKEN)"
+CLOUDFLARE_API_KEY="$(env_value CLOUDFLARE_API_KEY)"
 CADDY_EMAIL="$(env_value CADDY_EMAIL)"
 CADDY_DOMAIN="$(env_value CADDY_DOMAIN)"
 GROQ_API_KEY="$(env_value GROQ_API_KEY)"
@@ -94,7 +96,7 @@ if [ -z "${CIRCLEJERK_ADMIN_PASSWORD:-}" ] && [ -z "${CIRCLEJERK_ADMIN_PASSWORD_
 fi
 
 DOCTL=(doctl --access-token "$DIGITAL_OCEAN_API_KEY" --http-retry-max 2)
-SSH=(ssh -i "$SSH_PRIVATE_KEY_PATH" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15)
+SSH=(ssh -i "$SSH_PRIVATE_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15)
 
 fingerprint="$(ssh-keygen -E md5 -lf "$SSH_PUBLIC_KEY_PATH" | awk '{print $2}' | sed 's/^MD5://')"
 ssh_key_id="$("${DOCTL[@]}" compute ssh-key list --format ID,FingerPrint --no-header | awk -v fp="$fingerprint" '$2 == fp {print $1; exit}')"
@@ -137,6 +139,14 @@ fi
 
 domain="${CADDY_DOMAIN:-circlejerks.live}"
 app_secret="${APP_SECRET:-$(openssl rand -hex 32)}"
+cloudflare_token="${CLOUDFLARE_API_TOKEN:-${CLOUDFLARE_API_KEY:-}}"
+
+if [ -n "$cloudflare_token" ]; then
+  CLOUDFLARE_API_TOKEN="$cloudflare_token" \
+    python3 scripts/upsert_cloudflare_dns.py --domain "$domain" --origin-ip "$reserved_ip"
+else
+  echo "CLOUDFLARE_API_TOKEN is not set; skipping automatic DNS upsert for $domain" >&2
+fi
 
 echo "Waiting for SSH on $reserved_ip ..."
 for _ in $(seq 1 60); do
@@ -148,7 +158,7 @@ done
 
 "${SSH[@]}" root@"$reserved_ip" "mkdir -p $ROOT/app"
 rsync -az --delete \
-  -e "ssh -i $SSH_PRIVATE_KEY_PATH -o StrictHostKeyChecking=accept-new" \
+  -e "ssh -i $SSH_PRIVATE_KEY_PATH -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
   --exclude '.git' \
   --exclude '.venv' \
   --exclude '.env' \
@@ -182,10 +192,13 @@ CIRCLEJERK_BBOX_MERGE_DISTANCE_NM=$(printf '%s' "${CIRCLEJERK_BBOX_MERGE_DISTANC
 CIRCLEJERK_OPENSKY_HISTORICAL_ENABLED=$(printf '%s' "${CIRCLEJERK_OPENSKY_HISTORICAL_ENABLED:-false}" | env_quote)
 ENV
 
-scp -i "$SSH_PRIVATE_KEY_PATH" -o StrictHostKeyChecking=accept-new "$tmp_env" root@"$reserved_ip":"$ROOT/app/.env" >/dev/null
+scp -i "$SSH_PRIVATE_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$tmp_env" root@"$reserved_ip":"$ROOT/app/.env" >/dev/null
 rm -f "$tmp_env"
 
 "${SSH[@]}" root@"$reserved_ip" "cd $ROOT/app && ./scripts/deploy_droplet.sh"
+
+./scripts/check_production_health.sh "$domain"
+./scripts/provision_uptime_checks.sh "$domain"
 
 echo "reserved_ip=$reserved_ip"
 echo "url=https://$domain"

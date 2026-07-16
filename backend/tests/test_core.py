@@ -12,18 +12,34 @@ from app.detectors import closest_over_user_rows, detect_circles, detect_passes,
 from app.domain import ScanParams, local_time_label, location_hash, monitor_hash
 from app.geo import Point, distance_nm, heading_delta_deg
 from app.llm import ComplaintContext, MessagePreferences, deterministic_description
-from app.live_sources import LiveStateClient, bbox_center_radius_nm, parse_readsb_aircraft
+from app.flightaware import FlightAwareClient
+from app.live_sources import (
+    LiveSourceStale,
+    LiveStateClient,
+    SourceHealth,
+    bbox_center_radius_nm,
+    build_live_source_client,
+    parse_readsb_aircraft,
+    readsb_payload_aircraft,
+    readsb_payload_now,
+)
 from app.scoring import offender_rows, score_events
 from app.services import (
     active_aircraft_count,
     airport_label_for_icao,
     altitude_over_user_summary,
+    backfill_historical_states,
+    build_positions_response,
     build_summary_description,
     events_for_current_scan,
     historical_snapshot_times,
+    merge_track_rows,
+    monitor_for_params,
     opensky_track_path_samples,
     origin_from_ground_track,
     origin_from_track,
+    recent_tracks_for_response,
+    tracks_for_response,
 )
 from app.settings import Settings
 from app.store import MemoryStore
@@ -74,11 +90,21 @@ def test_distance_and_heading_delta():
     assert heading_delta_deg(10, 350) == -20
 
 
-def test_today_window_uses_local_midnight():
+def test_today_window_is_a_rolling_24h():
     now = datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC"))
     window = resolve_window("today", "America/Denver", now)
     assert window.code == "today"
-    assert window.seconds == 12 * 3600 + 30 * 60
+    assert window.seconds == 24 * 3600
+    assert window.end_ts - window.start_ts == 24 * 3600
+
+
+def test_today_window_is_24h_even_just_after_local_midnight():
+    """Regression: snapping to local midnight made "today" narrower than the
+    6h button in the small hours — 00:30 local returned a 30-minute window."""
+    now = datetime(2026, 4, 24, 6, 30, tzinfo=ZoneInfo("UTC"))  # 00:30 in Denver
+    window = resolve_window("today", "America/Denver", now)
+    assert window.seconds == 24 * 3600
+    assert window.seconds > resolve_window("6h", "America/Denver", now).seconds
 
 
 def test_local_time_labels_use_am_pm():
@@ -119,27 +145,119 @@ def test_circle_detector_detects_closed_loop():
     events = detect_circles(track, ap, ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2))
     assert len(events) == 1
     assert events[0]["type"] == "circle"
+    # Closed-lap events ALWAYS carry a turn direction. This is the discriminator
+    # scripts/prune_crossing_circles.py relies on (crossing artifacts had NULL
+    # turn_direction); if a refactor drops it, the prune would delete real laps.
+    assert events[0]["turn_direction"] in ("left", "right")
 
 
-def test_circle_detector_counts_offset_traffic_pattern_lap():
+def test_circle_detector_ignores_line_crossings_without_a_closed_lap():
+    """A track that repeatedly crosses the home↔airport chord but never closes a
+    full lap must NOT count as a circle. The old line-crossing counter emitted
+    one 'circle' per crossing (~2 per orbit); circles are now closed pattern
+    laps only, so this zig-zag emits nothing.
+
+    Setup: airport at (39.9088, -105.1172), home ~5.4 nm north. The track flies
+    east → west → east → west across the chord — four crossings, zero closed laps.
+    """
+    ap = airport()
+    home_lat = ap.lat + 0.09  # ~5.4 nm north
+    home_lon = ap.lon
+    midpoint_lat = (ap.lat + home_lat) / 2
+    east = (midpoint_lat, ap.lon + 0.05)
+    west = (midpoint_lat, ap.lon - 0.05)
+    points = [east, west, east, west, east]
+    track = [sample(1000 + index * 60, lat, lon) for index, (lat, lon) in enumerate(points)]
+    params = ScanParams(airport_icao="KBJC", user_lat=home_lat, user_lon=home_lon, ring_nm=8)
+
+    events = detect_circles(track, ap, params)
+
+    assert events == []
+
+
+def test_circle_detector_skips_high_altitude_closed_loop():
+    """A full closed loop flown at FL250 (airliner, not pattern work) is above
+    the closed-lap altitude ceiling (2000 ft AGL) and must NOT emit a circle."""
     ap = airport()
     points = [
-        (ap.lat + 0.010, ap.lon - 0.020),
-        (ap.lat + 0.010, ap.lon - 0.070),
-        (ap.lat - 0.025, ap.lon - 0.070),
-        (ap.lat - 0.035, ap.lon - 0.045),
-        (ap.lat - 0.025, ap.lon - 0.020),
-        (ap.lat + 0.010, ap.lon - 0.020),
+        (39.9238, -105.1172),
+        (39.9194, -105.1013),
+        (39.9088, -105.0950),
+        (39.8982, -105.1013),
+        (39.8938, -105.1172),
+        (39.8982, -105.1331),
+        (39.9088, -105.1394),
+        (39.9194, -105.1331),
+        (39.9238, -105.1172),
     ]
-    track = [sample(1000 + index * 60, lat, lon) for index, (lat, lon) in enumerate(points)]
+    track = [sample(1000 + i * 30, lat, lon, alt_agl=25000) for i, (lat, lon) in enumerate(points)]
+    params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2)
+
+    events = detect_circles(track, ap, params)
+    assert events == []
+
+
+def test_touch_and_go_event_includes_runway_id_from_heading():
+    """T&G should be tagged with the directional runway (11 vs 29 etc.)."""
+    from app.detectors import _runway_for_direction
+
+    runways = [
+        {"runway_id": "11", "lat_threshold": 40.17, "lon_threshold": -105.18, "heading_deg": 110, "length_ft": 4800},
+        {"runway_id": "29", "lat_threshold": 40.16, "lon_threshold": -105.15, "heading_deg": 290, "length_ft": 4800},
+    ]
+    # Aircraft heading 105° → closest to runway 11 (heading 110°).
+    s11 = {"heading_deg": 105, "lat": 40.165, "lon": -105.16}
+    chosen = _runway_for_direction(s11, runways)
+    assert chosen is not None and chosen["runway_id"] == "11"
+
+    # Aircraft heading 285° → closest to runway 29 (heading 290°).
+    s29 = {"heading_deg": 285, "lat": 40.165, "lon": -105.16}
+    chosen = _runway_for_direction(s29, runways)
+    assert chosen is not None and chosen["runway_id"] == "29"
+
+    # Aircraft heading way off (perpendicular) → no match within tolerance.
+    s_off = {"heading_deg": 0, "lat": 40.165, "lon": -105.16}
+    assert _runway_for_direction(s_off, runways) is None
+
+
+def test_circle_detector_does_not_double_count_racetrack_half_loop():
+    """Regression: a single half-lap of a long racetrack pattern (180° turn,
+    aircraft now on the far side of the oval) must NOT be counted as a full
+    circle. The pre-fix code added a "closure-heading" bonus regardless of
+    actual closure distance, so a 180° turn that flipped heading by 180°
+    looked like 360° and emitted a spurious event.
+    """
+    import math
+
+    ap = airport()
+    # Half-loop: aircraft starts on the south leg heading east, makes a tight
+    # 180° left turn at the east end, ends up on the north leg heading west.
+    # Start and end points are ~1 nm apart (north-south offset), well beyond
+    # the closure-bonus threshold.
+    points: list[tuple[float, float]] = []
+    # Straight leg east, well clear of the airport's 8 nm ring boundary.
+    for i in range(6):
+        points.append((ap.lat - 0.008, ap.lon + i * 0.004))
+    # 180° turn at the east end (heading change concentrated here).
+    turn_center_lat = ap.lat
+    turn_center_lon = ap.lon + 6 * 0.004
+    turn_radius_deg = 0.008
+    for step in range(1, 18):  # 18 steps of 10° = 180°
+        theta = math.radians(-90 + step * 10)  # start pointing south, rotate to north
+        lat = turn_center_lat + turn_radius_deg * math.sin(theta)
+        lon = turn_center_lon + turn_radius_deg * math.cos(theta) * 0.3
+        points.append((lat, lon))
+    # Straight leg west on the north side.
+    for i in range(6):
+        points.append((ap.lat + 0.008, ap.lon + 6 * 0.004 - i * 0.004))
+
+    track = [sample(1000 + i * 25, lat, lon) for i, (lat, lon) in enumerate(points)]
     params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.2, ring_nm=8)
 
     events = detect_circles(track, ap, params)
 
-    assert len(events) == 1
-    assert events[0]["detection_method"] == "course_turn_closed_lap"
-    assert events[0]["path_nm"] > 8
-    assert events[0]["closure_nm"] == 0
+    # A 180° turn is half a lap, not a full circle. Must NOT emit.
+    assert events == [], f"half-loop should not emit a circle event, got {events}"
 
 
 def test_circle_detector_ignores_straight_departure():
@@ -317,7 +435,7 @@ def test_airport_label_for_unknown_opensky_departure(tmp_path):
 
 
 async def test_summary_description_combines_multiple_aircraft(tmp_path, monkeypatch):
-    async def no_groq(*args):
+    async def no_groq(*args, **kwargs):
         return None
 
     monkeypatch.setattr("app.services.generate_with_groq", no_groq)
@@ -465,6 +583,16 @@ def test_bbox_center_radius_covers_box():
     assert radius_nm > 7
 
 
+def _stub_live_state_client(settings: Settings, clients: dict) -> LiveStateClient:
+    client = LiveStateClient.__new__(LiveStateClient)
+    client.settings = settings
+    client.backoff_until = {}
+    client.last_source = None
+    client.clients = clients
+    client.health = {source: SourceHealth() for source in clients}
+    return client
+
+
 async def test_live_state_client_falls_back_to_next_provider():
     class FailingClient:
         async def states_bbox(self, bbox):
@@ -475,18 +603,109 @@ async def test_live_state_client_falls_back_to_next_provider():
             return [{"icao24": "abc123", "timestamp": 1000, "lat": 40.1, "lon": -105.1}]
 
     settings = Settings(live_source_priority="adsb_lol,airplanes_live")
-    client = LiveStateClient.__new__(LiveStateClient)
-    client.settings = settings
-    client.backoff_until = {}
-    client.last_source = None
-    client.clients = {
-        "adsb_lol": FailingClient(),
-        "airplanes_live": WorkingClient(),
-    }
+    client = _stub_live_state_client(
+        settings,
+        {"adsb_lol": FailingClient(), "airplanes_live": WorkingClient()},
+    )
 
     result = await client.states_bbox((40.0, -105.2, 40.2, -105.0))
     assert result.source == "airplanes_live"
     assert result.states[0]["icao24"] == "abc123"
+    assert client.health["airplanes_live"].success_count == 1
+    assert client.health["adsb_lol"].error_count == 1
+    assert client.health["adsb_lol"].last_error is not None
+
+
+async def test_live_state_client_falls_through_on_stale_payload():
+    class StaleClient:
+        source = "adsb_lol"
+
+        async def states_bbox(self, bbox):
+            raise LiveSourceStale("adsb_lol", 240)
+
+    class FreshClient:
+        async def states_bbox(self, bbox):
+            return [{"icao24": "abc123", "timestamp": 1000, "lat": 40.1, "lon": -105.1}]
+
+    settings = Settings(live_source_priority="adsb_lol,airplanes_live")
+    client = _stub_live_state_client(
+        settings,
+        {"adsb_lol": StaleClient(), "airplanes_live": FreshClient()},
+    )
+
+    result = await client.states_bbox((40.0, -105.2, 40.2, -105.0))
+    assert result.source == "airplanes_live"
+    assert client.health["adsb_lol"].error_count == 1
+    assert "stale" in (client.health["adsb_lol"].last_error or "")
+    assert client.backoff_until["adsb_lol"] > 0
+
+
+def test_priority_list_includes_paid_sources_only_when_configured():
+    base = Settings(
+        live_source_priority="adsbx,self_hosted,adsb_lol,adsb_fi,opensky",
+        adsbx_rapidapi_key=None,
+        self_hosted_feeder_base_url=None,
+    )
+    assert base.live_source_priority_list() == ["adsb_lol", "adsb_fi", "opensky"]
+
+    with_paid = Settings(
+        live_source_priority="adsbx,self_hosted,adsb_lol,adsb_fi,opensky",
+        adsbx_rapidapi_key="test-key",
+        self_hosted_feeder_base_url="http://feeder.local:8080",
+    )
+    assert with_paid.live_source_priority_list() == [
+        "adsbx",
+        "self_hosted",
+        "adsb_lol",
+        "adsb_fi",
+        "opensky",
+    ]
+
+
+def test_priority_list_drops_unknown_and_dedupes():
+    settings = Settings(live_source_priority="bogus,adsb_lol,adsb_lol,opensky")
+    assert settings.live_source_priority_list() == ["adsb_lol", "opensky"]
+
+
+def test_build_live_source_client_returns_none_when_paid_creds_missing():
+    settings = Settings(adsbx_rapidapi_key=None, self_hosted_feeder_base_url=None)
+    assert build_live_source_client("adsbx", settings) is None
+    assert build_live_source_client("self_hosted", settings) is None
+    assert build_live_source_client("adsb_fi", settings) is not None
+
+
+def test_build_live_source_client_constructs_adsbx_with_rapidapi_headers():
+    settings = Settings(adsbx_rapidapi_key="abc")
+    client = build_live_source_client("adsbx", settings)
+    assert client is not None
+    assert client.source == "adsbx"
+    assert client.extra_headers["x-rapidapi-key"] == "abc"
+    assert client.extra_headers["x-rapidapi-host"].endswith("rapidapi.com")
+    assert client.path_style == "lat_lon_dist"
+
+
+def test_readsb_payload_aircraft_handles_alternate_keys():
+    assert readsb_payload_aircraft({"ac": [{"hex": "a"}]}) == [{"hex": "a"}]
+    assert readsb_payload_aircraft({"aircraft": [{"hex": "b"}]}) == [{"hex": "b"}]
+    assert readsb_payload_aircraft({"states": [{"hex": "c"}]}) == [{"hex": "c"}]
+    assert readsb_payload_aircraft({}) == []
+
+
+def test_readsb_payload_now_handles_seconds_and_ms():
+    assert readsb_payload_now({"now": 1700000000}) == 1700000000.0
+    assert readsb_payload_now({"now": 1700000000123}) == 1700000000.123
+
+
+def test_live_state_client_health_snapshot_marks_unavailable_sources():
+    settings = Settings(live_source_priority="adsb_lol,adsb_fi")
+    client = _stub_live_state_client(
+        settings,
+        {"adsb_lol": object(), "adsb_fi": object()},
+    )
+    snapshot = client.health_snapshot()
+    assert set(snapshot) == {"adsb_lol", "adsb_fi"}
+    assert snapshot["adsb_lol"]["available"] is True
+    assert snapshot["adsb_lol"]["backoff_remaining_seconds"] == 0
 
 
 def test_historical_snapshots_are_capped_to_opensky_one_hour_limit():
@@ -499,6 +718,129 @@ def test_historical_snapshots_are_capped_to_opensky_one_hour_limit():
     timestamps = historical_snapshot_times(window, settings)
     assert timestamps[0] >= window.end_ts - 3600
     assert timestamps[-1] <= window.end_ts
+
+
+async def test_historical_backfill_handles_forbidden_opensky(monkeypatch):
+    class ForbiddenOpenSky:
+        def __init__(self, settings):
+            self.auth_failed = False
+
+        async def states_bbox(self, bbox, at_ts=None):
+            request = httpx.Request("GET", "https://opensky.example/states")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError("forbidden", request=request, response=response)
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("app.services.OpenSkyClient", ForbiddenOpenSky)
+    store = MemoryStore()
+    settings = Settings(
+        opensky_historical_enabled=True,
+        opensky_client_id="client",
+        opensky_client_secret="secret",
+        opensky_historical_step_seconds=600,
+    )
+    params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.0)
+    window = resolve_window("1h", "America/Denver", datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC")))
+
+    result = await backfill_historical_states(store, settings, monitor_for_params(params, airport()), window)
+
+    assert result["enabled"] is True
+    assert result["available"] is False
+    assert "rejected" in result["reason"]
+
+
+async def test_historical_backfill_fetches_newest_missing_snapshots_first(monkeypatch):
+    calls = []
+
+    class RecordingOpenSky:
+        def __init__(self, settings):
+            self.auth_failed = False
+
+        async def states_bbox(self, bbox, at_ts=None):
+            calls.append(at_ts)
+            return []
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("app.services.OpenSkyClient", RecordingOpenSky)
+    store = MemoryStore()
+    settings = Settings(
+        opensky_historical_enabled=True,
+        opensky_client_id="client",
+        opensky_client_secret="secret",
+        opensky_historical_step_seconds=600,
+        opensky_historical_snapshots_per_scan=3,
+    )
+    params = ScanParams(airport_icao="KBJC", user_lat=40.0, user_lon=-105.0)
+    window = resolve_window("1h", "America/Denver", datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC")))
+
+    result = await backfill_historical_states(store, settings, monitor_for_params(params, airport()), window)
+
+    assert result["fetched"] == 3
+    assert calls == [window.end_ts, window.end_ts - 600, window.end_ts - 1200]
+
+
+async def test_track_response_merges_non_offender_recent_tracks():
+    store = MemoryStore()
+    window = resolve_window("1h", "America/Denver", datetime(2026, 4, 24, 18, 30, tzinfo=ZoneInfo("UTC")))
+    ap = airport()
+    offender = sample(window.end_ts - 40, ap.lat + 0.01, ap.lon - 0.01, 900, "abc123")
+    non_offender = sample(window.end_ts - 30, ap.lat + 0.02, ap.lon - 0.02, 900, "def456")
+    non_offender["callsign"] = "N456CD"
+    await store.add_track_sample("abc123", offender, 3600)
+    await store.add_track_sample("def456", non_offender, 3600)
+
+    offender_tracks = await tracks_for_response(
+        store,
+        [{"icao24": "abc123", "callsign": "N123AB"}],
+        window,
+    )
+    recent_tracks = await recent_tracks_for_response(
+        store,
+        window,
+        (ap.lat - 0.1, ap.lon - 0.1, ap.lat + 0.1, ap.lon + 0.1),
+    )
+
+    rows = merge_track_rows(offender_tracks, recent_tracks)
+
+    assert [row["icao24"] for row in rows] == ["abc123", "def456"]
+    assert rows[1]["callsign"] == "N456CD"
+
+
+async def test_build_positions_response_reads_hot_tracks_only(tmp_path):
+    conn = seeded_conn(tmp_path / "positions.sqlite3")
+    try:
+        store = MemoryStore()
+        settings = Settings(database_path=str(tmp_path / "positions.sqlite3"))
+        klmo = db.get_airport(conn, "KLMO")
+        now = int(datetime.now(ZoneInfo("UTC")).timestamp())
+
+        first = sample(now - 20, klmo.lat + 0.01, klmo.lon - 0.01, 900, "pos111")
+        second = sample(now - 10, klmo.lat - 0.01, klmo.lon + 0.01, 900, "pos222")
+        second["callsign"] = "N222XY"
+        await store.add_track_sample("pos111", first, 300)
+        await store.add_track_sample("pos222", second, 300)
+
+        params = ScanParams(airport_icao="klmo", user_lat=klmo.lat, user_lon=klmo.lon, window="1h")
+        response = await build_positions_response(store, settings, conn, params)
+
+        assert response["airport_icao"] == "KLMO"
+        assert "window" in response and response["window"]["code"] == "1h"
+        assert isinstance(response["updated_at"], int)
+        assert isinstance(response["active_now"], int)
+        icao24s = {track["icao24"] for track in response["tracks"]}
+        assert {"pos111", "pos222"} <= icao24s
+
+        with pytest.raises(KeyError):
+            await build_positions_response(
+                store, settings, conn,
+                ScanParams(airport_icao="ZZZZ", user_lat=klmo.lat, user_lon=klmo.lon, window="1h"),
+            )
+    finally:
+        conn.close()
 
 
 def test_deterministic_description_respects_message_preferences():
@@ -536,9 +878,11 @@ def test_deterministic_description_respects_message_preferences():
     )
     text = deterministic_description(context)
     assert "previously reported this same aircraft 2 complaints" in text
-    assert "circling 4 times" in text
-    assert "950 ft" not in text
+    assert "touch-and-go" in text
+    assert "circling" not in text
+    assert "circles" not in text
     assert "5673" not in text
+    assert "elevation" not in text.lower()
 
 
 def test_score_suppresses_bonuses_for_short_window():
@@ -550,3 +894,122 @@ def test_score_suppresses_bonuses_for_short_window():
     assert event_counts(events)["passes"] == 1
     assert score_events(events, short, "America/Denver") == 3
     assert score_events(events, long, "America/Denver") > 3
+
+
+def test_flightaware_ident_classifier_filters_n_numbers():
+    assert FlightAwareClient.looks_like_airline_ident("UAL640") is True
+    assert FlightAwareClient.looks_like_airline_ident("SWA3533") is True
+    assert FlightAwareClient.looks_like_airline_ident("DAL1234") is True
+    assert FlightAwareClient.looks_like_airline_ident("KOW106") is True
+    assert FlightAwareClient.looks_like_airline_ident("N123VM") is False
+    assert FlightAwareClient.looks_like_airline_ident("N4052F") is False
+    assert FlightAwareClient.looks_like_airline_ident("") is False
+    assert FlightAwareClient.looks_like_airline_ident(None) is False
+    assert FlightAwareClient.looks_like_airline_ident("garbage!") is False
+
+
+def test_flightaware_pick_flight_prefers_window_overlap():
+    flights = [
+        {  # earlier flight, doesn't overlap
+            "origin": {"code_icao": "KSEA", "city": "Seattle"},
+            "actual_off": "2026-05-16T10:00:00Z",
+            "actual_on": "2026-05-16T12:00:00Z",
+        },
+        {  # current flight, overlaps the observation window
+            "origin": {"code_icao": "KSFO", "city": "San Francisco"},
+            "actual_off": "2026-05-16T16:00:00Z",
+            "actual_on": "2026-05-16T18:00:00Z",
+        },
+    ]
+    # Observation 17:00-17:30 UTC
+    first_seen = int(datetime(2026, 5, 16, 17, 0, tzinfo=ZoneInfo("UTC")).timestamp())
+    last_seen = int(datetime(2026, 5, 16, 17, 30, tzinfo=ZoneInfo("UTC")).timestamp())
+    chosen = FlightAwareClient.pick_flight(flights, first_seen, last_seen)
+    assert chosen is flights[1]
+
+
+async def test_flightaware_origin_for_callsign_happy_path():
+    settings = Settings(flightaware_api_key="fake-key")
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(
+            200,
+            json={
+                "flights": [
+                    {
+                        "ident": "UAL640",
+                        "origin": {"code_icao": "CYVR", "code_iata": "YVR", "city": "Vancouver", "name": "YVR"},
+                        "destination": {"code_icao": "KDEN", "city": "Denver"},
+                        "actual_off": "2026-05-16T16:00:00Z",
+                        "actual_on": None,
+                    }
+                ]
+            },
+        )
+
+    fa = FlightAwareClient(settings)
+    fa.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        first_seen = int(datetime(2026, 5, 16, 17, 0, tzinfo=ZoneInfo("UTC")).timestamp())
+        last_seen = first_seen + 1800
+        result = await fa.origin_for_callsign("UAL640", first_seen, last_seen)
+    finally:
+        await fa.close()
+
+    assert result is not None
+    assert result["origin_airport_icao"] == "CYVR"
+    assert result["origin_city"] == "Vancouver"
+    assert result["origin_label"] == "Vancouver (CYVR)"
+    assert result["origin_source"] == "flightaware_aeroapi"
+    assert result["origin_confidence"] == "high"
+    assert captured["headers"]["x-apikey"] == "fake-key"
+    assert "/flights/UAL640" in captured["url"]
+
+
+async def test_flightaware_skips_n_number_callsign():
+    settings = Settings(flightaware_api_key="fake-key")
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={"flights": []})
+
+    fa = FlightAwareClient(settings)
+    fa.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await fa.origin_for_callsign("N4052F", 1000, 2000)
+    finally:
+        await fa.close()
+
+    assert result is None
+    assert calls["n"] == 0  # never hit the network
+
+
+async def test_flightaware_marks_auth_failed_on_401():
+    settings = Settings(flightaware_api_key="bad-key")
+
+    def handler(request):
+        return httpx.Response(401, json={"detail": "invalid key"})
+
+    fa = FlightAwareClient(settings)
+    fa.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await fa.origin_for_callsign("UAL640", 1000, 2000)
+    finally:
+        await fa.close()
+
+    assert result is None
+    assert fa.auth_failed is True
+
+
+def test_flightaware_disabled_when_key_missing():
+    settings = Settings(flightaware_api_key=None)
+    fa = FlightAwareClient(settings)
+    assert fa.settings.flightaware_api_key is None
+    # The origin path in resolve_origin should short-circuit; nothing to assert
+    # beyond config, but at least confirm the classifier still functions.
+    assert FlightAwareClient.looks_like_airline_ident("UAL640") is True
+

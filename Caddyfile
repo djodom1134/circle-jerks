@@ -1,30 +1,62 @@
 http:// {
-  redir https://{$CADDY_DOMAIN}{uri} permanent
+	redir https://{$CADDY_DOMAIN}{uri} permanent
 }
 
 www.{$CADDY_DOMAIN} {
-  redir https://{$CADDY_DOMAIN}{uri} permanent
+	redir https://{$CADDY_DOMAIN}{uri} permanent
 }
 
 {$CADDY_DOMAIN} {
-  encode zstd gzip
+	encode zstd gzip
 
-  header {
-    Strict-Transport-Security "max-age=31536000; includeSubDomains"
-    X-Content-Type-Options "nosniff"
-    X-Frame-Options "DENY"
-    Referrer-Policy "strict-origin-when-cross-origin"
-  }
+	log {
+		output file /data/access.log {
+			roll_size 50MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+			}
+		}
+	}
 
-  handle_path /api/* {
-    reverse_proxy api:8000
-  }
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
 
-  handle /healthz {
-    reverse_proxy api:8000
-  }
+	@blocked_probe path_regexp blocked_probe (?i)^/.*(\.env|\.git|\.aws|\.php|wp-|wordpress|xmlrpc|phpmyadmin|adminer|cgi-bin|vendor|laravel|_ignition|server-status|actuator|boaform|hnap|shell|backup|backups|\.sql|\.bak|passwd|password|debug|telescope|geoserver|manager/html).*
+	handle @blocked_probe {
+		respond 404
+	}
 
-  handle {
-    reverse_proxy web:8080
-  }
+	handle_path /api/* {
+		reverse_proxy api:8000 {
+			lb_try_duration 30s
+			lb_try_interval 1s
+			health_uri /healthz
+			health_interval 10s
+			health_timeout 3s
+		}
+	}
+
+	handle /healthz {
+		reverse_proxy api:8000 {
+			lb_try_duration 30s
+			lb_try_interval 1s
+			health_uri /healthz
+			health_interval 10s
+			health_timeout 3s
+		}
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
 }

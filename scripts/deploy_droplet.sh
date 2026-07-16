@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT=/srv/circlejerk
 
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
 wait_for_apt() {
   while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
     || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 \
@@ -11,6 +18,30 @@ wait_for_apt() {
     sleep 5
   done
   dpkg --configure -a
+}
+
+wait_for_container_health() {
+  local service="$1"
+  local container
+  container="$(docker compose -f docker-compose.prod.yml ps -q "$service")"
+  if [ -z "$container" ]; then
+    echo "No container found for $service" >&2
+    return 1
+  fi
+
+  for _ in $(seq 1 60); do
+    local status
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
+    if [ "$status" = "healthy" ] || [ "$status" = "running" ]; then
+      echo "$service is $status"
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "$service did not become healthy" >&2
+  docker compose -f docker-compose.prod.yml logs --tail=120 "$service" >&2 || true
+  return 1
 }
 
 mkdir -p "$ROOT/data" "$ROOT/redis" "$ROOT/caddy/data" "$ROOT/caddy/config" "$ROOT/backups"
@@ -38,5 +69,18 @@ cat >/etc/cron.d/circlejerk-backup <<CRON
 17 * * * * root $ROOT/app/scripts/backup_sqlite.sh >/var/log/circlejerk-backup.log 2>&1
 CRON
 
+cat >/etc/cron.d/circlejerk-health <<CRON
+*/5 * * * * root cd $ROOT/app && ./scripts/health_gate.sh "./scripts/check_production_health.sh --local" "docker compose -f docker-compose.prod.yml restart api web caddy" >>/var/log/circlejerk-health.log 2>&1
+CRON
+
+cat >/etc/cron.d/circlejerk-watchdog <<CRON
+* * * * * root cd $ROOT/app && docker compose -f docker-compose.prod.yml exec -T api python -m app.watchdog >>/var/log/circlejerk-watchdog.log 2>&1
+CRON
+
 docker compose -f docker-compose.prod.yml up -d --build
+wait_for_container_health valkey
+wait_for_container_health api
+wait_for_container_health web
+docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate caddy
+./scripts/check_production_health.sh --local
 docker compose -f docker-compose.prod.yml ps
