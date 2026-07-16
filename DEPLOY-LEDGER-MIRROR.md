@@ -64,6 +64,11 @@ existing ledger record. Do this **before** the Caddy recreate below so Caddy's
 ACME HTTP-01 for the new host succeeds on the first try instead of failing and
 retrying.
 
+> macOS gotcha: the script uses `urllib`, which on the python.org
+> `Python.framework` build can't find the system root CAs and dies with
+> `CERTIFICATE_VERIFY_FAILED`. Point it at certifi's bundle:
+> `SSL_CERT_FILE="$(python3 -c 'import certifi;print(certifi.where())')" python3 scripts/upsert_cloudflare_dns.py …`
+
 ### 2. Cloudflare SSL/TLS mode — MUST be Full or Full (strict), never Flexible
 
 The deploy token can create DNS records but **cannot** read or set zone SSL
