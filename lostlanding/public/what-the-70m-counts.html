@@ -699,6 +699,12 @@
 .pricegrid{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
 .pricegrid span{background:rgba(0,0,0,.25);border:1px solid var(--line);padding:6px 11px;font-size:.9rem;color:#eee}
 .pricegrid b{color:var(--gold2)}
+.roster{display:grid;gap:2px;margin:22px 0;border:1px solid var(--line)}
+.roster .r{display:grid;grid-template-columns:190px 1fr;gap:18px;padding:15px 18px;background:rgba(0,0,0,.2)}
+.roster .r .who{font-weight:700;color:var(--gold2);text-transform:uppercase;letter-spacing:.05em;font-size:.82rem;line-height:1.35}
+.roster .r .what{color:#e9e0ca;font-size:.97rem;line-height:1.5}
+.roster .r .what strong{color:#fff}
+@media(max-width:640px){.roster .r{grid-template-columns:1fr;gap:5px}}
 </style>
 
 <div class="ledger-doc">
@@ -715,6 +721,7 @@
       <a href="#tax">The tax</a>
       <a href="#books">The real books</a>
       <a href="#reality">What the runway does</a>
+      <a href="#players">Who made it</a>
     </nav>
   </header>
 
@@ -1058,6 +1065,90 @@
 
     <hr class="gold-rule" />
 
+    <!-- WHO MADE THE NUMBER -->
+    <section class="section-pad dark-panel" id="players">
+      <div class="section-heading">
+        <p class="kicker" style="color:var(--gold2)">Who made this number &mdash; and who it's for</p>
+        <h2 style="color:#fff;">A number built to be big, by people who benefit when it is</h2>
+        <p class="dek" style="color:#e9e0ca;">
+          A figure this far from the airport's own books doesn't come from nowhere. It comes from a specific chain
+          &mdash; a state agency, its consultants, and an industry coalition &mdash; and at every link, someone has a
+          reason to make it large. None of this requires anyone to lie. The incentives do the work.
+        </p>
+      </div>
+
+      <div class="roster">
+        <div class="r">
+          <span class="who">Who publishes it</span>
+          <span class="what"><strong>CDOT's Division of Aeronautics.</strong> It is funded <em>entirely by aviation
+          fuel taxes</em> (about $53&nbsp;million a year, none from the state general fund), and its core job is handing
+          that money back out as airport grants. A large &ldquo;economic impact&rdquo; number is the justification for
+          the grant program that is the Division's reason to exist &mdash; and Vance Brand is a grant recipient. The
+          scorekeeper is paid by the sport.</span>
+        </div>
+        <div class="r">
+          <span class="who">Who writes it</span>
+          <span class="what">Outside consultants. The 2020 edition was authored by <strong>EBP US</strong> (an
+          economics firm whose product <em>is</em> impact studies) with <strong>Kimley-Horn</strong>; the 2013 edition
+          added <strong>Jviation</strong> (now part of <strong>Woolpert</strong>). Kimley-Horn and Woolpert describe
+          themselves as <strong>airport engineering and planning firms</strong> &mdash; they are paid to design the
+          airport capital projects that &ldquo;economic impact&rdquo; figures are routinely used to justify. The 2025
+          author isn't named on any public-facing page.</span>
+        </div>
+        <div class="r">
+          <span class="who">Who amplifies it</span>
+          <span class="what">The <strong>&ldquo;Alliance for Aviation Across America&rdquo;</strong> republishes CDOT's
+          figure. It is a 501(c)(4) advocacy nonprofit administered by an outside firm (Hass &amp; Company&nbsp;LLC);
+          its listed president also heads <strong>NBAA</strong>, the business-aviation lobby, and its charter members
+          are the aviation trade associations (AOPA, EAA, GAMA, NBAA, NATA). From there the number travels to the
+          Governor's office, the airport board, and local op-eds &mdash; each time stripped of the study's own words:
+          <em>gross business revenues</em>.</span>
+        </div>
+      </div>
+
+      <p class="pull">
+        Everyone who touches the number profits when it persuades. That is not a conspiracy &mdash; it is a set of
+        aligned incentives producing exactly the figure those incentives reward.
+      </p>
+
+      <div class="section-heading" style="margin-top:40px">
+        <p class="kicker" style="color:var(--gold2)">The conclusions that get repeated</p>
+        <h2 style="color:#fff; font-size:clamp(1.6rem,3vw,2.4rem)">Said often enough to become common knowledge</h2>
+      </div>
+      <ul class="sources" style="color:#eee">
+        <li><strong>&ldquo;The airport generates $73.6&nbsp;million a year.&rdquo;</strong> Repeated as civic fact
+        &mdash; without the study's own qualifier that this is <em>gross</em> revenue (a drop zone's ticket sales among
+        it), padded by a multiplier that counts each dollar twice.</li>
+        <li><strong>&ldquo;About 120,000 operations a year.&rdquo;</strong> An FAA Form&nbsp;5010 <em>planning
+        estimate</em>, repeated as if it were a count of real traffic.</li>
+        <li><strong>&ldquo;The airport brings visitors who spend money in town.&rdquo;</strong> Built on an assumed
+        crowd of roughly 22,000 fly-in visitors &mdash; a number the runway's real arrivals (about one to three
+        thousand stops a year) cannot support.</li>
+      </ul>
+
+      <div class="section-heading" style="margin-top:40px">
+        <p class="kicker" style="color:var(--gold2)">What it's done to the community</p>
+        <h2 style="color:#fff; font-size:clamp(1.6rem,3vw,2.4rem)">A town arguing from a number that isn't real</h2>
+      </div>
+      <div class="prose">
+        <p style="color:#eee">
+          Longmont residents &mdash; and the council that represents them &mdash; now carry a badly skewed picture: an
+          airport they have been told is a <strong>$73.6&nbsp;million economic engine</strong>, when the airport's own
+          2026 books show <strong>$597,370</strong> in total lease revenue and <strong>$0</strong> from the runway
+          itself.
+        </p>
+        <p style="color:#eee">
+          That gap isn't harmless. The inflated figure is the argument used to keep the runway free, to justify
+          accepting federal grants and the matching local dollars, and to wave off the City's own federal promise to
+          make the airport <strong>&ldquo;as self-sustaining as possible.&rdquo;</strong> The people who live under the
+          traffic are told the noise overhead is the sound of $73.6&nbsp;million. This page &mdash; and the ledger it
+          belongs to &mdash; exists to show them what actually lands.
+        </p>
+      </div>
+    </section>
+
+    <hr class="gold-rule" />
+
     <!-- SOURCES -->
     <section class="section-pad tight" id="sources">
       <div class="section-heading">
@@ -1079,6 +1170,11 @@
           <li>CDOT, <em>2013 Colorado Airports Economic Impact Study</em> &mdash; Vance Brand: $27.7M output; 204 jobs; ~22,000 air visitors/yr; on-airport direct $11.6M / with multiplier $19.7M.</li>
           <li>Mile-Hi Skydiving published pricing: tandem $239 (to $437 with video); AFF $199&ndash;329; licensed fun-jump lift ticket $33; gear $25.</li>
           <li>City of Longmont, <em>2026 Airport Leasing Document</em> (master billing spreadsheet) &mdash; 122 hangar and ground leases totaling $597,370 current annual rent; largest single lease is the T-Mobile West Tower ground lease at $102,685/yr; Mile-Hi Skydiving leases total $19,566/yr. Lessee addresses omitted.</li>
+          <li>Study authorship (from the report credits): 2013 &mdash; ICF SH&amp;E, Jviation, EDR Group, KRAMER aerotek; 2020 &mdash; EBP US (formerly EDR Group), Kimley-Horn, KRAMER aerotek, MSU Denver. 2025 author not disclosed on public-facing pages.</li>
+          <li>CDOT Division of Aeronautics funding: funded by aviation fuel taxes (~$53M/yr, no state general-fund reliance), redistributed as airport formula and discretionary grants &mdash; codot.gov/programs/aeronautics/fianancialinfo.</li>
+          <li>Kimley-Horn and Woolpert (which acquired Jviation, 2020) market airport engineering and planning services &mdash; kimley-horn.com and woolpert.com.</li>
+          <li>Alliance for Aviation Across America &mdash; 501(c)(4), administered c/o Hass &amp; Company LLC; charter members AOPA, EAA, GAMA, NBAA, NATA (per its own site and the organization's IRS filing via ProPublica Nonprofit Explorer).</li>
+          <li>Methodology critique of economic-impact studies (gross vs. net, multiplier overstatement, excluded counterfactual, substitution effects) &mdash; e.g. National Academies / TRB literature on airport economic-impact methods.</li>
         </ul>
       </div>
     </section>
