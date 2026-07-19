@@ -26,14 +26,14 @@ export function StudyClaim({ data }: { data: LedgerResponse }) {
   return (
     <section id="study" className="section-pad">
       <div className="section-heading">
-        <p className="kicker">The $73.6 million question</p>
-        <h2>What the State's headline really counts</h2>
+        <p className="kicker">The $73.6 million we were sold</p>
+        <h2>A headline inflated end to end</h2>
         <p>
-          The State's economic-impact study says Vance Brand generates <strong>$73.6 million a year</strong>. It is
-          gross business revenue — not city income — and most of it never touches the runway: <strong>$44.7M</strong> is
-          on-airport business (a drive-in skydiving operation grossing roughly $9M at its own prices, plus a
-          multiplier), and <strong>$28.9M</strong> is "visitor spending" that assumes some 22,000 people fly in and
-          spend. Here is what the runway actually carries.
+          Every time the runway's free ride comes up, we're told the airport generates <strong>$73.6 million a
+          year</strong>. It is gross business revenue — not city income — and it is padded at every step:{" "}
+          <strong>$44.7M</strong> is on-airport business (a drive-in skydiving operation that grosses roughly $9M at its
+          own prices, then doubled by a "multiplier"), and <strong>$28.9M</strong> is "visitor spending" built on a
+          phantom crowd of some 22,000 fly-in visitors the runway never carries. Here is what actually lands.
         </p>
       </div>
 
