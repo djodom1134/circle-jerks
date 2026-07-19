@@ -1,0 +1,6 @@
+node_modules
+dist
+.vite
+# Raw City billing/lease working data — used for analysis, never served or
+# baked into the image. Aggregate conclusions live in the page source.
+data

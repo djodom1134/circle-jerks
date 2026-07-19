@@ -64,7 +64,13 @@ export function StudyClaim({ data }: { data: LedgerResponse }) {
         </div>
       </div>
 
-      <p style={{ marginTop: "24px" }}>
+      <p style={{ marginTop: "22px" }}>
+        And the airport's own 2026 books tell the same story: it collects <strong>$597,370 a year</strong> from all 122
+        hangar and ground leases — 0.8% of the number it cites, its single biggest tenant a cell tower, and not one cent
+        of it from the runway.
+      </p>
+
+      <p style={{ marginTop: "20px" }}>
         <a className="cta" href="/what-the-70m-counts.html">
           Read the full breakdown — the study vs. the real data →
         </a>

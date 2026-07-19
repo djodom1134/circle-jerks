@@ -713,6 +713,7 @@
       <a href="#onairport">The $44.7M</a>
       <a href="#visitors">The visitor math</a>
       <a href="#tax">The tax</a>
+      <a href="#books">The real books</a>
       <a href="#reality">What the runway does</a>
     </nav>
   </header>
@@ -963,6 +964,66 @@
 
     <hr class="gold-rule" />
 
+    <!-- THE AIRPORT'S OWN BOOKS -->
+    <section class="section-pad" id="books">
+      <div class="section-heading">
+        <p class="kicker">The airport's own books</p>
+        <h2>What the field actually collects: $597,370</h2>
+        <p class="dek">
+          Set the economic-impact abstraction aside and open the ledger the City actually keeps. Its 2026 airport
+          leasing document &mdash; every hangar and ground lease at the field &mdash; adds up to
+          <strong>$597,370 a year</strong>. That is the airport's entire revenue. It is <strong>eight-tenths of one
+          percent</strong> of the $73.6&nbsp;million the airport cites for itself &mdash; and not one cent of it comes
+          from the runway.
+        </p>
+      </div>
+
+      <div class="claim-stats">
+        <div class="cell lead">
+          <span class="big">$597,370</span>
+          <span class="cap">the airport's entire annual lease revenue &mdash; all 122 leases, 2026</span>
+        </div>
+        <div class="cell">
+          <span class="big">0.8%</span>
+          <span class="cap">of the $73.6M &ldquo;economic impact&rdquo; it cites for itself</span>
+        </div>
+        <div class="cell">
+          <span class="big">$102,685</span>
+          <span class="cap">its single biggest tenant &mdash; a <strong>cell tower</strong> (17% of all revenue)</span>
+        </div>
+        <div class="cell">
+          <span class="big">$0</span>
+          <span class="cap">the runway's share &mdash; every dollar is hangar or ground rent</span>
+        </div>
+      </div>
+
+      <div class="note-pair">
+        <p class="note">
+          <strong>The airport's #1 revenue source is a T-Mobile cell tower.</strong> Its ground lease ($102,685) is
+          more than <em>five times</em> what the entire Mile-Hi skydiving operation pays the City in rent ($19,566).
+          The &ldquo;aviation economic engine&rdquo; collects most of its actual money from hangar rent and a cell
+          tower on airport land.
+        </p>
+        <p class="note">
+          <strong>A single fair-use runway fee would nearly double it.</strong> At $10 per runway use the ledger
+          projects about <span data-live="feeRev2">$1.0M</span> a year &mdash; roughly <strong>1.7&times;</strong> the
+          airport's entire lease portfolio, from the traffic that pays nothing today.
+        </p>
+      </div>
+
+      <p class="pull">
+        Strip the $73.6&nbsp;million down to the money that actually changes hands and the field runs on $597,370 a
+        year &mdash; hangar rent and a cell tower &mdash; while the runway itself, the whole point of the
+        &ldquo;economic engine&rdquo; argument, brings in nothing.
+      </p>
+      <p style="color:#7a6a48; font-size:.85rem; margin-top:12px;">
+        Source: City of Longmont 2026 Airport Leasing Document (master billing spreadsheet; 122 leases; lessee
+        addresses omitted).
+      </p>
+    </section>
+
+    <hr class="gold-rule" />
+
     <!-- WHAT THE RUNWAY DOES -->
     <section class="section-pad" id="reality">
       <div class="section-heading">
@@ -1017,6 +1078,7 @@
           <li>CDOT, <em>2020 Colorado Aviation System Plan &amp; Economic Impact Study</em> &mdash; LMO factsheet: $68.0M; 72,939 operations (2018); 274 based aircraft; &ldquo;~40,000 jumps&rdquo; at Mile-Hi (2017).</li>
           <li>CDOT, <em>2013 Colorado Airports Economic Impact Study</em> &mdash; Vance Brand: $27.7M output; 204 jobs; ~22,000 air visitors/yr; on-airport direct $11.6M / with multiplier $19.7M.</li>
           <li>Mile-Hi Skydiving published pricing: tandem $239 (to $437 with video); AFF $199&ndash;329; licensed fun-jump lift ticket $33; gear $25.</li>
+          <li>City of Longmont, <em>2026 Airport Leasing Document</em> (master billing spreadsheet) &mdash; 122 hangar and ground leases totaling $597,370 current annual rent; largest single lease is the T-Mobile West Tower ground lease at $102,685/yr; Mile-Hi Skydiving leases total $19,566/yr. Lessee addresses omitted.</li>
         </ul>
       </div>
     </section>
@@ -1048,6 +1110,7 @@
     if(p.projected_annual_runway_uses){
       var feeRev = p.projected_annual_runway_uses * 10; // $10 fair-use fee
       put('feeRev', '~$' + (feeRev/1e6).toFixed(1) + 'M/yr');
+      put('feeRev2', '$' + (feeRev/1e6).toFixed(1) + 'M');
     }
     if(stayed && runway){
       var pct = (100*stayed/runway);
