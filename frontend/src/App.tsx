@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { AlertTriangle, CheckCircle2, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, RotateCw, Route, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CloudOff, Copy, Download, ExternalLink, Flame, Github, Headphones, History, LocateFixed, MapPin, Music, RotateCw, Route, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import AboutPage from "./AboutPage";
 import AdminDashboard from "./AdminDashboard";
 import StatsPage from "./components/StatsPage";
@@ -637,6 +637,7 @@ export default function App() {
               <MapPin size={16} />
             </button>
             <AtcListenButton airportIcao={airport?.icao} />
+            <EngineCoverButton />
           </div>
           {mapOverlay === "history" && (
             <div className="history-controls" role="group" aria-label="Historical track density controls">
@@ -2085,6 +2086,172 @@ function AtcListenButton({ airportIcao }: { airportIcao?: string }) {
               Search all feeds on LiveATC
             </a>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Jukebox for the "cover the engine noise with music" button. Adding a track is
+// one line: drop in `{ id, title, subtitle, src, sourceUrl }`. `src` is a direct
+// audio URL (archive.org's /download/ host serves audio/mpeg with open CORS and
+// range support, so a bare <audio>/new Audio() streams it fine); `sourceUrl` is
+// the human-facing page we credit. Tracks loop — the pattern overhead doesn't
+// stop, so neither does the score.
+interface EngineCoverTrack {
+  id: string;
+  title: string;
+  subtitle: string;
+  src: string;
+  sourceUrl: string;
+}
+
+const ENGINE_COVER_TRACKS: EngineCoverTrack[] = [
+  {
+    id: "ride-of-the-valkyries",
+    title: "Ride of the Valkyries",
+    subtitle: "Richard Wagner — the Apocalypse Now cut",
+    src: "https://archive.org/download/RichardWagnerTheRideOfTheValkyriesFromApocalypseNow/Richard%20Wagner%20-%20The%20Ride%20of%20the%20Valkyries%20(From%20Apocalypse%20Now).mp3",
+    sourceUrl: "https://archive.org/details/RichardWagnerTheRideOfTheValkyriesFromApocalypseNow",
+  },
+];
+
+function EngineCoverButton() {
+  const [open, setOpen] = useState(false);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [status, setStatus] = useState<Record<string, "idle" | "loading" | "playing" | "error">>({});
+  const [volume, setVolume] = useState(0.8);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const stop = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    setActiveId(null);
+  }, []);
+
+  const play = (track: EngineCoverTrack) => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    const audio = new Audio(track.src);
+    audio.preload = "none";
+    audio.loop = true;
+    audio.volume = volume;
+    audioRef.current = audio;
+    setActiveId(track.id);
+    setStatus((prev) => ({ ...prev, [track.id]: "loading" }));
+    audio.addEventListener("playing", () => {
+      setStatus((prev) => ({ ...prev, [track.id]: "playing" }));
+    });
+    audio.addEventListener("error", () => {
+      setStatus((prev) => ({ ...prev, [track.id]: "error" }));
+      setActiveId((current) => (current === track.id ? null : current));
+    });
+    audio.play().catch(() => {
+      setStatus((prev) => ({ ...prev, [track.id]: "error" }));
+    });
+  };
+
+  // Keep a playing track in sync with the volume slider.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume;
+  }, [volume]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  // Never leave the music playing after the component unmounts.
+  useEffect(() => () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+  }, []);
+
+  const buttonTitle = activeId ? "Playing — cover the engine noise" : "Cover the engine noise with music";
+
+  return (
+    <div className="engine-cover">
+      <button
+        type="button"
+        className={`engine-cover-button${activeId ? " active" : ""}`}
+        onClick={() => setOpen((value) => !value)}
+        title={buttonTitle}
+        aria-label={buttonTitle}
+        aria-pressed={!!activeId}
+      >
+        <Music size={16} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="engine-cover-popover" role="dialog" aria-label="Cover the engine noise with music">
+          <header>
+            <div>
+              <strong>Cover the engine noise</strong>
+              <p>Can't stop the circling? Score it. Turn it up until you can't hear the pattern.</p>
+            </div>
+            <button type="button" className="engine-cover-close" onClick={() => setOpen(false)} aria-label="Close">
+              <X size={16} aria-hidden="true" />
+            </button>
+          </header>
+          <ul className="engine-cover-list">
+            {ENGINE_COVER_TRACKS.map((track) => {
+              const trackStatus = status[track.id] ?? "idle";
+              const isActive = activeId === track.id;
+              return (
+                <li key={track.id} className={`engine-cover-track${isActive ? " active" : ""}`}>
+                  <div className="engine-cover-meta">
+                    <div className="engine-cover-title">{track.title}</div>
+                    <div className="engine-cover-subtitle">{track.subtitle}</div>
+                  </div>
+                  {isActive ? (
+                    <button type="button" className="engine-cover-stop" onClick={stop}>
+                      Stop
+                    </button>
+                  ) : (
+                    <button type="button" className="engine-cover-play" onClick={() => play(track)}>
+                      {trackStatus === "loading" ? "Loading…" : trackStatus === "error" ? "Failed" : "Play"}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          <div className="engine-cover-volume">
+            <Music size={12} aria-hidden="true" />
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={volume}
+              onChange={(event) => setVolume(Number(event.target.value))}
+              aria-label="Volume"
+              title="Volume — louder is more effective"
+            />
+            <span>{Math.round(volume * 100)}%</span>
+          </div>
+          <p className="engine-cover-note">
+            Loops until the pattern clears (it won't).{" "}
+            {activeId && (
+              <a
+                href={ENGINE_COVER_TRACKS.find((t) => t.id === activeId)?.sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Source: archive.org
+              </a>
+            )}
+          </p>
         </div>
       )}
     </div>

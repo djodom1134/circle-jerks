@@ -2465,6 +2465,156 @@ input[type="range"] {
 }
 .atc-external:hover { text-decoration: underline; }
 
+/* --- "Cover the engine noise" music jukebox (map-controls) --- */
+.engine-cover {
+  position: relative;
+}
+.engine-cover-button {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.engine-cover-button:hover {
+  background: #ffffff;
+  border-color: #d64b2c;
+}
+.engine-cover-button.active {
+  background: #d64b2c;
+  border-color: #d64b2c;
+  color: #ffffff;
+  animation: atc-pulse 1.4s ease-in-out infinite;
+}
+.engine-cover-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(340px, 86vw);
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14);
+  padding: 14px;
+  z-index: 20;
+}
+.engine-cover-popover header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.engine-cover-popover header strong {
+  font-size: 14px;
+  color: var(--text);
+}
+.engine-cover-popover header p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.engine-cover-close {
+  background: transparent;
+  border: 0;
+  padding: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 0;
+}
+.engine-cover-close:hover { color: var(--text); }
+.engine-cover-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.engine-cover-track {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #fbfaf6;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.engine-cover-track.active {
+  border-color: #d64b2c;
+  background: #fff4ef;
+}
+.engine-cover-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.engine-cover-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+}
+.engine-cover-subtitle {
+  font-size: 11px;
+  color: var(--muted);
+}
+.engine-cover-play,
+.engine-cover-stop {
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.engine-cover-play:hover { background: #f3f4f6; }
+.engine-cover-stop {
+  background: #d64b2c;
+  border-color: #d64b2c;
+  color: #ffffff;
+}
+.engine-cover-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+.engine-cover-volume input[type="range"] {
+  flex: 1;
+  accent-color: #d64b2c;
+  cursor: pointer;
+}
+.engine-cover-volume span {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+  text-align: right;
+}
+.engine-cover-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.engine-cover-note a {
+  color: #1b3a6b;
+  font-weight: 600;
+}
+.engine-cover-note a:hover { text-decoration: underline; }
+
 /* --- Complaint source banner (AI vs fallback) --- */
 .complaint-source-banner {
   display: inline-flex;
