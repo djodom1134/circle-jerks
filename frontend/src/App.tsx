@@ -20,7 +20,6 @@ import {
   geocode,
   reverseGeocode,
   getAirportPatterns,
-  getAirportSosaUrl,
   getAtcFeeds,
   getAirportRunways,
   getConfig,
@@ -72,6 +71,8 @@ const FAA_ANCIR_URL = "https://ancir.faa.gov/ancir?id=ancir_sc_cat_item&sys_id=6
 const BUY_ME_COFFEE_URL = "https://buymeacoffee.com/djodom";
 const GITHUB_ISSUES_URL = "https://github.com/djodom1134/circle-jerks/issues";
 const SITE_URL = "https://circlejerks.live";
+const LEDGER_URL = "https://ledger.circlejerks.live/";
+const LEDGER_70M_URL = "https://ledger.circlejerks.live/what-the-70m-counts.html";
 const WINDOWS: Array<{ code: WindowCode; label: string }> = [
   { code: "5m", label: "5 min" },
   { code: "30m", label: "30 min" },
@@ -139,7 +140,6 @@ export default function App() {
   const [sponsors, setSponsors] = useState<SponsorsResponse | null>(null);
   const [worstOffenders, setWorstOffenders] = useState<WorstOffendersResponse | null>(null);
   const [onlineCount, setOnlineCount] = useState<number | null>(null);
-  const [sosaUrl, setSosaUrl] = useState<string>("https://www.saveourskiesalliance.org/");
   const [patternEditing, setPatternEditing] = useState(false);
   const [editingRunwayId, setEditingRunwayId] = useState<string | null>(null);
   const [editingPoints, setEditingPoints] = useState<PatternPoint[]>([]);
@@ -274,22 +274,6 @@ export default function App() {
   useEffect(() => {
     if (!airport) return;
     setAirportQuery(airport.icao);
-  }, [airport?.icao]);
-
-  // Look up the Save Our Skies Alliance page for the current airport so the
-  // "Volunteer / get involved" CTA points to the right airport-specific page.
-  // Falls back to the SOSA home when no per-airport page exists yet.
-  useEffect(() => {
-    if (!airport?.icao) return;
-    let cancelled = false;
-    getAirportSosaUrl(airport.icao)
-      .then((result) => {
-        if (!cancelled && result?.url) setSosaUrl(result.url);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
   }, [airport?.icao]);
 
   // Reverse-geocode the user's coords to fill the location input on first
@@ -855,11 +839,7 @@ export default function App() {
 
       <WorstOffenderCards data={worstOffenders} />
 
-      <MovementSection
-        supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL}
-        volunteerUrl={sosaUrl}
-        airportLabel={airport ? `${airport.name}${airport.iata ? ` (${airport.iata})` : ""}` : null}
-      />
+      <MovementSection />
 
       <SponsorsSection sponsors={sponsors} supportUrl={config?.buy_me_coffee_url || BUY_ME_COFFEE_URL} />
 
@@ -922,80 +902,63 @@ function WorstOffenderCards({ data }: { data: WorstOffendersResponse | null }) {
   );
 }
 
-function MovementSection({
-  supportUrl,
-  volunteerUrl,
-  airportLabel,
-}: {
-  supportUrl: string;
-  volunteerUrl: string;
-  airportLabel: string | null;
-}) {
-  const isAirportSpecific = volunteerUrl !== "https://www.saveourskiesalliance.org/";
+function MovementSection() {
   return (
     <section className="bottom-section movement">
       <header>
-        <h2>Take back the skies.</h2>
+        <h2>They don't pay a dime for the runway.</h2>
         <p>
-          A handful of pilots and special-interest lobbyists treat the airspace
-          over your house as their personal practice yard. We're a grass-roots
-          effort to balance the scales — and to remind the people in the sky
-          that the rest of us live, sleep, and raise kids underneath it.
+          Every circle, every touch-and-go, every low pass over your roof is free to the
+          people flying it. Untowered fields like this one charge nothing to use the runway —
+          so the aircraft treating your neighborhood as a practice yard put exactly $0 toward
+          the airport that launches them. The public keeps the field open. They keep the noise
+          coming — while a well-funded campaign keeps telling your town the airport pays for itself.
         </p>
       </header>
 
       <div className="movement-pillars">
         <article className="movement-card">
-          <h3>Educate the cockpit</h3>
+          <h3>The runway is free</h3>
           <p>
-            Donations fund outreach to flight schools and student pilots:
-            noise-abatement procedures, safer departure tracks over populated
-            areas, and the basic civic awareness that "legal" is not the same
-            as "neighborly."
+            Nobody up there pays to use it. Roughly 97% of runway uses are training or a
+            fly-through that never brings a visitor into town — and the field bills $0 per
+            landing, touch-and-go, or low approach.
           </p>
         </article>
 
         <article className="movement-card">
-          <h3>Speak louder than the lobby</h3>
+          <h3>You were sold a $73.6M myth</h3>
           <p>
-            AOPA and friends are organized, funded, and loud. We're catching up.
-            Every complaint filed, every neighbor signed up, every dollar in the
-            jar makes it harder for our elected officials to keep pretending
-            this isn't a public-health issue.
+            The number used to justify the free ride — "$73.6 million a year" — is gross
+            business revenue, padded end to end and repeated until it became common knowledge.
+            A whole town arguing from a figure built to be big by the people who benefit when
+            it is.
           </p>
         </article>
 
         <article className="movement-card">
-          <h3>Volunteer</h3>
+          <h3>The books say $597,370</h3>
           <p>
-            We need analysts, designers, organizers, lawyers, and locals in
-            every airport community. If you can spare an evening — or a
-            lifetime — we'd love your help.
+            The airport's own 2026 ledger banks $597,370 from all 122 hangar and ground leases
+            combined — its single biggest tenant a cell tower, and not one cent of it from the
+            runway. That's the real economic case, on the record.
           </p>
         </article>
       </div>
 
       <div className="movement-actions">
-        <a className="movement-cta primary" href={supportUrl} target="_blank" rel="noreferrer">
-          Donate to the effort
+        <a className="movement-cta primary" href={LEDGER_URL} target="_blank" rel="noreferrer">
+          See the ledger →
         </a>
-        <a
-          className="movement-cta secondary"
-          href={volunteerUrl}
-          target="_blank"
-          rel="noreferrer"
-          title={
-            isAirportSpecific && airportLabel
-              ? `Save Our Skies Alliance page for ${airportLabel}`
-              : "Save Our Skies Alliance"
-          }
-        >
-          {isAirportSpecific && airportLabel
-            ? `Volunteer at ${airportLabel}`
-            : "Volunteer / get involved"}
+        <a className="movement-cta secondary" href={LEDGER_70M_URL} target="_blank" rel="noreferrer">
+          Read the $73.6M breakdown →
         </a>
       </div>
 
+      <p className="movement-footnote">
+        Receipts filed for Longmont's Vance Brand Airport (KLMO) — the same free-runway math
+        runs at untowered fields nationwide.
+      </p>
     </section>
   );
 }
