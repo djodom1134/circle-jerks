@@ -1,0 +1,901 @@
+openapi: 3.1.0
+
+info:
+  title: Circle Jerks Public API
+  version: "v1"
+  summary: Read-only access to circling-aircraft operations, raw ADS-B tracks, aggregates, and the KLMO fees ledger.
+  description: |
+    A read-only HTTP API over four data families collected around general-aviation
+    airports: **classified operations** (touch-and-gos, circles, low approaches,
+    landings, passes), **raw ADS-B position samples**, **precomputed aggregates**
+    (stats, worst offenders, trends, VNAP compliance, runways, patterns, flow), and
+    the **KLMO fees ledger**.
+
+    Every endpoint is read-only. Nothing here mutates state.
+
+    ## Authentication
+
+    Every request needs an API key, issued by an administrator. Present it either way:
+
+    ```
+    Authorization: Bearer cj_live_0123456789abcdef_<secret>
+    X-API-Key: cj_live_0123456789abcdef_<secret>
+    ```
+
+    Keys look like `cj_<env>_<id16>_<secret43>`. The `env` segment is `live` in
+    production. Only the id half is stored in recoverable form — the secret is
+    hashed, so a lost key cannot be recovered and must be reissued.
+
+    Call `GET /v1/meta` to see exactly what your own key can do. It reports your
+    scopes, your airport restriction, and the current limits, which makes a 403
+    diagnosable without contacting us.
+
+    ## Scopes
+
+    A key carries any combination of four scopes. Requesting an endpoint outside
+    your scopes returns `403 forbidden_scope`.
+
+    | Scope | Grants |
+    |---|---|
+    | `ops:read` | `/v1/operations` |
+    | `tracks:read` | `/v1/tracks` |
+    | `aggregates:read` | the seven `/v1/airports/{icao}/…` endpoints |
+    | `ledger:read` | `/v1/ledger/…` |
+
+    ## Airport restriction
+
+    A key may additionally be restricted to specific airports. `GET /v1/meta`
+    reports `"airports": null` for an unrestricted key, or a list of ICAO codes.
+    Requesting data for an airport outside that list returns `403
+    forbidden_airport` — and it returns the same 403 whether or not the airport
+    exists, so the restriction cannot be used to enumerate our database.
+
+    **Restricted keys must scope `/v1/tracks` by airport.** Raw track samples are
+    keyed by aircraft, not by airport, so an `icao24`-only query has no airport to
+    check. If your key is restricted, pass `airport=` (optionally alongside
+    `icao24=` to follow one aircraft within that airport); an `icao24`-only request
+    returns `403 forbidden_airport`. Unrestricted keys may query by `icao24` alone.
+
+    Note that airport scoping on tracks is **geographic**: samples are selected by a
+    bounding box around the field, so aircraft operating at a neighbouring airport
+    within that radius may appear. This is inherent to a positional query.
+
+    ## Pagination
+
+    `/v1/operations` and `/v1/tracks` are keyset-paginated and return:
+
+    ```json
+    { "data": [ … ], "next_cursor": "MTc4NDY2NDExNjpvcC0wMDE" }
+    ```
+
+    Pass `next_cursor` back as `cursor` to get the following page. Keep every other
+    parameter identical between pages. When `next_cursor` is `null` you have reached
+    the end. A cursor is opaque — do not parse or construct one.
+
+    A cursor is returned whenever a page came back full, so the last page of an
+    exact multiple of `limit` will hand you a cursor that yields an empty page. That
+    is normal; stop when `data` is empty or `next_cursor` is `null`.
+
+    `limit` defaults to 500 and is capped at 5000.
+
+    ## Time parameters
+
+    `since` and `until` accept either a Unix timestamp in seconds (`1784664115`) or
+    an ISO 8601 datetime (`2026-07-21T15:00:00Z`). A datetime without a timezone is
+    read as UTC. Timestamps are always **returned** as Unix seconds.
+
+    `/v1/operations` defaults to the last 7 days if you omit both.
+    `/v1/tracks` requires both, and rejects a span longer than 31 days — page
+    through a longer range with the cursor.
+
+    ## Rate limits
+
+    120 requests per minute per key, as a fixed window. Every response carries
+    `X-RateLimit-Limit` and `X-RateLimit-Remaining`; exceeding the limit returns
+    `429 rate_limited` with `Retry-After: 60`.
+
+    ## Errors
+
+    Every error in this namespace uses one envelope:
+
+    ```json
+    { "error": { "code": "forbidden_scope", "message": "key lacks scope tracks:read" } }
+    ```
+
+    Branch on `code`, not on `message` — messages may be reworded.
+
+    | Code | Status | Meaning |
+    |---|---|---|
+    | `unauthorized` | 401 | Missing, malformed, unknown, or revoked key |
+    | `invalid_request` | 400 | Bad parameter, bad cursor, or a span over the cap |
+    | `forbidden_scope` | 403 | Valid key without the required scope |
+    | `forbidden_airport` | 403 | Valid key restricted away from this airport |
+    | `not_found` | 404 | Unknown airport or resource |
+    | `rate_limited` | 429 | Over 120 requests per minute |
+    | `upstream_unavailable` | 503 | The ledger sidecar is unreachable or erroring |
+
+  contact:
+    name: Circle Jerks
+    url: https://circlejerks.live
+
+servers:
+  - url: https://circlejerks.live/api
+    description: Production.
+  - url: http://localhost:5173/api
+    description: Local development (Vite proxies to the backend on :8000).
+
+security:
+  - bearerAuth: []
+  - apiKeyHeader: []
+
+tags:
+  - name: meta
+    description: Describe the calling key.
+  - name: operations
+    description: Classified aircraft operations.
+  - name: tracks
+    description: Raw ADS-B position samples.
+  - name: aggregates
+    description: Precomputed per-airport views.
+  - name: ledger
+    description: KLMO fees ledger, proxied from a sidecar service.
+
+paths:
+
+  /v1/meta:
+    get:
+      tags: [meta]
+      summary: Describe the calling key
+      description: |
+        Echoes your key's own scopes, airport restriction, and the current limits.
+        Requires only a valid key — no particular scope. Use it to diagnose a 403
+        without contacting us.
+      operationId: getMeta
+      responses:
+        "200":
+          description: The calling key's capabilities.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Meta" }
+              example:
+                version: v1
+                name: partner-demo
+                scopes: [aggregates:read, ledger:read, ops:read, tracks:read]
+                airports: null
+                limits:
+                  requests_per_minute: 120
+                  max_page_size: 5000
+                  max_track_span_seconds: 2678400
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/operations:
+    get:
+      tags: [operations]
+      summary: Classified operations for an airport
+      description: |
+        Each row is one detected operation — a touch-and-go, circle, low approach,
+        landing, or pass — with the runway, pattern deviation, wind at the time, and
+        any resolved operator or flight school.
+
+        Requires the `ops:read` scope. Keyset-paginated, ordered by
+        `(timestamp, id)` ascending.
+      operationId: listOperations
+      parameters:
+        - name: airport
+          in: query
+          required: true
+          description: ICAO code, case-insensitive.
+          schema: { type: string, example: KBJC }
+        - name: since
+          in: query
+          description: Start of range, inclusive. Defaults to 7 days before `until`.
+          schema: { type: string, example: "2026-07-14T00:00:00Z" }
+        - name: until
+          in: query
+          description: End of range, inclusive. Defaults to now.
+          schema: { type: string, example: "1784667715" }
+        - name: type
+          in: query
+          description: Restrict to one operation type.
+          schema:
+            type: string
+            enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
+        - name: icao24
+          in: query
+          description: Restrict to one aircraft by its 24-bit ICAO address.
+          schema: { type: string, example: a1b2c3 }
+        - name: runway
+          in: query
+          description: Restrict to one runway identifier.
+          schema: { type: string, example: "11" }
+        - name: cursor
+          in: query
+          description: Opaque cursor from a previous response's `next_cursor`.
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: Rows per page. Clamped to 5000.
+          schema: { type: integer, default: 500, minimum: 1, maximum: 5000 }
+      responses:
+        "200":
+          description: One page of operations.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Operation" }
+                  next_cursor:
+                    type: [string, "null"]
+                    description: Pass back as `cursor`. Null at the end of the range.
+              example:
+                data:
+                  - id: op-000
+                    airport_icao: KBJC
+                    icao24: a1b2c3
+                    callsign: N333RX
+                    registration: N333RX
+                    type: touch_and_go
+                    timestamp: 1784664115
+                    runway_id: "11"
+                    turn_direction: right
+                    min_altitude_ft_agl: 900
+                    emitter_category: null
+                    deviation_mean_nm: null
+                    deviation_peak_nm: null
+                    pct_off_pattern: null
+                    wind_from_deg: null
+                    wind_speed_kt: null
+                    origin_airport_icao: null
+                    origin_label: null
+                    operator: null
+                    flight_school: null
+                next_cursor: MTc4NDY2NDExNjpvcC0wMDE
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/tracks:
+    get:
+      tags: [tracks]
+      summary: Raw ADS-B position samples
+      description: |
+        Per-aircraft position samples as recorded, without smoothing or
+        interpolation. This is the heaviest endpoint in the API.
+
+        Requires the `tracks:read` scope. Both `since` and `until` are required, and
+        the span may not exceed 31 days — page through longer ranges with the
+        cursor. Supply at least one of `icao24` or `airport`.
+
+        **If your key is restricted to specific airports you must pass `airport`.**
+        An `icao24`-only request from a restricted key returns `403
+        forbidden_airport`. Combine `airport` and `icao24` to follow one aircraft
+        within one field.
+
+        Selecting by `airport` uses a bounding box around the field, so aircraft
+        operating at a nearby airport inside that radius can appear.
+
+        Ordered by `(timestamp, icao24)` ascending; the cursor encodes that pair.
+      operationId: listTracks
+      parameters:
+        - name: since
+          in: query
+          required: true
+          description: Start of range, inclusive.
+          schema: { type: string, example: "2026-07-21T00:00:00Z" }
+        - name: until
+          in: query
+          required: true
+          description: End of range, inclusive. At most 31 days after `since`.
+          schema: { type: string, example: "2026-07-21T06:00:00Z" }
+        - name: icao24
+          in: query
+          description: One aircraft by 24-bit ICAO address. Required unless `airport` is given.
+          schema: { type: string, example: a1b2c3 }
+        - name: airport
+          in: query
+          description: Samples within ~8 nm of this airport. Required for airport-restricted keys.
+          schema: { type: string, example: KBJC }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 500, minimum: 1, maximum: 5000 }
+      responses:
+        "200":
+          description: One page of position samples.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/TrackSample" }
+                  next_cursor: { type: [string, "null"] }
+              example:
+                data:
+                  - icao24: a1b2c3
+                    timestamp: 1784664115
+                    lat: 39.9088
+                    lon: -105.1172
+                    altitude_ft: 6500.0
+                    baro_altitude_ft: 6480.0
+                    geo_altitude_ft: 6520.0
+                    heading_deg: 110.0
+                    vertical_rate_fpm: -64.0
+                    callsign: N333RX
+                    emitter_category: null
+                    source: adsb_lol
+                next_cursor: MTc4NDY2NDExNjphMWIyYzM
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/airports/{icao}/stats:
+    get:
+      tags: [aggregates]
+      summary: Operation counts, buckets, and derived breakdowns
+      description: |
+        Counters, an operations-over-time series, stop classification, wind
+        breakdown, deviation summary, runway usage, and recent runway changes for
+        one airport. Requires `aggregates:read`.
+      operationId: getAirportStats
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+        - $ref: "#/components/parameters/Window"
+      responses:
+        "200":
+          description: Aggregated statistics for the window.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AirportStats" }
+              example:
+                airport_icao: KBJC
+                window: { code: 7d, start_ts: 1784062915, end_ts: 1784667715, bucket_seconds: 86400 }
+                counters:
+                  circles: 0
+                  touch_and_gos: 3
+                  low_approaches: 0
+                  landings: 0
+                  passes: 0
+                  unique_aircraft: 1
+                  runway_changes: 0
+                ops_over_time:
+                  - { bucket: 1784592000, count: 3 }
+                runway_usage:
+                  - { runway_id: "11", total: 3, upwind: 0, crosswind: 0, downwind: 0, no_wind_data: 3 }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/airports/{icao}/worst-offenders:
+    get:
+      tags: [aggregates]
+      summary: Most-reported aircraft
+      description: |
+        Aircraft ranked by circling behaviour and report volume. Requires
+        `aggregates:read`.
+
+        When the requested airport has no scored aircraft, the underlying view falls
+        back to the nearest neighbouring airport and sets `is_fallback: true` with
+        `resolved_icao` naming the substitute — always check those two fields before
+        attributing the result. **If your key is restricted, a fallback to an
+        airport outside your scope is suppressed**: you receive an empty list with
+        `is_fallback: false`, never another field's data.
+      operationId: getWorstOffenders
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+        - name: limit
+          in: query
+          description: Number of aircraft to return. Clamped to 10.
+          schema: { type: integer, default: 5, minimum: 1, maximum: 10 }
+      responses:
+        "200":
+          description: Ranked aircraft, possibly from a fallback airport.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorstOffenders" }
+              example:
+                airport_icao: KBJC
+                source_icao: KBJC
+                resolved_icao: KBDU
+                resolved_label: "Boulder, CO"
+                is_fallback: true
+                offenders: []
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/airports/{icao}/operations-trends:
+    get:
+      tags: [aggregates]
+      summary: Twelve-month operation trends
+      description: Monthly operation totals and derived trend series. Requires `aggregates:read`.
+      operationId: getOperationsTrends
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+      responses:
+        "200":
+          description: Trend series for the last twelve months.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [airport_icao]
+                properties:
+                  airport_icao: { type: string }
+                additionalProperties: true
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/airports/{icao}/vnap-compliance:
+    get:
+      tags: [aggregates]
+      summary: Per-aircraft VNAP compliance
+      description: |
+        Voluntary Noise Abatement Procedure compliance scored per aircraft over the
+        window. Requires `aggregates:read`.
+      operationId: getVnapCompliance
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+        - $ref: "#/components/parameters/Window"
+      responses:
+        "200":
+          description: Compliance scoring for the window.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [airport_icao, window]
+                properties:
+                  airport_icao: { type: string }
+                  window: { $ref: "#/components/schemas/Window" }
+                additionalProperties: true
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/airports/{icao}/runways:
+    get:
+      tags: [aggregates]
+      summary: Runway geometry
+      description: Threshold coordinates, magnetic heading, and length per runway. Requires `aggregates:read`.
+      operationId: getRunways
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+      responses:
+        "200":
+          description: Runways for the airport.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [airport_icao, runways]
+                properties:
+                  airport_icao: { type: string }
+                  runways:
+                    type: array
+                    items: { $ref: "#/components/schemas/Runway" }
+              example:
+                airport_icao: KBJC
+                runways:
+                  - icao: KBJC
+                    runway_id: 12L
+                    lat_threshold: 39.9215
+                    lon_threshold: -105.1321
+                    heading_deg: 120.0
+                    length_ft: 9000
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/airports/{icao}/patterns:
+    get:
+      tags: [aggregates]
+      summary: Current traffic patterns
+      description: |
+        The current published traffic pattern geometry per runway, as drawn in the
+        pattern editor. Requires `aggregates:read`.
+      operationId: getPatterns
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+      responses:
+        "200":
+          description: Current pattern per runway.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [airport_icao, patterns]
+                properties:
+                  airport_icao: { type: string }
+                  patterns:
+                    type: array
+                    items: { $ref: "#/components/schemas/Pattern" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/airports/{icao}/flow:
+    get:
+      tags: [aggregates]
+      summary: Active runway and recent changes
+      description: |
+        The runway currently in use and the last twenty runway changes. `active` is
+        null when no flow has been established. Requires `aggregates:read`.
+      operationId: getFlow
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+      responses:
+        "200":
+          description: Current flow and recent changes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [airport_icao, active, recent_changes]
+                properties:
+                  airport_icao: { type: string }
+                  active:
+                    type: [object, "null"]
+                    additionalProperties: true
+                  recent_changes:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+              example:
+                airport_icao: KBJC
+                active: null
+                recent_changes: []
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/ledger/airports/{icao}/{resource}:
+    get:
+      tags: [ledger]
+      summary: KLMO fees ledger
+      description: |
+        Proxied to the ledger sidecar, which computes runway-use fees from lap and
+        dwell analysis. Requires `ledger:read`.
+
+        `resource` is an allowlist of exactly two values:
+
+        - `ledger` — runway uses, the daily series, the operator ledger, and the
+          methodology block that ships with the numbers. Accepts `days` (1–365,
+          default 30).
+        - `aircraft-fees` — per-aircraft runway-use totals.
+
+        Any other value returns `404 not_found`. Query parameters beginning with `_`
+        are stripped before forwarding.
+
+        If the sidecar is unreachable you get `503 upstream_unavailable`. If it
+        rejects your parameters you get `400 invalid_request` — a 503 here always
+        means our problem, never yours.
+      operationId: getLedger
+      parameters:
+        - $ref: "#/components/parameters/IcaoPath"
+        - name: resource
+          in: path
+          required: true
+          schema: { type: string, enum: [ledger, aircraft-fees] }
+        - name: days
+          in: query
+          description: Lookback in days. Applies to `ledger` only.
+          schema: { type: integer, default: 30, minimum: 1, maximum: 365 }
+      responses:
+        "200":
+          description: Ledger payload, passed through from the sidecar.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/UpstreamUnavailable" }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "`Authorization: Bearer cj_live_…`"
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Alternative to the bearer header. Identical semantics.
+
+  parameters:
+    IcaoPath:
+      name: icao
+      in: path
+      required: true
+      description: ICAO code, case-insensitive; normalized to uppercase in the response.
+      schema: { type: string, example: KBJC }
+    Window:
+      name: window
+      in: query
+      description: Lookback window. `all` starts at the epoch.
+      schema:
+        type: string
+        default: 7d
+        enum: [1d, 7d, 30d, all]
+
+  headers:
+    RateLimitLimit:
+      description: Requests permitted per minute for this key.
+      schema: { type: integer, example: 120 }
+    RateLimitRemaining:
+      description: Requests remaining in the current minute.
+      schema: { type: integer, example: 119 }
+    RetryAfter:
+      description: Seconds until the rate-limit window resets.
+      schema: { type: integer, example: 60 }
+
+  schemas:
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable code. Branch on this.
+              enum:
+                - unauthorized
+                - invalid_request
+                - forbidden_scope
+                - forbidden_airport
+                - not_found
+                - rate_limited
+                - upstream_unavailable
+            message:
+              type: string
+              description: Human-readable detail. Wording may change; do not parse.
+
+    Meta:
+      type: object
+      required: [version, name, scopes, airports, limits]
+      properties:
+        version: { type: string, example: v1 }
+        name:
+          type: string
+          description: The label the administrator gave this key.
+        scopes:
+          type: array
+          items: { type: string, enum: [ops:read, tracks:read, aggregates:read, ledger:read] }
+        airports:
+          type: [array, "null"]
+          description: ICAO codes this key is restricted to, or null for unrestricted.
+          items: { type: string }
+        limits:
+          type: object
+          properties:
+            requests_per_minute: { type: integer }
+            max_page_size: { type: integer }
+            max_track_span_seconds: { type: integer }
+
+    Operation:
+      type: object
+      description: One detected operation. Field set is frozen; new database columns do not appear here.
+      required: [id, airport_icao, type, timestamp]
+      properties:
+        id: { type: string, description: Stable identifier, also half of the cursor. }
+        airport_icao: { type: string }
+        icao24: { type: [string, "null"], description: 24-bit ICAO address, lowercase hex. }
+        callsign: { type: [string, "null"] }
+        registration: { type: [string, "null"], description: Tail number, when resolvable. }
+        type:
+          type: string
+          enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
+        timestamp: { type: integer, description: Unix seconds. }
+        runway_id: { type: [string, "null"] }
+        turn_direction: { type: [string, "null"], enum: [left, right, null] }
+        min_altitude_ft_agl: { type: [integer, "null"] }
+        emitter_category: { type: [string, "null"] }
+        deviation_mean_nm: { type: [number, "null"], description: Mean lateral deviation from the published pattern. }
+        deviation_peak_nm: { type: [number, "null"] }
+        pct_off_pattern: { type: [number, "null"] }
+        wind_from_deg: { type: [integer, "null"] }
+        wind_speed_kt: { type: [number, "null"] }
+        origin_airport_icao: { type: [string, "null"] }
+        origin_label: { type: [string, "null"] }
+        operator: { type: [string, "null"] }
+        flight_school: { type: [string, "null"] }
+
+    TrackSample:
+      type: object
+      description: One raw position sample. Field set is frozen.
+      required: [icao24, timestamp]
+      properties:
+        icao24: { type: string }
+        timestamp: { type: integer, description: Unix seconds. }
+        lat: { type: [number, "null"] }
+        lon: { type: [number, "null"] }
+        altitude_ft: { type: [number, "null"] }
+        baro_altitude_ft: { type: [number, "null"] }
+        geo_altitude_ft: { type: [number, "null"] }
+        heading_deg: { type: [number, "null"] }
+        vertical_rate_fpm: { type: [number, "null"] }
+        callsign: { type: [string, "null"] }
+        emitter_category: { type: [string, "null"] }
+        source: { type: [string, "null"], description: Which upstream feed supplied the sample. }
+
+    Window:
+      type: object
+      required: [code, start_ts, end_ts]
+      properties:
+        code: { type: string, enum: [1d, 7d, 30d, all] }
+        start_ts: { type: integer }
+        end_ts: { type: integer }
+        bucket_seconds: { type: integer }
+
+    AirportStats:
+      type: object
+      required: [airport_icao, window]
+      properties:
+        airport_icao: { type: string }
+        window: { $ref: "#/components/schemas/Window" }
+        counters:
+          type: object
+          properties:
+            circles: { type: integer }
+            touch_and_gos: { type: integer }
+            low_approaches: { type: integer }
+            landings: { type: integer }
+            passes: { type: integer }
+            unique_aircraft: { type: integer }
+            runway_changes: { type: integer }
+        ops_over_time:
+          type: array
+          items:
+            type: object
+            properties:
+              bucket: { type: integer }
+              count: { type: integer }
+        runway_usage:
+          type: array
+          items: { type: object, additionalProperties: true }
+      additionalProperties: true
+
+    WorstOffenders:
+      type: object
+      required: [airport_icao, source_icao, resolved_icao, is_fallback, offenders]
+      properties:
+        airport_icao: { type: string, description: The airport you requested. }
+        source_icao: { type: string, description: Same as airport_icao. }
+        resolved_icao:
+          type: string
+          description: The airport the offenders actually come from. Differs when is_fallback is true.
+        resolved_label: { type: string }
+        is_fallback:
+          type: boolean
+          description: True when the requested airport had no scored aircraft and a neighbour was substituted.
+        offenders:
+          type: array
+          items: { type: object, additionalProperties: true }
+
+    Runway:
+      type: object
+      properties:
+        icao: { type: string }
+        runway_id: { type: string }
+        lat_threshold: { type: number }
+        lon_threshold: { type: number }
+        heading_deg: { type: number }
+        length_ft: { type: integer }
+
+    Pattern:
+      type: object
+      properties:
+        id: { type: integer }
+        airport_icao: { type: string }
+        runway_id: { type: string }
+        version: { type: integer }
+        name: { type: [string, "null"] }
+        locked: { type: boolean }
+        geometry:
+          type: object
+          description: Pattern polyline.
+          properties:
+            points:
+              type: array
+              items:
+                type: object
+                properties:
+                  lat: { type: number }
+                  lon: { type: number }
+            closed: { type: boolean }
+        created_at: { type: integer }
+
+  responses:
+    Unauthorized:
+      description: |
+        Missing, malformed, unknown, or revoked key. An unknown key and a wrong
+        secret are deliberately indistinguishable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: unauthorized, message: invalid or missing API key } }
+    InvalidRequest:
+      description: A parameter, cursor, or time range was rejected.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: invalid_request
+              message: requested range exceeds the 2678400 second maximum; page with the cursor instead
+    Forbidden:
+      description: |
+        Either the key lacks the required scope (`forbidden_scope`) or it is
+        restricted away from this airport (`forbidden_airport`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            scope:
+              value: { error: { code: forbidden_scope, message: "key lacks scope tracks:read" } }
+            airport:
+              value: { error: { code: forbidden_airport, message: "key is not scoped to KBJC" } }
+    NotFound:
+      description: Unknown airport, or an unknown ledger resource.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: not_found, message: unknown airport ZZZZ } }
+    RateLimited:
+      description: Over 120 requests per minute for this key.
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+        X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+        X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: rate_limited, message: rate limit of 120 requests per minute exceeded }
+    UpstreamUnavailable:
+      description: The ledger sidecar is unreachable or returned a server error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: upstream_unavailable, message: the ledger service is not reachable right now }
