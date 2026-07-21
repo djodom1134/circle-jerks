@@ -241,3 +241,62 @@ def test_tracks_for_an_unknown_airport_is_404(tmp_path, monkeypatch):
         )
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "not_found"
+
+
+def test_tracks_paginate_across_a_timestamp_tie(tmp_path, monkeypatch):
+    """The whole point of the (timestamp, icao24) keyset predicate.
+
+    track_archive's primary key is (icao24, timestamp), so several aircraft can
+    share one timestamp. If the cursor compared timestamps alone, a page break
+    landing inside a tie would either skip the rest of the tie or replay it.
+    """
+    db_path = configure(tmp_path, monkeypatch)
+    db.init_db(db_path)
+    tied = ["aa1111", "bb2222", "cc3333", "dd4444"]
+    with db.db_session(db_path) as conn:
+        for icao24 in tied:
+            conn.execute(
+                """
+                INSERT INTO track_archive
+                (icao24, timestamp, lat, lon, altitude_ft, in_window, source)
+                VALUES (?, ?, ?, ?, 6500.0, 1, 'test')
+                """,
+                (icao24, NOW, KBJC_LAT, KBJC_LON),
+            )
+
+    key = mint(db_path, scopes=["tracks:read"])
+    seen: list[str] = []
+    with TestClient(app) as client:
+        # limit=2 forces the page boundary to fall in the middle of the tie.
+        params = {"airport": "KBJC", "since": NOW - 5, "until": NOW + 5, "limit": 2}
+        cursor = None
+        for _ in range(len(tied) + 1):
+            page = client.get(
+                "/v1/tracks",
+                params={**params, **({"cursor": cursor} if cursor else {})},
+                headers=auth(key),
+            ).json()
+            seen.extend(row["icao24"] for row in page["data"])
+            cursor = page["next_cursor"]
+            if not cursor:
+                break
+
+    assert seen == tied, "tie was skipped or replayed across the page boundary"
+
+
+def test_restricted_key_with_neither_param_gets_the_generic_400(tmp_path, monkeypatch):
+    """Ordering check: "what do I query?" is more useful than "you're scoped".
+
+    The 400 fires before the airport-restriction 403, so a restricted key that
+    sends nothing is told what is missing rather than what it lacks.
+    """
+    db_path = configure(tmp_path, monkeypatch)
+    key = mint(db_path, scopes=["tracks:read"], airports=["KLMO"])
+    with TestClient(app) as client:
+        resp = client.get(
+            "/v1/tracks",
+            params={"since": NOW, "until": NOW + 10},
+            headers=auth(key),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_request"
