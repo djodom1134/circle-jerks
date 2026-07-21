@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.exception_handlers import (
     http_exception_handler as default_http_exception_handler,
@@ -727,3 +728,58 @@ async def airport_flow(
         active = db.current_flow(conn, normalized)
         changes = db.recent_runway_changes(conn, normalized, 20)
     return {"airport_icao": normalized, "active": active, "recent_changes": changes}
+
+
+# ─── Ledger proxy ────────────────────────────────────────────────────────────
+#
+# The only /v1 route that crosses a service boundary. ledger-api opens the
+# main circlejerk.sqlite3 READ-ONLY and writes its own derived tables to a
+# separate ledger.sqlite3 — that split keeps two writers off one SQLite write
+# lock. Reading ledger.sqlite3 directly from here would recreate exactly the
+# contention that split was made to avoid, so this proxies over HTTP instead.
+
+# Public suffix -> upstream path on ledger-api. An explicit allowlist, not a
+# passthrough: this must never become an open proxy into the sidecar.
+LEDGER_RESOURCES = {
+    "ledger": "/airports/{icao}/ledger",
+    "aircraft-fees": "/airports/{icao}/aircraft-fees",
+}
+
+
+@router.get("/ledger/airports/{icao}/{resource}", summary="KLMO fees ledger")
+async def ledger_proxy(
+    icao: str,
+    resource: str,
+    request: Request,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("ledger:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+) -> JSONResponse:
+    template = LEDGER_RESOURCES.get(resource)
+    if template is None:
+        raise ApiError(
+            404, "not_found",
+            f"unknown ledger resource {resource}; expected one of {', '.join(LEDGER_RESOURCES)}",
+        )
+    normalized = require_airport(ctx, icao)
+    url = settings.ledger_api_base_url.rstrip("/") + template.format(icao=normalized)
+
+    # Drop internal-only escape hatches (_now) rather than forwarding them.
+    params = {k: v for k, v in request.query_params.items() if not k.startswith("_")}
+
+    try:
+        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+            upstream = await client.get(url, params=params)
+    except httpx.HTTPError as exc:
+        raise ApiError(
+            503, "upstream_unavailable",
+            "the ledger service is not reachable right now",
+        ) from exc
+
+    if upstream.status_code == 404:
+        raise ApiError(404, "not_found", f"no ledger data for {normalized}")
+    if upstream.status_code >= 400:
+        raise ApiError(
+            503, "upstream_unavailable",
+            f"the ledger service returned {upstream.status_code}",
+        )
+    return JSONResponse(status_code=200, content=upstream.json())

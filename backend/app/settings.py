@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     adsbx_rapidapi_key: str | None = Field(default=None, validation_alias="ADSBX_RAPIDAPI_KEY")
     adsbx_rapidapi_host: str = "adsbexchange-com1.p.rapidapi.com"
 
+    # The ledger sidecar. Proxied rather than read directly: ledger-api owns
+    # its own SQLite file, and opening it from here would put two writers on
+    # one lock — the exact thing that split was made to avoid.
+    ledger_api_base_url: str = "http://ledger-api:8100"
+
     default_airport_icao: str = "KBJC"
     monitor_ttl_seconds: int = 900
     # Sized to the managed Valkey memory budget (418MB) — at ~470MB for 24h of
