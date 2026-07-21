@@ -308,7 +308,15 @@ Guards, enforced server-side:
 
 - A user cannot modify their own row.
 - A user whose email is in `ADMIN_SUPERUSERS` cannot be modified through the UI.
-- The last remaining `super_admin` cannot be demoted or suspended.
+
+A third guard — "the last `super_admin` cannot be demoted" — was specified and then
+**dropped during plan review, because it can never fire.** Only an approved
+super-admin reaches these routes and nobody may target their own row, so any
+super-admin target implies at least two exist and demoting one always leaves the
+actor. The single edge case where the check *would* have triggered is a target who is
+a suspended super-admin, and therefore uncounted — a legitimate edit it would have
+wrongly blocked. `ADMIN_SUPERUSERS` (D2) is the actual lockout backstop, and it
+survives cases a database-count guard never could.
 
 ### Frontend
 
@@ -396,8 +404,9 @@ already-minted keys unchanged.
 **Ownership** — a partner revoking another user's key gets 404; a partner's list
 contains only their own keys; legacy unowned keys appear for super-admins only.
 
-**Guards** — self-modification rejected; `ADMIN_SUPERUSERS` account not modifiable;
-last super-admin not demotable.
+**Guards** — self-modification rejected; `ADMIN_SUPERUSERS` account not modifiable; one
+super-admin may demote another (pinning the absence of the dropped third guard, so it
+is not reintroduced).
 
 **Frontend (vitest)** — tabs render by role; the scope picker clamps to the grant; each
 non-approved status renders its screen.
