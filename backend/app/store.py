@@ -100,6 +100,8 @@ class Store(ABC):
 
         The TTL is applied on the first increment only, so the window expires
         `ttl` seconds after it opened rather than sliding forward on every hit.
+        `ttl` is clamped to a minimum of 1 second: a non-positive `ttl` still
+        opens a one-second window rather than a zero-length (or negative) one.
         """
 
 
@@ -317,7 +319,7 @@ class MemoryStore(Store):
         now = int(time.time())
         row = self.counters.get(key)
         if not row or row[1] <= now:
-            self.counters[key] = (1, now + ttl)
+            self.counters[key] = (1, now + max(ttl, 1))
             return 1
         value, expires = row
         self.counters[key] = (value + 1, expires)
