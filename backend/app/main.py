@@ -25,10 +25,11 @@ import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import admin_users, api_keys, db, patterns, public_api, track_history, pattern_circuits, vnap
+from . import admin_users, api_keys, db, google_oauth, patterns, public_api, track_history, pattern_circuits, vnap
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -40,6 +41,8 @@ from .settings import Settings, get_settings
 from .store import Store, make_store
 from .tone import PRESETS, sliders_from_request
 from .windows import validate_window
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -812,6 +815,154 @@ async def admin_session(
         "scopes": sorted(user.grant.scopes),
         "airports": sorted(user.grant.airports) if user.grant.airports is not None else None,
     }
+
+
+def google_configured(settings: Settings) -> bool:
+    return bool(
+        settings.google_oauth_client_id
+        and settings.google_oauth_client_secret
+        and settings.google_oauth_redirect_uri
+    )
+
+
+async def exchange_google_code(settings: Settings, code: str, verifier: str) -> dict:
+    """The one network call in this flow. Separated so tests can replace it."""
+    async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        resp = await client.post(
+            google_oauth.TOKEN_ENDPOINT,
+            data={
+                "code": code,
+                "client_id": settings.google_oauth_client_id,
+                "client_secret": settings.google_oauth_client_secret,
+                "redirect_uri": settings.google_oauth_redirect_uri,
+                "grant_type": "authorization_code",
+                "code_verifier": verifier,
+            },
+        )
+    resp.raise_for_status()
+    return resp.json()
+
+
+@app.get("/admin/auth/methods")
+async def admin_auth_methods(settings: Annotated[Settings, Depends(settings_dep)]):
+    """Unauthenticated: the login screen needs it before anyone is signed in."""
+    return {
+        "google": google_configured(settings),
+        "password": admin_auth_configured(settings),
+    }
+
+
+@app.get("/admin/auth/google/start")
+async def admin_google_start(
+    response: Response,
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    if not google_configured(settings):
+        raise HTTPException(status_code=503, detail="google sign-in is not configured")
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = google_oauth.make_pkce()
+    payload = json.dumps({"state": state, "verifier": verifier}, separators=(",", ":"))
+    body = _b64encode(payload.encode("utf-8"))
+    signature = hmac.new(
+        settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    url = google_oauth.build_authorize_url(
+        settings.google_oauth_client_id,
+        settings.google_oauth_redirect_uri,
+        state,
+        challenge,
+    )
+    redirect = RedirectResponse(url, status_code=307)
+    redirect.set_cookie(
+        google_oauth.OAUTH_STATE_COOKIE,
+        f"{body}.{signature}",
+        max_age=google_oauth.STATE_TTL_SECONDS,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="lax",
+        path="/",
+    )
+    return redirect
+
+
+def _read_state_cookie(settings: Settings, raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        body, signature = raw.split(".", 1)
+    except ValueError:
+        return None
+    expected = hmac.new(
+        settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    if not secrets.compare_digest(signature, expected):
+        return None
+    try:
+        return json.loads(_b64decode(body))
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+@app.get("/admin/auth/google/callback")
+async def admin_google_callback(
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    code: str | None = None,
+    state: str | None = None,
+):
+    if not google_configured(settings):
+        raise HTTPException(status_code=503, detail="google sign-in is not configured")
+
+    stored = _read_state_cookie(settings, request.cookies.get(google_oauth.OAUTH_STATE_COOKIE))
+    if not stored or not state or not secrets.compare_digest(stored.get("state", ""), state):
+        # One message for every failure mode here: which check failed is not
+        # information a caller needs.
+        raise HTTPException(status_code=400, detail="sign-in could not be completed")
+    if not code:
+        raise HTTPException(status_code=400, detail="sign-in could not be completed")
+
+    try:
+        tokens = await exchange_google_code(settings, code, stored["verifier"])
+    except Exception as exc:  # noqa: BLE001 - upstream failure, logged not surfaced
+        logger.warning("google token exchange failed: %s", exc)
+        raise HTTPException(status_code=502, detail="google sign-in is unavailable") from exc
+
+    try:
+        claims = google_oauth.decode_id_token(tokens.get("id_token", ""))
+        google_oauth.validate_claims(claims, settings.google_oauth_client_id, int(time.time()))
+    except google_oauth.IdTokenError as exc:
+        status = 403 if "verified" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row = db.upsert_admin_user(
+            conn,
+            id=secrets.token_hex(16),
+            email=claims["email"],
+            google_sub=claims["sub"],
+            name=claims.get("name"),
+            picture=claims.get("picture"),
+            role="partner",
+            status="pending",
+            now=now,
+        )
+        row = apply_superuser_pin(conn, row, settings)
+        db.touch_admin_user_login(conn, row["id"], now)
+
+    redirect = RedirectResponse("/admin", status_code=307)
+    redirect.set_cookie(
+        ADMIN_COOKIE_NAME,
+        sign_admin_token(settings, row["id"]),
+        max_age=settings.admin_session_seconds,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="lax",
+        path="/",
+    )
+    # Consume the state so the same authorization code cannot be replayed.
+    redirect.delete_cookie(google_oauth.OAUTH_STATE_COOKIE, path="/")
+    return redirect
 
 
 @app.get("/admin/dashboard")
