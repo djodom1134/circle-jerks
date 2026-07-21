@@ -483,13 +483,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
-    # SCHEMA runs before _migrate (see init_db), so on a fresh database
-    # api_keys already has owner_user_id by the time we get here — but on an
-    # existing database the ALTER TABLE above is what just added the column.
-    # Either way the index must be created here, never in SCHEMA, or this
-    # statement raises "no such column" on every pre-existing database. Guard
-    # on the table actually existing too: _migrate is called standalone (no
-    # SCHEMA first) against legacy test fixtures that predate api_keys entirely.
+    # api_keys' CREATE TABLE in SCHEMA does not include owner_user_id — the
+    # ALTER TABLE loop above is what adds that column, on a fresh database
+    # and a pre-existing one alike, since SCHEMA runs before _migrate (see
+    # init_db). So the index must be created here, never in SCHEMA, or this
+    # statement raises "no such column" the first time SCHEMA alone creates
+    # the table. Guard on the table actually existing too: _migrate is called
+    # standalone (no SCHEMA first) against legacy test fixtures that predate
+    # api_keys entirely.
     if api_keys_existing:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_user_id)")
 
@@ -2500,6 +2501,16 @@ def touch_admin_user_login(conn: sqlite3.Connection, user_id: str, now: int) -> 
 
 def revoke_keys_for_owner(conn: sqlite3.Connection, owner_user_id: str, now: int) -> int:
     """Revoke every live key belonging to one user. Returns the count."""
+    # A falsy owner_user_id (in particular None) must never reach the query
+    # below: one layer down, in list_api_keys, owner_user_id=None means
+    # "every key in the system", not "no owner". This function would just
+    # match nothing on None and look harmless, but its sibling
+    # revoke_keys_outside_grant composes with list_api_keys and would
+    # silently revoke every user's keys instead. Fail loudly so that danger
+    # never has a chance to look harmless. Not an assert: assertions are
+    # stripped under `python -O`, and this guards a destructive operation.
+    if not owner_user_id:
+        raise ValueError("owner_user_id is required and must not be empty")
     cursor = conn.execute(
         "UPDATE api_keys SET revoked_at = ? WHERE owner_user_id = ? AND revoked_at IS NULL",
         (int(now), owner_user_id),
@@ -2516,6 +2527,14 @@ def revoke_keys_outside_grant(
     as comma-joined strings; a LIKE-based query would be subtly wrong on
     substrings ("ops:read" matching inside a longer scope name).
     """
+    # A falsy owner_user_id (in particular None) must never reach
+    # list_api_keys below: there, owner_user_id=None means "every key in the
+    # system" (the super-admin view), not "no owner". Passed through here by
+    # mistake, this loop would silently iterate every user's keys and could
+    # revoke all of them. Fail loudly instead. Not an assert: assertions are
+    # stripped under `python -O`, and this guards a destructive operation.
+    if not owner_user_id:
+        raise ValueError("owner_user_id is required and must not be empty")
     revoked = 0
     for row in list_api_keys(conn, owner_user_id=owner_user_id):
         if row["revoked_at"] is not None:

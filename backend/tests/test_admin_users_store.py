@@ -54,6 +54,30 @@ def test_email_matching_is_case_insensitive(conn):
     assert db.find_admin_user(conn, google_sub="x", email="mixed@example.com") is not None
 
 
+def test_a_matching_email_rebinds_the_row_to_a_new_google_sub(conn):
+    """Pins the account-identity-rebinding behavior of upsert_admin_user.
+
+    When find_admin_user matches an existing row by its email fallback and
+    the incoming google_sub differs from the one on file, upsert_admin_user
+    silently rebinds the row to the new google_sub. That is deliberate — it
+    is how a Google account whose subject changed still resolves to the same
+    user — but it is also the account-takeover primitive find_admin_user's
+    and upsert_admin_user's docstrings warn about. It is safe ONLY because
+    the caller (the OAuth callback) has already asserted email_verified on
+    the ID token before ever calling upsert_admin_user. If you are changing
+    this behavior, make sure you understand what relies on that assertion
+    holding upstream.
+    """
+    created = make_user(conn, id="u1", email="p@example.com", google_sub="sub-a", now=1000)
+    assert created["google_sub"] == "sub-a"
+
+    rebound = make_user(conn, id="u1", email="p@example.com", google_sub="sub-b", now=2000)
+
+    assert len(db.list_admin_users(conn)) == 1
+    assert rebound["id"] == created["id"]
+    assert rebound["google_sub"] == "sub-b"
+
+
 def test_list_filters_by_status_newest_first(conn):
     make_user(conn, id="u1", email="a@x.com", google_sub="s1", now=1000)
     make_user(conn, id="u2", email="b@x.com", google_sub="s2", now=3000)
@@ -116,6 +140,33 @@ def test_revoking_for_an_owner_leaves_other_owners_alone(conn):
     assert db.get_api_key(conn, "cccccccccccccccc")["revoked_at"] is None
     # Idempotent: an already-revoked key is not counted twice.
     assert db.revoke_keys_for_owner(conn, "u1", 9500) == 0
+
+
+def test_revoke_keys_for_owner_rejects_a_falsy_owner_id(conn):
+    """None (or "") must never silently match "no owner" here.
+
+    list_api_keys treats owner_user_id=None as "every key in the system", so
+    a None reaching this function by mistake must fail loudly rather than
+    quietly revoking nothing (or, in the sibling function, everything).
+    """
+    with pytest.raises(ValueError):
+        db.revoke_keys_for_owner(conn, None, 9000)
+    with pytest.raises(ValueError):
+        db.revoke_keys_for_owner(conn, "", 9000)
+
+
+def test_revoke_keys_outside_grant_rejects_a_falsy_owner_id(conn):
+    """Same guard as revoke_keys_for_owner, and more important here:
+
+    this function composes with list_api_keys, where owner_user_id=None
+    means "every key in the system." A None slipping through would silently
+    iterate and potentially revoke every user's keys.
+    """
+    grant = api_keys.Grant(scopes=frozenset({"ops:read"}), airports=frozenset({"KLMO"}))
+    with pytest.raises(ValueError):
+        db.revoke_keys_outside_grant(conn, None, grant, 9000)
+    with pytest.raises(ValueError):
+        db.revoke_keys_outside_grant(conn, "", grant, 9000)
 
 
 def test_narrowing_a_grant_revokes_exactly_the_keys_that_exceed_it(conn):
