@@ -630,6 +630,37 @@ def read_operations_page(
     return conn.execute(query, args).fetchall()
 
 
+def read_track_archive_page(
+    conn: sqlite3.Connection,
+    *,
+    start_ts: int,
+    end_ts: int,
+    icao24: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    after: tuple[int, str] | None = None,
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    """One keyset-paginated page of raw track samples, ordered by
+    (timestamp, icao24) — which is also the cursor tuple.
+
+    `bbox` is (min_lat, min_lon, max_lat, max_lon).
+    """
+    query = "SELECT * FROM track_archive WHERE timestamp >= ? AND timestamp <= ?"
+    args: list = [int(start_ts), int(end_ts)]
+    if icao24:
+        query += " AND icao24 = ?"
+        args.append(icao24.lower())
+    if bbox is not None:
+        query += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
+        args.extend([bbox[0], bbox[2], bbox[1], bbox[3]])
+    if after is not None:
+        query += " AND (timestamp > ? OR (timestamp = ? AND icao24 > ?))"
+        args.extend([after[0], after[0], after[1]])
+    query += " ORDER BY timestamp ASC, icao24 ASC LIMIT ?"
+    args.append(int(limit))
+    return conn.execute(query, args).fetchall()
+
+
 def existing_operation_ids(
     conn: sqlite3.Connection,
     icao: str,

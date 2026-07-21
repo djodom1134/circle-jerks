@@ -29,6 +29,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import api_keys, db
 from .api_keys import ApiKeyContext
 from .db import db_session
+from .geo import bbox_for_radius
 from .settings import Settings
 from .store import Store
 
@@ -485,4 +486,70 @@ async def list_operations(
         [operation_row(row) for row in rows],
         size,
         lambda row: encode_cursor(row["timestamp"], row["id"]),
+    )
+
+
+# Matches the scan ring used by the historical track-density view.
+TRACK_RING_NM = 8.0
+
+_TRACK_FIELDS = (
+    "icao24", "timestamp", "lat", "lon", "altitude_ft", "baro_altitude_ft",
+    "geo_altitude_ft", "heading_deg", "vertical_rate_fpm", "callsign",
+    "emitter_category", "source",
+)
+
+
+def track_row(row) -> dict:
+    return {field: row[field] for field in _TRACK_FIELDS}
+
+
+@router.get("/tracks", summary="Raw ADS-B position samples")
+async def list_tracks(
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("tracks:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+    since: str | None = None,
+    until: str | None = None,
+    icao24: str | None = None,
+    airport: str | None = None,
+    cursor: str | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    if not icao24 and not airport:
+        raise ApiError(400, "invalid_request", "one of icao24 or airport is required")
+    # Declared optional so a missing range raises the /v1 envelope rather than
+    # FastAPI's 422 {"detail": ...}. Raw tracks are never served unbounded.
+    if not since or not until:
+        raise ApiError(400, "invalid_request", "both since and until are required")
+    start_ts, end_ts = resolve_range(
+        since, until, now=int(time.time()), max_span=MAX_TRACK_SPAN_SECONDS
+    )
+    size = page_limit(limit)
+    after = decode_cursor(cursor) if cursor else None
+
+    bbox = None
+    with db_session(settings.database_path) as conn:
+        if airport:
+            icao = require_airport(ctx, airport)
+            found = db.get_airport(conn, icao)
+            if found is None:
+                raise ApiError(404, "not_found", f"unknown airport {icao}")
+            min_lat, min_lon, max_lat, max_lon = bbox_for_radius(
+                found.lat, found.lon, TRACK_RING_NM
+            )
+            bbox = (min_lat, min_lon, max_lat, max_lon)
+
+        rows = db.read_track_archive_page(
+            conn,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            icao24=icao24,
+            bbox=bbox,
+            after=after,
+            limit=size,
+        )
+
+    return paged(
+        [track_row(row) for row in rows],
+        size,
+        lambda row: encode_cursor(row["timestamp"], row["icao24"]),
     )
