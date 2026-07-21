@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import time
 from datetime import datetime, timezone
 from typing import Annotated
@@ -26,10 +27,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import api_keys, db
+from . import api_keys, db, vnap
 from .api_keys import ApiKeyContext
 from .db import db_session
 from .geo import bbox_for_radius
+from .services import build_worst_offenders
 from .settings import Settings
 from .store import Store
 
@@ -571,3 +573,157 @@ async def list_tracks(
         size,
         lambda row: encode_cursor(row["timestamp"], row["icao24"]),
     )
+
+
+# ─── Aggregates ──────────────────────────────────────────────────────────────
+#
+# These mirror main.py's internal aggregate routes rather than importing their
+# helpers. main.py is shaped for the frontend and free to change with it; the
+# /v1 contract must not shift underneath partners when it does. Keeping a
+# second copy of `_STATS_WINDOWS` (as `_WINDOWS`) and of `_pattern_response`
+# (as `_pattern_out`) is the deliberate cost of that decoupling — main.py
+# imports this module, never the reverse, so importing from main.py here would
+# also create a circular import.
+
+# Mirrors main.py's _STATS_WINDOWS so the public windows match the site's.
+_WINDOWS = {"1d": (86400, 3600), "7d": (7 * 86400, 86400),
+            "30d": (30 * 86400, 86400), "all": (None, 86400)}
+
+
+def _window(code: str, now: int) -> tuple[int, int, int]:
+    """Return (start_ts, end_ts, bucket_seconds) for a window code."""
+    if code not in _WINDOWS:
+        raise ApiError(
+            400, "invalid_request",
+            f"window must be one of {', '.join(_WINDOWS)}",
+        )
+    lookback, bucket = _WINDOWS[code]
+    return (0 if lookback is None else now - lookback), now, bucket
+
+
+def _known_airport(conn, ctx: ApiKeyContext, icao: str) -> str:
+    """Enforce the key's restriction, then confirm the airport exists."""
+    normalized = require_airport(ctx, icao)
+    if db.get_airport(conn, normalized) is None:
+        raise ApiError(404, "not_found", f"unknown airport {normalized}")
+    return normalized
+
+
+def _pattern_out(row) -> dict:
+    return {
+        "id": row["id"],
+        "airport_icao": row["icao"],
+        "runway_id": row["runway_id"],
+        "version": row["version"],
+        "name": row["name"],
+        "locked": bool(row["locked"]),
+        "geometry": json.loads(row["geometry_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+@router.get("/airports/{icao}/stats", summary="Operation counts and buckets")
+async def airport_stats(
+    icao: str,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+    window: str = "7d",
+) -> dict:
+    now = int(time.time())
+    start_ts, end_ts, bucket = _window(window, now)
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
+        stats = db.airport_stats(conn, normalized, start_ts, end_ts, bucket_seconds=bucket)
+    return {
+        "airport_icao": normalized,
+        "window": {"code": window, "start_ts": start_ts, "end_ts": end_ts,
+                   "bucket_seconds": bucket},
+        **stats,
+    }
+
+
+@router.get("/airports/{icao}/worst-offenders", summary="Most-reported aircraft")
+async def airport_worst_offenders(
+    icao: str,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+    limit: int = 5,
+) -> dict:
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
+        offenders = build_worst_offenders(
+            conn, normalized, now=now, limit=max(1, min(int(limit), 10))
+        )
+    # airport_icao last: build_worst_offenders returns a whole response body in
+    # main.py, so it may already carry the key. Ours is the normalized one.
+    return {**offenders, "airport_icao": normalized}
+
+
+@router.get("/airports/{icao}/operations-trends", summary="Twelve-month trends")
+async def airport_operations_trends(
+    icao: str,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+) -> dict:
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
+        trends = db.airport_operations_trends(conn, normalized, now_ts=now, months=12)
+    return {"airport_icao": normalized, **trends}
+
+
+@router.get("/airports/{icao}/vnap-compliance", summary="Per-aircraft VNAP compliance")
+async def airport_vnap_compliance(
+    icao: str,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+    window: str = "7d",
+) -> dict:
+    now = int(time.time())
+    start_ts, end_ts, _bucket = _window(window, now)
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
+        compliance = vnap.compute_aircraft_compliance(conn, normalized, start_ts, end_ts)
+    return {
+        "airport_icao": normalized,
+        "window": {"code": window, "start_ts": start_ts, "end_ts": end_ts},
+        **compliance,
+    }
+
+
+@router.get("/airports/{icao}/runways", summary="Runway geometry")
+async def airport_runways(
+    icao: str,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+) -> dict:
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
+        runways = db.runways_for_airport(conn, normalized)
+    return {"airport_icao": normalized, "runways": runways}
+
+
+@router.get("/airports/{icao}/patterns", summary="Current traffic patterns")
+async def airport_patterns(
+    icao: str,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+) -> dict:
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
+        rows = db.current_patterns_for_airport(conn, normalized)
+    return {"airport_icao": normalized, "patterns": [_pattern_out(row) for row in rows]}
+
+
+@router.get("/airports/{icao}/flow", summary="Active runway and recent changes")
+async def airport_flow(
+    icao: str,
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+) -> dict:
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
+        active = db.current_flow(conn, normalized)
+        changes = db.recent_runway_changes(conn, normalized, 20)
+    return {"airport_icao": normalized, "active": active, "recent_changes": changes}
