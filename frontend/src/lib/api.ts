@@ -748,6 +748,47 @@ export function adminDashboard() {
   return adminJson<AdminDashboardResponse>("/admin/dashboard");
 }
 
+export const API_KEY_SCOPES = [
+  "ops:read",
+  "tracks:read",
+  "aggregates:read",
+  "ledger:read"
+] as const;
+
+export interface ApiKeyRecord {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  airports: string[] | null;
+  created_at: number;
+  created_by: string | null;
+  last_used_at: number | null;
+  revoked_at: number | null;
+}
+
+export function adminListApiKeys() {
+  return adminJson<{ keys: ApiKeyRecord[] }>("/admin/api-keys");
+}
+
+export function adminCreateApiKey(name: string, scopes: string[], airports: string[]) {
+  return adminJson<{ key: string; record: ApiKeyRecord }>("/admin/api-keys", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      scopes,
+      // An empty list means "all airports"; the backend stores that as NULL.
+      airports: airports.length ? airports : null
+    })
+  });
+}
+
+export function adminRevokeApiKey(id: string) {
+  return adminJson<{ ok: boolean; revoked: boolean }>(`/admin/api-keys/${id}/revoke`, {
+    method: "POST"
+  });
+}
+
 // ─── Pattern API types ────────────────────────────────────────────────────────
 
 export interface PatternPoint {

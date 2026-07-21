@@ -3255,3 +3255,53 @@ input[type="range"] {
 .vnap-row.pulse { animation: vnap-row-pulse 1.2s ease-out; }
 .vnap-radar-title { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 6px; }
 .vnap-owner-select { font-size: 12px; padding: 2px 4px; }
+
+.api-key-table .admin-row {
+  grid-template-columns: 1.2fr 1.6fr 1.8fr 1fr 1fr 1fr;
+}
+
+.api-key-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.api-key-form input[type="text"] {
+  flex: 1 1 14rem;
+  padding: 0.4rem 0.6rem;
+}
+
+.api-key-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.api-key-scopes label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.api-key-reveal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+}
+
+.api-key-reveal code {
+  word-break: break-all;
+  font-size: 0.85rem;
+}
+
+.api-key-reveal-actions {
+  display: flex;
+  gap: 0.5rem;
+}

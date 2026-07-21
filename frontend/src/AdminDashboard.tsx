@@ -19,17 +19,8 @@ import {
   type ActivityAircraft,
   type AdminDashboardResponse
 } from "./lib/api";
-
-function formatDateTime(ts?: number | null) {
-  if (!ts) return "-";
-  return new Date(ts * 1000).toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true
-  });
-}
+import { formatDateTime } from "./lib/format";
+import ApiKeysPanel from "./components/ApiKeysPanel";
 
 function shortId(value?: string | null) {
   if (!value) return "-";
@@ -300,6 +291,8 @@ export default function AdminDashboard() {
           ))}
         </div>
       </section>
+
+      <ApiKeysPanel />
     </main>
   );
 }
