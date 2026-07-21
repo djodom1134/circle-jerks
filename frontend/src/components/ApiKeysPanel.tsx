@@ -18,12 +18,33 @@ export default function ApiKeysPanel() {
   const [revealed, setRevealed] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  // Distinct from `keys.length === 0`. Without it a failed load renders the
+  // "No API keys yet" empty state, which an admin can read as truth and mint a
+  // duplicate of a key they have already issued.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   async function load() {
     try {
       setKeys((await adminListApiKeys()).keys);
+      setLoadFailed(false);
     } catch (error) {
+      setLoadFailed(true);
       setStatus(error instanceof ApiError ? error.message : "Could not load API keys");
+    }
+  }
+
+  async function copyKey(value: string) {
+    // navigator.clipboard is undefined in insecure contexts, and writeText
+    // rejects when permission is denied. Either way the admin must be told,
+    // because the key is unrecoverable once this box is dismissed.
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+      setStatus("Could not copy automatically — select the key above and copy it manually.");
     }
   }
 
@@ -86,13 +107,16 @@ export default function ApiKeysPanel() {
           <strong>Copy this key now — it will not be shown again.</strong>
           <code>{revealed}</code>
           <div className="api-key-reveal-actions">
+            <button type="button" onClick={() => void copyKey(revealed)}>
+              <Copy size={14} /> {copied ? "Copied" : "Copy"}
+            </button>
             <button
               type="button"
-              onClick={() => void navigator.clipboard.writeText(revealed)}
+              onClick={() => {
+                setRevealed(null);
+                setCopied(false);
+              }}
             >
-              <Copy size={14} /> Copy
-            </button>
-            <button type="button" onClick={() => setRevealed(null)}>
               Done
             </button>
           </div>
@@ -140,7 +164,19 @@ export default function ApiKeysPanel() {
           <span>Last used</span>
           <span>Status</span>
         </div>
-        {keys.length === 0 && <div className="admin-empty">No API keys yet.</div>}
+        {keys.length === 0 && (
+          <div className="admin-empty">
+            {loadFailed ? (
+              <>
+                Could not load the key list — this is <em>not</em> confirmation that
+                no keys exist.{" "}
+                <button type="button" onClick={() => void load()}>Retry</button>
+              </>
+            ) : (
+              "No API keys yet."
+            )}
+          </div>
+        )}
         {keys.map((key) => (
           <div className="admin-row" key={key.id}>
             <span>{key.name}</span>
