@@ -357,11 +357,16 @@ def normalize_prefix(raw: str | None) -> str | None:
     Trailing slashes are dropped so the value concatenates cleanly with the
     "/v1/..." paths in the schema, and anything that is not rooted at "/" is
     discarded rather than trusted.
+
+    A protocol-relative value like "//evil.example/api" is rooted at "/" but
+    is an absolute URL to another host. Left through, it would land in the
+    schema's `servers` entry and Swagger's "Try it out" would send the
+    partner's API key off-site, so it is rejected explicitly.
     """
     if not raw:
         return None
     prefix = raw.strip().rstrip("/")
-    if not prefix.startswith("/"):
+    if not prefix.startswith("/") or prefix.startswith("//"):
         return None
     return prefix
 

@@ -412,6 +412,10 @@ def test_paged_emits_next_cursor_only_on_a_full_page():
     ("/", None),
     ("api", None),
     ("https://evil.example/api", None),
+    # Protocol-relative: rooted at "/" but an absolute URL to another host.
+    # Left through, Swagger's "Try it out" would send the key off-site.
+    ("//evil.example/api", None),
+    ("//evil.example", None),
 ])
 def test_normalize_prefix(raw, expected):
     assert normalize_prefix(raw) == expected
