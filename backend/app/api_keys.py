@@ -120,3 +120,57 @@ class ApiKeyContext:
 
     def allows_airport(self, icao: str) -> bool:
         return self.airports is None or icao.upper() in self.airports
+
+
+class GrantViolation(ValueError):
+    """A key request exceeded what its requester was granted."""
+
+
+@dataclass(frozen=True)
+class Grant:
+    """The ceiling on the keys a user may mint.
+
+    `airports=None` means every airport. An empty `scopes` set can mint
+    nothing, which is what a freshly approved user with no grant gets.
+    """
+
+    scopes: frozenset[str]
+    airports: frozenset[str] | None
+
+
+UNRESTRICTED_GRANT = Grant(scopes=frozenset(SCOPES), airports=None)
+
+
+def enforce_grant(
+    requested_scopes: list[str],
+    requested_airports: list[str] | None,
+    grant: Grant,
+) -> None:
+    """Raise GrantViolation unless the request fits inside `grant`.
+
+    Called by every key-minting path. Deliberately free of I/O so the check
+    that stands between a partner and a wider key than they were given can be
+    tested without a database or an HTTP client.
+    """
+    requested = set(validate_scopes(requested_scopes))
+    excess = requested - grant.scopes
+    if excess:
+        raise GrantViolation(
+            f"not granted: {', '.join(sorted(excess))}"
+        )
+
+    if grant.airports is None:
+        return
+
+    wanted = {icao.strip().upper() for icao in (requested_airports or []) if icao.strip()}
+    allowed = ", ".join(sorted(grant.airports))
+    if not wanted:
+        # An empty airport list means "every airport" everywhere else in this
+        # module, so a restricted grant has to reject it explicitly rather
+        # than fall through.
+        raise GrantViolation(f"this key must be restricted to one of: {allowed}")
+    outside = wanted - grant.airports
+    if outside:
+        raise GrantViolation(
+            f"not granted: {', '.join(sorted(outside))}; allowed: {allowed}"
+        )
