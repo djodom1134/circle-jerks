@@ -139,6 +139,16 @@ class Settings(BaseSettings):
     admin_password: str | None = Field(default=None, exclude=True)
     admin_password_hash: str | None = Field(default=None, exclude=True)
     admin_session_seconds: int = 12 * 3600
+    admin_superusers: str | None = Field(default=None, validation_alias="ADMIN_SUPERUSERS")
+    google_oauth_client_id: str | None = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_CLIENT_ID"
+    )
+    google_oauth_client_secret: str | None = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_CLIENT_SECRET", exclude=True
+    )
+    google_oauth_redirect_uri: str | None = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_REDIRECT_URI"
+    )
     active_user_window_seconds: int = 90
     buy_me_coffee_url: str | None = "https://buymeacoffee.com/djodom"
     bmc_api_token: str | None = Field(default=None, validation_alias="BMC_API_TOKEN")

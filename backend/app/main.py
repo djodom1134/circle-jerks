@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import api_keys, db, patterns, public_api, track_history, pattern_circuits, vnap
+from . import admin_users, api_keys, db, patterns, public_api, track_history, pattern_circuits, vnap
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -290,9 +290,9 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def sign_admin_token(settings: Settings) -> str:
+def sign_admin_token(settings: Settings, user_id: str) -> str:
     payload = {
-        "sub": settings.admin_username,
+        "uid": user_id,
         "exp": int(time.time()) + settings.admin_session_seconds,
         "nonce": secrets.token_urlsafe(12),
     }
@@ -313,25 +313,88 @@ def decode_admin_token(settings: Settings, token: str) -> dict | None:
         payload = json.loads(_b64decode(body))
     except (json.JSONDecodeError, ValueError):
         return None
-    if payload.get("sub") != settings.admin_username:
+    if not payload.get("uid"):
         return None
     if int(payload.get("exp", 0)) < int(time.time()):
         return None
     return payload
 
 
-def require_admin(
+def superuser_emails(settings: Settings) -> frozenset[str]:
+    return admin_users.parse_superusers(settings.admin_superusers)
+
+
+def apply_superuser_pin(conn, row: dict, settings: Settings) -> dict:
+    """Force ADMIN_SUPERUSERS accounts to approved super_admin, every login.
+
+    Applied on every resolution rather than only at creation, so a UI misclick
+    cannot lock the operator out of their own deployment.
+    """
+    if row["email"].lower() not in superuser_emails(settings):
+        return row
+    if row["role"] == "super_admin" and row["status"] == "approved":
+        return row
+    db.set_admin_user_access(
+        conn,
+        row["id"],
+        role="super_admin",
+        status="approved",
+        granted_scopes=None,
+        granted_airports=None,
+        decided_by=row["id"],
+        now=int(time.time()),
+    )
+    return db.get_admin_user(conn, row["id"])
+
+
+def current_user(
     settings: Annotated[Settings, Depends(settings_dep)],
     admin_session: Annotated[str | None, Cookie(alias=ADMIN_COOKIE_NAME)] = None,
-) -> dict:
-    if not admin_auth_configured(settings):
-        raise HTTPException(status_code=503, detail="admin credentials are not configured")
+) -> admin_users.AdminUser:
+    """Authenticate the cookie and load the row it names.
+
+    The row is read on EVERY request. That is what makes suspension take
+    effect immediately instead of whenever a 12-hour cookie happens to expire.
+    """
     if not admin_session:
         raise HTTPException(status_code=401, detail="admin login required")
     payload = decode_admin_token(settings, admin_session)
     if not payload:
         raise HTTPException(status_code=401, detail="admin login required")
-    return payload
+    with db_session(settings.database_path) as conn:
+        row = db.get_admin_user(conn, payload["uid"])
+        if row:
+            row = apply_superuser_pin(conn, row, settings)
+    if not row:
+        raise HTTPException(status_code=401, detail="admin login required")
+    return admin_users.from_row(row)
+
+
+def require_user(
+    user: Annotated[admin_users.AdminUser, Depends(current_user)],
+) -> admin_users.AdminUser:
+    if not user.is_approved:
+        # The caller's own status, and nothing else — enough for the SPA to
+        # render the right screen, no information about anyone else.
+        raise HTTPException(status_code=403, detail={"status": user.status})
+    return user
+
+
+def require_admin(
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
+) -> admin_users.AdminUser:
+    """Name retained deliberately: every existing /admin/* route depends on it."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail={"status": user.status, "role": user.role})
+    return user
+
+
+def require_super_admin(
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
+) -> admin_users.AdminUser:
+    if not user.is_super_admin:
+        raise HTTPException(status_code=403, detail={"status": user.status, "role": user.role})
+    return user
 
 
 @app.get("/healthz")
@@ -688,17 +751,41 @@ async def admin_login(
     response: Response,
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
+    """Break-glass login. Google is the normal path.
+
+    Upserts a REAL row rather than minting a synthetic identity, so key
+    ownership, created_by, and decided_by all have one identity model with no
+    special case threaded through them.
+    """
     if not admin_auth_configured(settings):
         raise HTTPException(status_code=503, detail="admin credentials are not configured")
     if payload.username != settings.admin_username or not verify_admin_password(settings, payload.password):
         raise HTTPException(status_code=401, detail="invalid admin credentials")
+
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row = db.get_admin_user(conn, admin_users.LOCAL_ADMIN_ID)
+        if not row:
+            row = db.upsert_admin_user(
+                conn,
+                id=admin_users.LOCAL_ADMIN_ID,
+                email=admin_users.LOCAL_ADMIN_EMAIL,
+                google_sub=None,
+                name=settings.admin_username,
+                picture=None,
+                role="super_admin",
+                status="approved",
+                now=now,
+            )
+        db.touch_admin_user_login(conn, row["id"], now)
+
     response.set_cookie(
         ADMIN_COOKIE_NAME,
-        sign_admin_token(settings),
+        sign_admin_token(settings, row["id"]),
         max_age=settings.admin_session_seconds,
         httponly=True,
         secure=settings.environment == "production",
-        samesite="strict",
+        samesite="lax",
         path="/",
     )
     return {"ok": True, "username": settings.admin_username}
@@ -712,10 +799,19 @@ async def admin_logout(response: Response):
 
 @app.get("/admin/session")
 async def admin_session(
-    _: Annotated[dict, Depends(require_admin)],
-    settings: Annotated[Settings, Depends(settings_dep)],
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
 ):
-    return {"ok": True, "username": settings.admin_username}
+    return {
+        "ok": True,
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "username": user.name or user.email,
+        "role": user.role,
+        "status": user.status,
+        "scopes": sorted(user.grant.scopes),
+        "airports": sorted(user.grant.airports) if user.grant.airports is not None else None,
+    }
 
 
 @app.get("/admin/dashboard")
@@ -782,7 +878,7 @@ async def admin_list_api_keys(
 @app.post("/admin/api-keys")
 async def admin_create_api_key(
     payload: ApiKeyCreateRequest,
-    _: Annotated[dict, Depends(require_admin)],
+    user: Annotated[admin_users.AdminUser, Depends(require_admin)],
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
     """Returns the full key exactly once. It is unrecoverable afterwards."""
@@ -804,7 +900,7 @@ async def admin_create_api_key(
             scopes=scopes,
             airports=airports,
             created_at=now,
-            created_by=settings.admin_username,
+            created_by=user.email,
         )
         row = db.get_api_key(conn, key_id)
 

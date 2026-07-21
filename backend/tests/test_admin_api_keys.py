@@ -51,7 +51,7 @@ def test_create_returns_the_secret_exactly_once(tmp_path, monkeypatch):
         assert body["record"]["name"] == "partner"
         assert body["record"]["airports"] == ["KLMO"]
         assert sorted(body["record"]["scopes"]) == ["aggregates:read", "ops:read"]
-        assert body["record"]["created_by"] == "admin"
+        assert body["record"]["created_by"] == "local-admin@circlejerks.live"
 
         # The load-bearing one. Create is the ONLY route holding a row from
         # db.get_api_key, which does return secret_hash; _api_key_record's
