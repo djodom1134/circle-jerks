@@ -92,3 +92,61 @@ def test_modifying_an_ordinary_target_is_permitted():
     actor = user(id="u1", role="super_admin", email="a@example.com")
     target = user(id="u2", role="partner", email="b@example.com")
     guard_modification(actor, target, frozenset())
+
+
+def test_roles_constant_has_all_three_roles():
+    from app.admin_users import ROLES
+    assert ROLES == ("super_admin", "admin", "partner")
+
+
+def test_statuses_constant_has_all_four_statuses():
+    from app.admin_users import STATUSES
+    assert STATUSES == ("pending", "approved", "rejected", "suspended")
+
+
+def test_is_admin_and_is_super_admin_matrix():
+    """Partner cannot do anything; admin is unrestricted; super_admin is unrestricted.
+
+    This matrix pins the behavior that guards all downstream authorization checks.
+    Dropping a role from _UNRESTRICTED_ROLES or inverting either property must fail.
+    """
+    # partner: is_admin False, is_super_admin False
+    partner = user(role="partner")
+    assert not partner.is_admin
+    assert not partner.is_super_admin
+
+    # admin: is_admin True, is_super_admin False
+    admin = user(role="admin")
+    assert admin.is_admin
+    assert not admin.is_super_admin
+
+    # super_admin: is_admin True, is_super_admin True
+    super_admin = user(role="super_admin")
+    assert super_admin.is_admin
+    assert super_admin.is_super_admin
+
+
+def test_from_row_maps_all_fields():
+    """from_row must correctly map all seven fields from a dict to AdminUser.
+
+    A field-mapping typo would otherwise surface only in task 3's integration layer.
+    """
+    from app.admin_users import from_row
+
+    row = {
+        "id": "test-id",
+        "email": "test@example.com",
+        "name": "Test Name",
+        "role": "admin",
+        "status": "approved",
+        "granted_scopes": "ops:read,tracks:read",
+        "granted_airports": "KLMO,KJFK",
+    }
+    admin = from_row(row)
+    assert admin.id == "test-id"
+    assert admin.email == "test@example.com"
+    assert admin.name == "Test Name"
+    assert admin.role == "admin"
+    assert admin.status == "approved"
+    assert admin.granted_scopes == "ops:read,tracks:read"
+    assert admin.granted_airports == "KLMO,KJFK"
