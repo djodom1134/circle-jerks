@@ -25,7 +25,7 @@ import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import api_keys, db, patterns, public_api, track_history, pattern_circuits, vnap
@@ -151,7 +151,10 @@ class AdminLoginRequest(BaseModel):
 
 
 class ApiKeyCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
+    # Stripped before min_length runs: without this a whitespace-only name
+    # satisfies min_length=1 and is then stored as the empty string, leaving a
+    # key that is unidentifiable in the admin list.
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     scopes: list[str]
     airports: list[str] | None = None
 
