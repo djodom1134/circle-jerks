@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import db, patterns, public_api, track_history, pattern_circuits, vnap
+from . import api_keys, db, patterns, public_api, track_history, pattern_circuits, vnap
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -148,6 +148,12 @@ class PatternRevertRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=400)
+
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    scopes: list[str]
+    airports: list[str] | None = None
 
 
 VALID_OWNER_TYPES = frozenset({
@@ -741,6 +747,77 @@ async def admin_live_sources(
         },
         "sources": snapshot if isinstance(snapshot, dict) else {},
     }
+
+
+def _api_key_record(row: dict, settings: Settings) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "prefix": api_keys.display_prefix(row["id"], settings.environment),
+        "scopes": sorted(api_keys.parse_scopes(row["scopes"])),
+        "airports": (
+            sorted(api_keys.parse_airports(row["airports"]))
+            if row["airports"] else None
+        ),
+        "created_at": row["created_at"],
+        "created_by": row["created_by"],
+        "last_used_at": row["last_used_at"],
+        "revoked_at": row["revoked_at"],
+    }
+
+
+@app.get("/admin/api-keys")
+async def admin_list_api_keys(
+    _: Annotated[dict, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        rows = db.list_api_keys(conn)
+    return {"keys": [_api_key_record(row, settings) for row in rows]}
+
+
+@app.post("/admin/api-keys")
+async def admin_create_api_key(
+    payload: ApiKeyCreateRequest,
+    _: Annotated[dict, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Returns the full key exactly once. It is unrecoverable afterwards."""
+    try:
+        scopes = api_keys.serialize_scopes(payload.scopes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    airports = api_keys.serialize_airports(payload.airports)
+    full_key, key_id, secret_hash = api_keys.generate_key(settings.environment)
+    now = int(time.time())
+
+    with db_session(settings.database_path) as conn:
+        db.create_api_key(
+            conn,
+            key_id=key_id,
+            secret_hash=secret_hash,
+            name=payload.name.strip(),
+            scopes=scopes,
+            airports=airports,
+            created_at=now,
+            created_by=settings.admin_username,
+        )
+        row = db.get_api_key(conn, key_id)
+
+    record = _api_key_record(row, settings)
+    return {"key": full_key, "record": record}
+
+
+@app.post("/admin/api-keys/{key_id}/revoke")
+async def admin_revoke_api_key(
+    key_id: str,
+    _: Annotated[dict, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        changed = db.revoke_api_key(conn, key_id, int(time.time()))
+    return {"ok": True, "revoked": changed}
 
 
 @app.get("/config")
