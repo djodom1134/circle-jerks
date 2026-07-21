@@ -94,6 +94,14 @@ class Store(ABC):
     async def set_cache(self, key: str, value: Any, ttl: int) -> None:
         ...
 
+    @abstractmethod
+    async def incr_counter(self, key: str, ttl: int) -> int:
+        """Increment a fixed-window counter and return its new value.
+
+        The TTL is applied on the first increment only, so the window expires
+        `ttl` seconds after it opened rather than sliding forward on every hit.
+        """
+
 
 class RedisStore(Store):
     def __init__(self, url: str):
@@ -203,6 +211,13 @@ class RedisStore(Store):
     async def set_cache(self, key: str, value: Any, ttl: int) -> None:
         await self.redis.set(f"cache:{key}", dumps(value), ex=ttl)
 
+    async def incr_counter(self, key: str, ttl: int) -> int:
+        redis_key = f"count:{key}"
+        value = await self.redis.incr(redis_key)
+        if value == 1:
+            await self.redis.expire(redis_key, max(ttl, 1))
+        return int(value)
+
 
 class MemoryStore(Store):
     def __init__(self) -> None:
@@ -211,6 +226,7 @@ class MemoryStore(Store):
         self.monitors: dict[str, tuple[dict, int]] = {}
         self.descriptions: dict[str, tuple[str, int]] = {}
         self.cache: dict[str, tuple[Any, int]] = {}
+        self.counters: dict[str, tuple[int, int]] = {}
 
     async def close(self) -> None:
         return None
@@ -296,6 +312,16 @@ class MemoryStore(Store):
 
     async def set_cache(self, key: str, value: Any, ttl: int) -> None:
         self.cache[key] = (value, int(time.time()) + ttl)
+
+    async def incr_counter(self, key: str, ttl: int) -> int:
+        now = int(time.time())
+        row = self.counters.get(key)
+        if not row or row[1] <= now:
+            self.counters[key] = (1, now + ttl)
+            return 1
+        value, expires = row
+        self.counters[key] = (value + 1, expires)
+        return value + 1
 
 
 def make_store(redis_url: str) -> Store:
