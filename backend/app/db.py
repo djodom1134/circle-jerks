@@ -590,6 +590,46 @@ def read_operations(
     return conn.execute(query, args).fetchall()
 
 
+def read_operations_page(
+    conn: sqlite3.Connection,
+    *,
+    icao: str,
+    start_ts: int,
+    end_ts: int,
+    types: list[str] | None = None,
+    icao24: str | None = None,
+    runway_id: str | None = None,
+    after: tuple[int, str] | None = None,
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    """One keyset-paginated page of operations, ordered by (timestamp, id).
+
+    Keyset rather than OFFSET: an offset scan re-walks every skipped row, which
+    turns a deep page over a year of KLMO history into a full table scan on the
+    same connection that serves the live site.
+    """
+    query = (
+        "SELECT * FROM operations "
+        "WHERE icao = ? AND timestamp >= ? AND timestamp <= ?"
+    )
+    args: list = [icao.upper(), int(start_ts), int(end_ts)]
+    if types:
+        query += f" AND type IN ({','.join('?' for _ in types)})"
+        args.extend(types)
+    if icao24:
+        query += " AND icao24 = ?"
+        args.append(icao24.lower())
+    if runway_id:
+        query += " AND runway_id = ?"
+        args.append(runway_id)
+    if after is not None:
+        query += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+        args.extend([after[0], after[0], after[1]])
+    query += " ORDER BY timestamp ASC, id ASC LIMIT ?"
+    args.append(int(limit))
+    return conn.execute(query, args).fetchall()
+
+
 def existing_operation_ids(
     conn: sqlite3.Connection,
     icao: str,

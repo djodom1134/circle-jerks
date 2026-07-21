@@ -411,3 +411,78 @@ async def public_docs() -> HTMLResponse:
         openapi_url="openapi.json",
         title="Circle Jerks Public API",
     )
+
+
+# Default lookback when the caller supplies no range.
+DEFAULT_LOOKBACK_SECONDS = 7 * 86400
+
+# Frozen on purpose: new columns on `operations` must not silently appear in
+# the public contract.
+_OPERATION_FIELDS = (
+    "id", "icao24", "callsign", "registration", "type", "timestamp",
+    "runway_id", "turn_direction", "min_altitude_ft_agl", "emitter_category",
+    "deviation_mean_nm", "deviation_peak_nm", "pct_off_pattern",
+    "wind_from_deg", "wind_speed_kt", "origin_airport_icao", "origin_label",
+    "operator", "flight_school",
+)
+
+
+def operation_row(row) -> dict:
+    out = {field: row[field] for field in _OPERATION_FIELDS}
+    out["airport_icao"] = row["icao"]
+    return out
+
+
+def resolve_range(
+    since: str | None, until: str | None, *, now: int, max_span: int | None = None
+) -> tuple[int, int]:
+    end_ts = parse_time(until, "until") or now
+    start_ts = parse_time(since, "since")
+    if start_ts is None:
+        start_ts = end_ts - DEFAULT_LOOKBACK_SECONDS
+    if start_ts > end_ts:
+        raise ApiError(400, "invalid_request", "since must be before until")
+    if max_span is not None and end_ts - start_ts > max_span:
+        raise ApiError(
+            400, "invalid_request",
+            f"requested range exceeds the {max_span} second maximum; page with the cursor instead",
+        )
+    return start_ts, end_ts
+
+
+@router.get("/operations", summary="Classified operations for an airport")
+async def list_operations(
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("ops:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+    airport: str,
+    since: str | None = None,
+    until: str | None = None,
+    type: str | None = None,
+    icao24: str | None = None,
+    runway: str | None = None,
+    cursor: str | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    icao = require_airport(ctx, airport)
+    start_ts, end_ts = resolve_range(since, until, now=int(time.time()))
+    size = page_limit(limit)
+    after = decode_cursor(cursor) if cursor else None
+
+    with db_session(settings.database_path) as conn:
+        rows = db.read_operations_page(
+            conn,
+            icao=icao,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            types=[type] if type else None,
+            icao24=icao24,
+            runway_id=runway,
+            after=after,
+            limit=size,
+        )
+
+    return paged(
+        [operation_row(row) for row in rows],
+        size,
+        lambda row: encode_cursor(row["timestamp"], row["id"]),
+    )
