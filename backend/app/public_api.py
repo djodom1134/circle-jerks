@@ -760,7 +760,22 @@ async def ledger_proxy(
             404, "not_found",
             f"unknown ledger resource {resource}; expected one of {', '.join(LEDGER_RESOURCES)}",
         )
-    normalized = require_airport(ctx, icao)
+    # Defence in depth: `icao` is formatted straight into the upstream URL
+    # below. `_known_airport` is expected to reject anything that is not a
+    # real, allowed airport, but a bare alphanumeric check here means a
+    # malformed value (notably one containing "." or "/", as in a path-
+    # traversal attempt) can never reach URL construction even if that
+    # helper's behaviour changes later.
+    if not icao.isalnum():
+        raise ApiError(400, "invalid_request", f"invalid airport code {icao!r}")
+    # Validated the same way as this route's six aggregate siblings: the
+    # key's airport restriction is enforced BEFORE the airport is confirmed
+    # to exist, so a restricted key can't distinguish "not yours" from
+    # "doesn't exist". The connection is opened just for this lookup and
+    # closed before the outbound call below — it must not sit open across a
+    # network round trip to the sidecar.
+    with db_session(settings.database_path) as conn:
+        normalized = _known_airport(conn, ctx, icao)
     url = settings.ledger_api_base_url.rstrip("/") + template.format(icao=normalized)
 
     # Drop internal-only escape hatches (_now) rather than forwarding them.
@@ -782,4 +797,15 @@ async def ledger_proxy(
             503, "upstream_unavailable",
             f"the ledger service returned {upstream.status_code}",
         )
-    return JSONResponse(status_code=200, content=upstream.json())
+    try:
+        content = upstream.json()
+    except json.JSONDecodeError:
+        # A 200 with a body that isn't JSON is still an upstream failure mode
+        # from the partner's point of view; it must land in the same /v1
+        # error envelope as every other upstream problem, not escape as a
+        # raw 500.
+        raise ApiError(
+            503, "upstream_unavailable",
+            "the ledger service returned an invalid response",
+        ) from None
+    return JSONResponse(status_code=200, content=content)
