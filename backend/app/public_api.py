@@ -23,6 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import api_keys, db
@@ -65,8 +66,14 @@ async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
 
 
 def is_public_path(request: Request) -> bool:
-    """The envelope is total over /v1 and applies nowhere else."""
-    return request.url.path.startswith(f"/{API_VERSION}")
+    """The envelope is total over /v1 and applies nowhere else.
+
+    The trailing slash matters: a bare `startswith("/v1")` would also claim a
+    future internal `/v1beta/...` path and hand it the partner envelope. `/v1`
+    itself is still ours, so it is matched explicitly.
+    """
+    path = request.url.path
+    return path == f"/{API_VERSION}" or path.startswith(f"/{API_VERSION}/")
 
 
 # Codes partners can branch on. Anything unmapped degrades to a generic code
@@ -106,18 +113,36 @@ async def validation_error_handler(
     return _envelope(422, "invalid_request", message)
 
 
+def _detail_message(detail: object, code: str) -> str:
+    """Reduce an HTTPException detail to the envelope's `message` string.
+
+    FastAPI lets `detail` be any JSON value, so `str()` on a dict or list would
+    render a Python repr ("{'field': 'x'}") into a partner-facing string.
+    Anything that is not already a non-empty string degrades to the generic
+    text for the code instead.
+    """
+    if isinstance(detail, str) and detail:
+        return detail
+    return code.replace("_", " ")
+
+
 async def http_exception_handler(
     request: Request, exc: StarletteHTTPException,
-) -> JSONResponse:
+) -> Response:
     """404s on unknown /v1 paths, 405s, and any raised HTTPException."""
     if not is_public_path(request):
         return await default_http_exception_handler(request, exc)
+    headers = getattr(exc, "headers", None)
+    # 204/304 and friends forbid a body; the default handler checks this and so
+    # must we, or the envelope would corrupt the response.
+    if not is_body_allowed_for_status_code(exc.status_code):
+        return Response(status_code=exc.status_code, headers=headers)
     code = _STATUS_CODES.get(exc.status_code, "http_error")
     return _envelope(
         exc.status_code,
         code,
-        str(exc.detail) if exc.detail else code.replace("_", " "),
-        headers=getattr(exc, "headers", None),
+        _detail_message(exc.detail, code),
+        headers=headers,
     )
 
 
@@ -308,8 +333,6 @@ async def meta(ctx: Annotated[ApiKeyContext, Depends(resolve_key)]) -> dict:
     }
 
 
-_OPENAPI_ROUTE = f"/{API_VERSION}/openapi.json"
-
 _SECURITY_SCHEMES = {
     "bearerAuth": {
         "type": "http",
@@ -325,20 +348,41 @@ _SECURITY_SCHEMES = {
 }
 
 
-def external_prefix(path: str) -> str:
-    """The path prefix a proxy added, recovered by stripping our own route.
+_FORWARDED_PREFIX_HEADER = "X-Forwarded-Prefix"
 
-    Caddy's `handle_path /api/*` and Vite's rewrite both strip `/api` before
-    the request reaches us, so the browser is at /api/v1/... while FastAPI only
-    ever sees /v1/.... Under direct uvicorn there is no prefix and this is "".
+
+def normalize_prefix(raw: str | None) -> str | None:
+    """Normalize a forwarded prefix, or None when there isn't a usable one.
+
+    Trailing slashes are dropped so the value concatenates cleanly with the
+    "/v1/..." paths in the schema, and anything that is not rooted at "/" is
+    discarded rather than trusted.
     """
-    return path[: -len(_OPENAPI_ROUTE)] if path.endswith(_OPENAPI_ROUTE) else ""
+    if not raw:
+        return None
+    prefix = raw.strip().rstrip("/")
+    if not prefix.startswith("/"):
+        return None
+    return prefix
+
+
+def external_prefix(request: Request) -> str | None:
+    """The path prefix a proxy stripped, as that proxy declared it.
+
+    Every proxy in front of this app strips its prefix before forwarding:
+    Caddy uses `handle_path /api/*` (and `/live/*` on the ledger domain) and
+    Vite rewrites `/api` away, so `request.url.path` is always the bare
+    "/v1/..." and cannot tell us anything. The prefix therefore has to be
+    declared out of band, via X-Forwarded-Prefix, which each of those proxies
+    sets. Under direct uvicorn nobody sets it and this is None.
+    """
+    return normalize_prefix(request.headers.get(_FORWARDED_PREFIX_HEADER))
 
 
 @router.get("/openapi.json", include_in_schema=False)
 async def public_openapi(request: Request) -> JSONResponse:
     """A schema built from this router alone, so internal routes never leak."""
-    prefix = external_prefix(request.url.path)
+    prefix = external_prefix(request)
     schema = get_openapi(
         title="Circle Jerks Public API",
         version=API_VERSION,

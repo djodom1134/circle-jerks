@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
@@ -16,7 +16,7 @@ from app.public_api import (
     ApiError,
     decode_cursor,
     encode_cursor,
-    external_prefix,
+    normalize_prefix,
     page_limit,
     paged,
     parse_time,
@@ -224,6 +224,47 @@ async def test_validation_errors_keep_detail_off_v1():
     assert "detail" in json.loads(resp.body)
 
 
+@pytest.mark.parametrize("path, public", [
+    ("/v1", True),
+    ("/v1/meta", True),
+    ("/v1/", True),
+    # A future internal namespace must not inherit the partner envelope.
+    ("/v1beta/anything", False),
+    ("/v1x", False),
+    ("/scan", False),
+])
+def test_only_the_v1_namespace_is_public(path, public):
+    assert public_api.is_public_path(_request(path)) is public
+
+
+@pytest.mark.parametrize("status", [204, 304])
+async def test_bodyless_statuses_get_no_envelope(status):
+    """A body under 204/304 is malformed however pretty the JSON is."""
+    resp = await public_api.http_exception_handler(
+        _request("/v1/meta"), HTTPException(status_code=status),
+    )
+    assert resp.status_code == status
+    assert resp.body == b""
+
+
+async def test_container_details_do_not_leak_a_python_repr():
+    resp = await public_api.http_exception_handler(
+        _request("/v1/meta"), HTTPException(status_code=403, detail={"field": "x"}),
+    )
+    message = json.loads(resp.body)["error"]["message"]
+    assert message == "forbidden"
+    assert "{" not in message
+
+
+async def test_string_details_still_reach_the_message():
+    resp = await public_api.http_exception_handler(
+        _request("/v1/meta"), HTTPException(status_code=404, detail="no such flight"),
+    )
+    assert json.loads(resp.body)["error"] == {
+        "code": "not_found", "message": "no such flight",
+    }
+
+
 # ─── parse_time ──────────────────────────────────────────────────────────────
 
 def test_compact_iso_date_is_not_read_as_a_unix_timestamp():
@@ -360,29 +401,40 @@ def test_paged_emits_next_cursor_only_on_a_full_page():
 
 # ─── OpenAPI servers and security schemes ────────────────────────────────────
 
-def test_external_prefix_strips_the_known_route():
-    assert external_prefix("/api/v1/openapi.json") == "/api"
-    assert external_prefix("/v1/openapi.json") == ""
-    assert external_prefix("/deep/nest/v1/openapi.json") == "/deep/nest"
+@pytest.mark.parametrize("raw, expected", [
+    ("/api", "/api"),
+    ("/live", "/live"),
+    ("/api/", "/api"),
+    ("/deep/nest/", "/deep/nest"),
+    ("  /api  ", "/api"),
+    (None, None),
+    ("", None),
+    ("/", None),
+    ("api", None),
+    ("https://evil.example/api", None),
+])
+def test_normalize_prefix(raw, expected):
+    assert normalize_prefix(raw) == expected
 
 
-def test_openapi_declares_no_servers_without_a_prefix(tmp_path, monkeypatch):
+# The proxies strip their prefix before FastAPI sees the request, so these go
+# through the real app with the header Caddy and Vite actually set.
+@pytest.mark.parametrize("prefix", ["/api", "/live"])
+def test_openapi_servers_follow_the_forwarded_prefix(tmp_path, monkeypatch, prefix):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        schema = client.get(
+            "/v1/openapi.json", headers={"X-Forwarded-Prefix": prefix},
+        ).json()
+    assert schema["servers"] == [{"url": prefix}]
+
+
+def test_openapi_omits_servers_without_a_forwarded_prefix(tmp_path, monkeypatch):
+    """Direct uvicorn access: no proxy, no header, no servers block at all."""
     configure(tmp_path, monkeypatch)
     with TestClient(app) as client:
         schema = client.get("/v1/openapi.json").json()
-        assert "servers" not in schema or schema["servers"] == []
-
-
-async def test_openapi_servers_reflect_a_prefixed_request_path():
-    resp = await public_api.public_openapi(_request("/api/v1/openapi.json"))
-    schema = json.loads(resp.body)
-    assert schema["servers"] == [{"url": "/api"}]
-
-
-async def test_openapi_omits_servers_without_a_prefix():
-    resp = await public_api.public_openapi(_request("/v1/openapi.json"))
-    schema = json.loads(resp.body)
-    assert "servers" not in schema or schema["servers"] == []
+    assert "servers" not in schema
 
 
 def test_openapi_declares_both_auth_mechanisms(tmp_path, monkeypatch):

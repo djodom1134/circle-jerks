@@ -39,6 +39,9 @@ www.{$CADDY_DOMAIN} {
 
 	handle_path /api/* {
 		reverse_proxy api:8000 {
+			# handle_path strips /api before the app sees it; the public /v1
+			# OpenAPI schema needs to know what was stripped.
+			header_up X-Forwarded-Prefix /api
 			lb_try_duration 30s
 			lb_try_interval 1s
 			health_uri /healthz
@@ -131,6 +134,9 @@ www.{$CADDY_DOMAIN} {
 	# invariant that it stays byte-identical to production.
 	handle_path /live/* {
 		reverse_proxy api:8000 {
+			# Same app, reached under a different external prefix on this
+			# domain; tell it which one so /v1/openapi.json advertises /live.
+			header_up X-Forwarded-Prefix /live
 			lb_try_duration 30s
 			lb_try_interval 1s
 			health_uri /healthz
