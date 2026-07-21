@@ -348,6 +348,19 @@ CREATE TABLE IF NOT EXISTS aircraft_community_notes (
   created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 );
 CREATE INDEX IF NOT EXISTS idx_community_notes_icao ON aircraft_community_notes(icao24, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  secret_hash TEXT NOT NULL,
+  name TEXT NOT NULL,
+  scopes TEXT NOT NULL,
+  airports TEXT,
+  created_at INTEGER NOT NULL,
+  created_by TEXT,
+  last_used_at INTEGER,
+  revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_created ON api_keys(created_at DESC);
 """
 
 
@@ -2186,4 +2199,65 @@ def _track_archive_row_to_sample(row: sqlite3.Row) -> dict:
         "source": row["source"],
         "emitter_category": row["emitter_category"],
     }
+
+
+_API_KEY_PUBLIC_COLUMNS = (
+    "id, name, scopes, airports, created_at, created_by, last_used_at, revoked_at"
+)
+
+
+def create_api_key(
+    conn: sqlite3.Connection,
+    *,
+    key_id: str,
+    secret_hash: str,
+    name: str,
+    scopes: str,
+    airports: str | None,
+    created_at: int,
+    created_by: str | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO api_keys
+        (id, secret_hash, name, scopes, airports, created_at, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (key_id, secret_hash, name, scopes, airports, int(created_at), created_by),
+    )
+
+
+def list_api_keys(conn: sqlite3.Connection) -> list[dict]:
+    """Metadata for the admin list. Never returns `secret_hash`."""
+    rows = conn.execute(
+        f"SELECT {_API_KEY_PUBLIC_COLUMNS} FROM api_keys ORDER BY created_at DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_api_key(conn: sqlite3.Connection, key_id: str) -> dict | None:
+    """Full row including `secret_hash` — this is the verification path."""
+    row = conn.execute(
+        f"SELECT {_API_KEY_PUBLIC_COLUMNS}, secret_hash FROM api_keys WHERE id = ?",
+        (key_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def revoke_api_key(conn: sqlite3.Connection, key_id: str, now: int) -> bool:
+    """True when this call performed the revocation.
+
+    Keys are revoked, never deleted, so a key id in a log stays attributable.
+    """
+    cursor = conn.execute(
+        "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+        (int(now), key_id),
+    )
+    return cursor.rowcount > 0
+
+
+def touch_api_key(conn: sqlite3.Connection, key_id: str, now: int) -> None:
+    conn.execute(
+        "UPDATE api_keys SET last_used_at = ? WHERE id = ?", (int(now), key_id)
+    )
 
