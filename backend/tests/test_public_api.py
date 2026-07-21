@@ -142,6 +142,50 @@ def test_rate_limit_headers_and_429(tmp_path, monkeypatch):
         assert third.headers["Retry-After"] == "60"
 
 
+def test_rate_limit_headers_are_present_on_an_error_response(tmp_path, monkeypatch):
+    """The spec promises the counter on EVERY response. `resolve_key` writes it
+    to the injected Response, which FastAPI merges only when the route returns
+    normally — so every enveloped error used to ship without it, exactly when a
+    partner backing off needs the number most."""
+    db_path = configure(tmp_path, monkeypatch)
+    # Holds aggregates:read but asks an ops:read route: a 403 raised after the
+    # key (and therefore the counter) has been resolved.
+    key = mint(db_path, scopes=["aggregates:read"])
+    monkeypatch.setattr("app.public_api.RATE_LIMIT_PER_MINUTE", 50)
+
+    with TestClient(app) as client:
+        resp = client.get("/v1/operations", params={"airport": "KBJC"}, headers=auth(key))
+
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "forbidden_scope"
+    assert resp.headers["X-RateLimit-Limit"] == "50"
+    assert resp.headers["X-RateLimit-Remaining"] == "49"
+
+
+def test_a_401_before_the_key_resolves_carries_no_counter(tmp_path, monkeypatch):
+    """There is no counter to report before the key is known, and inventing one
+    would be a lie. Its absence here is the correct behaviour."""
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        resp = client.get("/v1/meta", headers=auth("garbage"))
+    assert resp.status_code == 401
+    assert "X-RateLimit-Limit" not in resp.headers
+    assert "X-RateLimit-Remaining" not in resp.headers
+
+
+def test_a_missing_required_query_param_is_a_400_invalid_request(tmp_path, monkeypatch):
+    """FastAPI's own validation answers 422; on /v1 that put `invalid_request`
+    at two different statuses, which no partner can branch on. Goes through the
+    real app so it covers the wiring, not just the handler function."""
+    db_path = configure(tmp_path, monkeypatch)
+    key = mint(db_path, scopes=["ops:read"])
+    with TestClient(app) as client:
+        resp = client.get("/v1/operations", headers=auth(key))  # no ?airport=
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_request"
+    assert "airport" in resp.json()["error"]["message"]
+
+
 def test_docs_and_openapi_cover_only_the_v1_namespace(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -208,7 +252,9 @@ async def test_validation_errors_are_enveloped_on_v1():
          "type": "int_parsing"},
     ])
     resp = await public_api.validation_error_handler(_request("/v1/ops"), exc)
-    assert resp.status_code == 422
+    # 400, not 422: `invalid_request` must mean one status across the whole
+    # /v1 surface, and the spec's error table lists it at 400 only.
+    assert resp.status_code == 400
     body = json.loads(resp.body)
     assert body["error"]["code"] == "invalid_request"
     assert "since" in body["error"]["message"]
@@ -306,6 +352,30 @@ def test_iso_datetime_with_and_without_a_timezone():
 def test_blank_and_none_are_absent():
     assert parse_time(None, "since") is None
     assert parse_time("", "since") is None
+
+
+def test_resolve_range_honours_an_until_of_zero():
+    """`parse_time(until) or now` treated a legitimate 0 as "absent" and
+    silently rewrote it to the current time; `since` two lines below already
+    used an `is None` check. The range is inverted, so the correct behaviour is
+    a 400 — the old code answered 200 over a seven-day window ending now."""
+    with pytest.raises(ApiError) as exc:
+        public_api.resolve_range("100", "0", now=1_700_000_000)
+    assert exc.value.status_code == 400
+    assert "since must be before until" in exc.value.message
+
+    # And with a since that really does precede the epoch, the range stands.
+    assert public_api.resolve_range("-500", "0", now=1_700_000_000) == (-500, 0)
+    # The same instant spelled as ISO must behave identically.
+    assert public_api.resolve_range(
+        "-500", "1970-01-01T00:00:00Z", now=1_700_000_000,
+    ) == (-500, 0)
+
+
+def test_resolve_range_still_defaults_an_absent_until_to_now():
+    start, end = public_api.resolve_range(None, None, now=1_700_000_000)
+    assert end == 1_700_000_000
+    assert start == 1_700_000_000 - public_api.DEFAULT_LOOKBACK_SECONDS
 
 
 def test_garbage_time_is_an_api_error():

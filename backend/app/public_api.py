@@ -61,11 +61,35 @@ class ApiError(Exception):
         self.headers = headers or {}
 
 
+_RATE_LIMIT_STATE = "public_api_rate_limit_headers"
+
+
+def rate_limit_headers(request: Request) -> dict[str, str]:
+    """The counter values `resolve_key` recorded for this request, if any.
+
+    FastAPI merges the injected `Response` headers only when a route returns
+    normally, so every error path would otherwise drop the rate-limit counter —
+    exactly when a partner backing off needs it most. `resolve_key` stashes the
+    values on `request.state`; the exception handlers read them back here.
+
+    Empty before the key is resolved (a 401 for a missing or bad key has no
+    counter to report, and must not invent one).
+    """
+    return getattr(request.state, _RATE_LIMIT_STATE, None) or {}
+
+
+def _with_rate_limit(request: Request,
+                     headers: dict[str, str] | None) -> dict[str, str] | None:
+    """Merge in the rate-limit counter without overriding explicit headers."""
+    merged = {**rate_limit_headers(request), **(headers or {})}
+    return merged or None
+
+
 async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": exc.code, "message": exc.message}},
-        headers=exc.headers,
+        headers=_with_rate_limit(request, exc.headers),
     )
 
 
@@ -114,7 +138,12 @@ async def validation_error_handler(
         parts.append(f"{location}: {err.get('msg', 'invalid')}" if location
                      else str(err.get("msg", "invalid")))
     message = "; ".join(parts) or "request is not valid"
-    return _envelope(422, "invalid_request", message)
+    # 400, not FastAPI's 422: the spec's error table lists `invalid_request` at
+    # 400 only, and every explicit ApiError(400, "invalid_request", ...) in this
+    # module already answers there. One code at two statuses would break any
+    # partner branching on the pair.
+    return _envelope(400, "invalid_request", message,
+                     headers=_with_rate_limit(request, None))
 
 
 def _detail_message(detail: object, code: str) -> str:
@@ -146,7 +175,7 @@ async def http_exception_handler(
         exc.status_code,
         code,
         _detail_message(exc.detail, code),
-        headers=headers,
+        headers=_with_rate_limit(request, headers),
     )
 
 
@@ -199,6 +228,13 @@ async def resolve_key(
     remaining = max(RATE_LIMIT_PER_MINUTE - used, 0)
     response.headers["X-RateLimit-Limit"] = str(RATE_LIMIT_PER_MINUTE)
     response.headers["X-RateLimit-Remaining"] = str(remaining)
+    # The injected Response only reaches the wire when the route returns
+    # normally. Stash the same values on the request so the error handlers can
+    # put them on 400/403/404/503 too — see `rate_limit_headers`.
+    setattr(request.state, _RATE_LIMIT_STATE, {
+        "X-RateLimit-Limit": str(RATE_LIMIT_PER_MINUTE),
+        "X-RateLimit-Remaining": str(remaining),
+    })
     if used > RATE_LIMIT_PER_MINUTE:
         raise ApiError(
             429,
@@ -440,7 +476,11 @@ def operation_row(row) -> dict:
 def resolve_range(
     since: str | None, until: str | None, *, now: int, max_span: int | None = None
 ) -> tuple[int, int]:
-    end_ts = parse_time(until, "until") or now
+    # `is None`, not truthiness: `until=0` (and 1970-01-01T00:00:00Z) parses to
+    # a legitimate 0 that `or now` would silently rewrite to the current time.
+    end_ts = parse_time(until, "until")
+    if end_ts is None:
+        end_ts = now
     start_ts = parse_time(since, "since")
     if start_ts is None:
         start_ts = end_ts - DEFAULT_LOOKBACK_SECONDS
@@ -467,12 +507,17 @@ async def list_operations(
     cursor: str | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
 ) -> dict:
-    icao = require_airport(ctx, airport)
-    start_ts, end_ts = resolve_range(since, until, now=int(time.time()))
-    size = page_limit(limit)
-    after = decode_cursor(cursor) if cursor else None
-
     with db_session(settings.database_path) as conn:
+        # `_known_airport`, the same gate the aggregates and the ledger proxy
+        # use: the key's restriction is enforced BEFORE existence, so an
+        # out-of-scope airport is always a 403 and never leaks whether it
+        # exists. Before this, an unknown ICAO here answered 200 with an empty
+        # page, which a partner could not tell from "no data".
+        icao = _known_airport(conn, ctx, airport)
+        start_ts, end_ts = resolve_range(since, until, now=int(time.time()))
+        size = page_limit(limit)
+        after = decode_cursor(cursor) if cursor else None
+
         rows = db.read_operations_page(
             conn,
             icao=icao,
@@ -643,6 +688,36 @@ async def airport_stats(
     }
 
 
+def _suppress_foreign_fallback(conn, ctx: ApiKeyContext, requested: str,
+                               offenders: dict) -> dict:
+    """Strip a worst-offenders fallback the calling key is not allowed to see.
+
+    `services.build_worst_offenders` is shared with the internal frontend,
+    where substituting the nearest neighbouring airport when the requested one
+    has no scored aircraft is the desired UX. On /v1 it is an authorization
+    hole: `_known_airport` gated on the airport the partner ASKED for, but the
+    rows returned would be another airport's — icao24, registration, owner
+    class and all — under an `airport_icao` that still says the requested one.
+
+    `allows_airport` is True for unrestricted keys, so they keep the fallback
+    exactly as before; only a key scoped away from the substitute loses it, and
+    then it gets the honest answer: no offenders here, no fallback.
+    """
+    if not offenders.get("is_fallback"):
+        return offenders
+    if ctx.allows_airport(str(offenders.get("resolved_icao") or "")):
+        return offenders
+    airport = db.get_airport(conn, requested)
+    label = (airport.city or airport.name) if airport else None
+    return {
+        **offenders,
+        "resolved_icao": requested,
+        "resolved_label": label or requested,
+        "is_fallback": False,
+        "offenders": [],
+    }
+
+
 @router.get("/airports/{icao}/worst-offenders", summary="Most-reported aircraft")
 async def airport_worst_offenders(
     icao: str,
@@ -656,6 +731,7 @@ async def airport_worst_offenders(
         offenders = build_worst_offenders(
             conn, normalized, now=now, limit=max(1, min(int(limit), 10))
         )
+        offenders = _suppress_foreign_fallback(conn, ctx, normalized, offenders)
     # airport_icao last: build_worst_offenders returns a whole response body in
     # main.py, so it may already carry the key. Ours is the normalized one.
     return {**offenders, "airport_icao": normalized}
@@ -792,7 +868,18 @@ async def ledger_proxy(
 
     if upstream.status_code == 404:
         raise ApiError(404, "not_found", f"no ledger data for {normalized}")
-    if upstream.status_code >= 400:
+    # A 4xx from the sidecar is the caller's fault, not an outage: ledger-api
+    # bounds `days` to [1, 365], so `?days=999` comes back 422. Reporting that
+    # as 503 tells the partner the service is down when their parameter is
+    # wrong, and pages whoever alerts on /v1 5xx. Only 5xx and connection
+    # failures are outages.
+    if 400 <= upstream.status_code < 500:
+        raise ApiError(
+            400, "invalid_request",
+            f"the ledger service rejected this request ({upstream.status_code}); "
+            "check the query parameters",
+        )
+    if upstream.status_code >= 500:
         raise ApiError(
             503, "upstream_unavailable",
             f"the ledger service returned {upstream.status_code}",

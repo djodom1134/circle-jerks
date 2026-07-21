@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -249,6 +250,89 @@ def test_worst_offenders_reflects_only_the_requested_airports_aircraft(tmp_path,
     assert klmo["is_fallback"] is False
     assert [o["icao24"] for o in klmo["offenders"]] == ["bbbbbb"]
     assert klmo["offenders"][0]["total_circles"] == 5
+
+
+# ─── Gap: the fallback must never cross a key's airport restriction ──────────
+#
+# `services.build_worst_offenders` substitutes the nearest OTHER airport when
+# the requested one has no scored aircraft. That is the frontend's UX and stays
+# as it is; on /v1 it meant a key restricted to KLMO, asking for KLMO, received
+# the neighbour's whole offender list (icao24, registration, owner class, VNAP
+# scores) under an `airport_icao` that still read "KLMO". `_known_airport`
+# authorized the airport ASKED FOR, never the one whose rows came back.
+#
+# KBDU, not KBJC, is the substitute: `db.nearest_airport_excluding` picks the
+# nearest seeded airport to KLMO, which is Boulder at 8.05 nm (KBJC is ~15 nm).
+# Seeding anywhere else would leave the fallback empty and make the control
+# test below prove nothing.
+
+FALLBACK_ICAO = "KBDU"
+
+
+def _seed_scored_aircraft(db_path: str, icao: str, icao24: str, now: int) -> None:
+    """Enough operations to clear the VNAP scoring gate (>=1 touch-and-go,
+    >=3 laps, >=1 circle) with every turn to the right, so the left-traffic
+    axis is a deterministic 100% violation and the aircraft always ranks."""
+    _seed_ops(db_path, icao, icao24, f"N-{icao24.upper()}", "touch_and_go", 1, now, "right")
+    _seed_ops(db_path, icao, icao24, f"N-{icao24.upper()}", "circle", 4, now - 200, "right")
+
+
+def test_restricted_key_never_receives_another_airports_fallback_offenders(
+    tmp_path, monkeypatch,
+):
+    db_path = configure(tmp_path, monkeypatch)
+    now = int(time.time())
+    _seed_scored_aircraft(db_path, FALLBACK_ICAO, "cccccc", now)  # KLMO stays empty
+    key = mint(db_path, scopes=["aggregates:read"], airports=["KLMO"])
+
+    with TestClient(app) as client:
+        resp = client.get("/v1/airports/KLMO/worst-offenders", headers=auth(key))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["offenders"] == []
+    assert body["is_fallback"] is False
+    assert body["resolved_icao"] == "KLMO"
+    assert body["airport_icao"] == "KLMO"
+    # The leak itself: not one byte of the neighbour's data, by any field.
+    assert FALLBACK_ICAO not in json.dumps(body)
+    assert "cccccc" not in json.dumps(body)
+
+
+def test_unrestricted_key_still_gets_the_neighbour_fallback(tmp_path, monkeypatch):
+    """The control for the test above: the fix is scoped to keys that are not
+    allowed the substitute. An unrestricted key must see the fallback exactly
+    as it did before, or the suppression is over-broad and has silently
+    changed the internal contract too."""
+    db_path = configure(tmp_path, monkeypatch)
+    now = int(time.time())
+    _seed_scored_aircraft(db_path, FALLBACK_ICAO, "cccccc", now)
+    key = mint(db_path, scopes=["aggregates:read"], airports=None)
+
+    with TestClient(app) as client:
+        resp = client.get("/v1/airports/KLMO/worst-offenders", headers=auth(key))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_fallback"] is True
+    assert body["resolved_icao"] == FALLBACK_ICAO
+    assert [o["icao24"] for o in body["offenders"]] == ["cccccc"]
+
+
+def test_a_key_scoped_to_both_airports_keeps_the_fallback(tmp_path, monkeypatch):
+    """The gate is `allows_airport(resolved_icao)`, not "is this key restricted
+    at all" — a key explicitly allowed the substitute has every right to it."""
+    db_path = configure(tmp_path, monkeypatch)
+    now = int(time.time())
+    _seed_scored_aircraft(db_path, FALLBACK_ICAO, "cccccc", now)
+    key = mint(db_path, scopes=["aggregates:read"], airports=["KLMO", FALLBACK_ICAO])
+
+    with TestClient(app) as client:
+        body = client.get("/v1/airports/KLMO/worst-offenders", headers=auth(key)).json()
+
+    assert body["is_fallback"] is True
+    assert body["resolved_icao"] == FALLBACK_ICAO
+    assert [o["icao24"] for o in body["offenders"]] == ["cccccc"]
 
 
 def test_runways_reflect_the_requested_airports_static_runway_table(tmp_path, monkeypatch):

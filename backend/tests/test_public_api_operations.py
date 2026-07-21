@@ -55,6 +55,37 @@ def test_operations_enforces_the_airport_restriction(tmp_path, monkeypatch):
         assert resp.json()["error"]["code"] == "forbidden_airport"
 
 
+def test_operations_404s_an_unknown_airport(tmp_path, monkeypatch):
+    """Before this, `?airport=ZZZZ` answered 200 with an empty page, so a typo'd
+    ICAO was indistinguishable from a quiet airport — on the endpoint partners
+    use most. /v1/tracks and all seven aggregates already 404 here."""
+    db_path = configure(tmp_path, monkeypatch)
+    key = mint(db_path, scopes=["ops:read"])
+    with TestClient(app) as client:
+        resp = client.get("/v1/operations", params={"airport": "ZZZZ"}, headers=auth(key))
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "not_found"
+
+
+def test_operations_restriction_beats_existence_for_an_unknown_airport(
+    tmp_path, monkeypatch,
+):
+    """403 before 404, matching the aggregates and the ledger proxy: a
+    restricted key must not be able to tell "real airport I can't see" from
+    "no such airport", or 403-vs-404 becomes an enumeration oracle."""
+    db_path = configure(tmp_path, monkeypatch)
+    key = mint(db_path, scopes=["ops:read"], airports=["KLMO"])
+    with TestClient(app) as client:
+        unknown = client.get("/v1/operations", params={"airport": "ZZZZ"}, headers=auth(key))
+        real = client.get("/v1/operations", params={"airport": "KBJC"}, headers=auth(key))
+
+    assert unknown.status_code == 403
+    assert unknown.json()["error"]["code"] == "forbidden_airport"
+    # Identical for an airport that does exist — that is the whole point.
+    assert real.status_code == 403
+    assert real.json()["error"]["code"] == "forbidden_airport"
+
+
 def test_operations_returns_a_stable_field_set(tmp_path, monkeypatch):
     db_path = configure(tmp_path, monkeypatch)
     seed_operations(db_path, "KBJC", 1)

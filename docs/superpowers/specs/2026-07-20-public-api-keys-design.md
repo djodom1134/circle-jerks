@@ -164,7 +164,9 @@ the existing Valkey/Redis store. This requires a new `incr_counter(key, ttl)`
 method on the `Store` ABC in `backend/app/store.py`, implemented as `INCR` plus
 `EXPIRE` in `RedisStore` and as an equivalent counter in `MemoryStore`.
 Exceeding the limit returns 429 with `Retry-After`. Every response carries
-`X-RateLimit-Limit` and `X-RateLimit-Remaining`.
+`X-RateLimit-Limit` and `X-RateLimit-Remaining`, errors included — the one
+exception is a 401 raised before the key is resolved, which has no counter to
+report and must not invent one.
 
 ## Admin Interface
 
@@ -212,10 +214,14 @@ The `/v1` namespace uses a consistent envelope, distinct from FastAPI's default
 | `unauthorized` | 401 | Missing, malformed, unknown, or revoked key |
 | `forbidden_scope` | 403 | Valid key without the required scope |
 | `forbidden_airport` | 403 | Valid key restricted away from the requested ICAO |
-| `invalid_request` | 400 | Bad parameter, bad cursor, or span over the cap |
+| `invalid_request` | 400 | Bad parameter, bad cursor, span over the cap, or a request `ledger-api` rejected |
 | `not_found` | 404 | Unknown airport or aircraft |
 | `rate_limited` | 429 | Over 120 requests/minute |
-| `upstream_unavailable` | 503 | `ledger-api` unreachable |
+| `upstream_unavailable` | 503 | `ledger-api` unreachable or failing (5xx) |
+
+`invalid_request` is 400 and only 400: FastAPI's own query/path validation
+errors are re-enveloped at 400 rather than its default 422, so the code and the
+status never disagree.
 
 Existing internal routes keep FastAPI's `detail` shape. The envelope applies
 only to the `/v1` namespace, via an exception handler scoped to that router.

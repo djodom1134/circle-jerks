@@ -135,6 +135,46 @@ def test_ledger_forwards_upstream_404_as_a_v1_error(tmp_path, monkeypatch):
         assert resp.json()["error"]["code"] == "not_found"
 
 
+def test_upstream_4xx_is_the_partners_bad_request_not_an_outage(tmp_path, monkeypatch):
+    """ledger-api bounds `days` to [1, 365], so `?days=999` comes back 422.
+    Mapping that to 503 told the partner the service was down because of their
+    own parameter, and paged anyone alerting on /v1 5xx."""
+    db_path = configure(tmp_path, monkeypatch)
+    key = mint(db_path, scopes=["ledger:read"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": "days must be <= 365"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", stub_transport(handler))
+
+    with TestClient(app) as client:
+        resp = client.get(
+            "/v1/ledger/airports/KLMO/ledger", params={"days": 999}, headers=auth(key)
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_request"
+        assert "422" in resp.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("upstream_status", [500, 502, 503])
+def test_upstream_5xx_is_still_an_outage(tmp_path, monkeypatch, upstream_status):
+    """The other half of the 4xx split: a real upstream failure must keep
+    answering 503 upstream_unavailable."""
+    db_path = configure(tmp_path, monkeypatch)
+    key = mint(db_path, scopes=["ledger:read"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(upstream_status, json={"detail": "boom"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", stub_transport(handler))
+
+    with TestClient(app) as client:
+        resp = client.get("/v1/ledger/airports/KLMO/ledger", headers=auth(key))
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "upstream_unavailable"
+        assert str(upstream_status) in resp.json()["error"]["message"]
+
+
 def test_unreachable_ledger_service_returns_503(tmp_path, monkeypatch):
     db_path = configure(tmp_path, monkeypatch)
     key = mint(db_path, scopes=["ledger:read"])
