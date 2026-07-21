@@ -26,7 +26,7 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import db, patterns, track_history, pattern_circuits, vnap
+from . import db, patterns, public_api, track_history, pattern_circuits, vnap
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -59,6 +59,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# The public /v1 namespace has its own error envelope. The handler is
+# registered app-wide, but only public_api raises ApiError, so internal
+# routes keep FastAPI's {"detail": ...} shape.
+app.add_exception_handler(public_api.ApiError, public_api.api_error_handler)
+app.include_router(public_api.router)
 
 
 class MessagePreferencesRequest(BaseModel):
