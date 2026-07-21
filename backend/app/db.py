@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo
 
+from . import api_keys
 from .geo import Point, distance_nm
 
 
@@ -361,6 +362,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_created ON api_keys(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  google_sub TEXT UNIQUE,
+  name TEXT,
+  picture TEXT,
+  role TEXT NOT NULL,
+  status TEXT NOT NULL,
+  granted_scopes TEXT,
+  granted_airports TEXT,
+  requested_at INTEGER NOT NULL,
+  decided_at INTEGER,
+  decided_by TEXT,
+  last_login_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_admin_users_status ON admin_users(status, requested_at DESC);
 """
 
 
@@ -452,14 +470,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "airports": [("timezone", "TEXT")],
         "operations": [("emitter_category", "TEXT"), ("pass_geometry_key", "TEXT")],
         "track_archive": [("emitter_category", "TEXT")],
+        "api_keys": [("owner_user_id", "TEXT")],
     }
+    api_keys_existing = None
     for table, cols in additions.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if table == "api_keys":
+            api_keys_existing = existing
         if not existing:
             continue  # table doesn't exist yet; SCHEMA will create it with the column
         for column, decl in cols:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    # SCHEMA runs before _migrate (see init_db), so on a fresh database
+    # api_keys already has owner_user_id by the time we get here — but on an
+    # existing database the ALTER TABLE above is what just added the column.
+    # Either way the index must be created here, never in SCHEMA, or this
+    # statement raises "no such column" on every pre-existing database. Guard
+    # on the table actually existing too: _migrate is called standalone (no
+    # SCHEMA first) against legacy test fixtures that predate api_keys entirely.
+    if api_keys_existing:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_user_id)")
 
 
 def seed_db(conn: sqlite3.Connection) -> None:
@@ -2273,7 +2305,8 @@ def _track_archive_row_to_sample(row: sqlite3.Row) -> dict:
 
 
 _API_KEY_PUBLIC_COLUMNS = (
-    "id, name, scopes, airports, created_at, created_by, last_used_at, revoked_at"
+    "id, name, scopes, airports, created_at, created_by, owner_user_id, "
+    "last_used_at, revoked_at"
 )
 
 
@@ -2287,22 +2320,35 @@ def create_api_key(
     airports: str | None,
     created_at: int,
     created_by: str | None,
+    owner_user_id: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO api_keys
-        (id, secret_hash, name, scopes, airports, created_at, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (id, secret_hash, name, scopes, airports, created_at, created_by, owner_user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (key_id, secret_hash, name, scopes, airports, int(created_at), created_by),
+        (key_id, secret_hash, name, scopes, airports, int(created_at), created_by, owner_user_id),
     )
 
 
-def list_api_keys(conn: sqlite3.Connection) -> list[dict]:
-    """Metadata for the admin list. Never returns `secret_hash`."""
-    rows = conn.execute(
-        f"SELECT {_API_KEY_PUBLIC_COLUMNS} FROM api_keys ORDER BY created_at DESC"
-    ).fetchall()
+def list_api_keys(conn: sqlite3.Connection, owner_user_id: str | None = None) -> list[dict]:
+    """Metadata for the admin list. Never returns `secret_hash`.
+
+    `owner_user_id=None` means "every key" — the super-admin view. It does NOT
+    mean "keys with no owner"; legacy unowned keys are only reachable through
+    the unfiltered call.
+    """
+    if owner_user_id is not None:
+        rows = conn.execute(
+            f"SELECT {_API_KEY_PUBLIC_COLUMNS} FROM api_keys WHERE owner_user_id = ? "
+            "ORDER BY created_at DESC",
+            (owner_user_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT {_API_KEY_PUBLIC_COLUMNS} FROM api_keys ORDER BY created_at DESC"
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -2331,4 +2377,160 @@ def touch_api_key(conn: sqlite3.Connection, key_id: str, now: int) -> None:
     conn.execute(
         "UPDATE api_keys SET last_used_at = ? WHERE id = ?", (int(now), key_id)
     )
+
+
+_ADMIN_USER_COLUMNS = (
+    "id, email, google_sub, name, picture, role, status, granted_scopes, "
+    "granted_airports, requested_at, decided_at, decided_by, last_login_at"
+)
+
+
+def upsert_admin_user(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    email: str,
+    google_sub: str | None,
+    name: str | None,
+    picture: str | None,
+    role: str,
+    status: str,
+    now: int,
+) -> dict:
+    """Create the row, or refresh the profile fields of the existing one.
+
+    Only profile fields are refreshed on conflict. role and status are decided
+    by a super-admin, so a login must never reset them — the one exception is
+    the ADMIN_SUPERUSERS pin, which main.py applies explicitly afterwards.
+    """
+    existing = find_admin_user(conn, google_sub=google_sub, email=email)
+    if existing:
+        conn.execute(
+            "UPDATE admin_users SET email = ?, google_sub = COALESCE(?, google_sub), "
+            "name = ?, picture = ? WHERE id = ?",
+            (email.lower(), google_sub, name, picture, existing["id"]),
+        )
+        return get_admin_user(conn, existing["id"])
+
+    conn.execute(
+        """
+        INSERT INTO admin_users
+        (id, email, google_sub, name, picture, role, status, requested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (id, email.lower(), google_sub, name, picture, role, status, int(now)),
+    )
+    return get_admin_user(conn, id)
+
+
+def get_admin_user(conn: sqlite3.Connection, user_id: str) -> dict | None:
+    row = conn.execute(
+        f"SELECT {_ADMIN_USER_COLUMNS} FROM admin_users WHERE id = ?", (user_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def find_admin_user(
+    conn: sqlite3.Connection, *, google_sub: str | None, email: str | None
+) -> dict | None:
+    """Match on the Google subject first, then on the email.
+
+    The email fallback is safe ONLY because the caller has already asserted
+    email_verified on the ID token. Without that assertion it is an account
+    takeover primitive.
+    """
+    if google_sub:
+        row = conn.execute(
+            f"SELECT {_ADMIN_USER_COLUMNS} FROM admin_users WHERE google_sub = ?",
+            (google_sub,),
+        ).fetchone()
+        if row:
+            return dict(row)
+    if email:
+        row = conn.execute(
+            f"SELECT {_ADMIN_USER_COLUMNS} FROM admin_users WHERE email = ?",
+            (email.lower(),),
+        ).fetchone()
+        if row:
+            return dict(row)
+    return None
+
+
+def list_admin_users(conn: sqlite3.Connection, status: str | None = None) -> list[dict]:
+    if status:
+        rows = conn.execute(
+            f"SELECT {_ADMIN_USER_COLUMNS} FROM admin_users WHERE status = ? "
+            "ORDER BY requested_at DESC",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT {_ADMIN_USER_COLUMNS} FROM admin_users ORDER BY requested_at DESC"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_admin_user_access(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    role: str,
+    status: str,
+    granted_scopes: str | None,
+    granted_airports: str | None,
+    decided_by: str | None,
+    now: int,
+) -> None:
+    conn.execute(
+        """
+        UPDATE admin_users
+        SET role = ?, status = ?, granted_scopes = ?, granted_airports = ?,
+            decided_by = ?, decided_at = ?
+        WHERE id = ?
+        """,
+        (role, status, granted_scopes, granted_airports, decided_by, int(now), user_id),
+    )
+
+
+def touch_admin_user_login(conn: sqlite3.Connection, user_id: str, now: int) -> None:
+    conn.execute(
+        "UPDATE admin_users SET last_login_at = ? WHERE id = ?", (int(now), user_id)
+    )
+
+
+def revoke_keys_for_owner(conn: sqlite3.Connection, owner_user_id: str, now: int) -> int:
+    """Revoke every live key belonging to one user. Returns the count."""
+    cursor = conn.execute(
+        "UPDATE api_keys SET revoked_at = ? WHERE owner_user_id = ? AND revoked_at IS NULL",
+        (int(now), owner_user_id),
+    )
+    return cursor.rowcount
+
+
+def revoke_keys_outside_grant(
+    conn: sqlite3.Connection, owner_user_id: str, grant, now: int
+) -> int:
+    """Revoke this user's live keys that a narrowed grant no longer covers.
+
+    Evaluated in Python rather than SQL because scopes and airports are stored
+    as comma-joined strings; a LIKE-based query would be subtly wrong on
+    substrings ("ops:read" matching inside a longer scope name).
+    """
+    revoked = 0
+    for row in list_api_keys(conn, owner_user_id=owner_user_id):
+        if row["revoked_at"] is not None:
+            continue
+        key_scopes = api_keys.parse_scopes(row["scopes"])
+        key_airports = api_keys.parse_airports(row["airports"])
+        if not key_scopes <= grant.scopes:
+            outside = True
+        elif grant.airports is None:
+            outside = False
+        elif key_airports is None:
+            outside = True  # key covers every airport; the grant no longer does
+        else:
+            outside = not key_airports <= grant.airports
+        if outside and revoke_api_key(conn, row["id"], now):
+            revoked += 1
+    return revoked
 
