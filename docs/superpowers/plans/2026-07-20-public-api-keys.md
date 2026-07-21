@@ -564,11 +564,17 @@ async def test_incr_counter_increments_and_isolates_keys():
 
 
 @pytest.mark.asyncio
-async def test_incr_counter_resets_after_the_window_expires():
+async def test_incr_counter_resets_after_the_window_expires(monkeypatch):
+    # Advance the clock rather than passing ttl=0: both implementations clamp
+    # ttl to a minimum of 1s, so a zero-length window is not a real input.
     store = MemoryStore()
-    assert await store.incr_counter("a", 0) == 1
-    # ttl=0 means the window is already expired on the next read.
-    assert await store.incr_counter("a", 0) == 1
+    clock = {"now": 1_700_000_000}
+    monkeypatch.setattr("app.store.time.time", lambda: clock["now"])
+
+    assert await store.incr_counter("a", 60) == 1
+    assert await store.incr_counter("a", 60) == 2
+    clock["now"] += 61
+    assert await store.incr_counter("a", 60) == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -589,6 +595,10 @@ In `backend/app/store.py`, inside `class Store(ABC)`, after `set_cache` (line 94
 
         The TTL is applied on the first increment only, so the window expires
         `ttl` seconds after it opened rather than sliding forward on every hit.
+
+        `ttl` is clamped to a minimum of 1 second in every implementation: a
+        rate-limit window shorter than that is meaningless, and leaving the
+        clamp to one backend only would make Redis and memory disagree.
         """
 ```
 
@@ -1253,17 +1263,22 @@ def test_operations_filters_by_type_and_icao24(tmp_path, monkeypatch):
             "timestamp": NOW + 50,
         })
     key = mint(db_path, scopes=["ops:read"])
+    # Explicit bounds: the default lookback is 7 days from the REAL wall clock,
+    # which excludes the fixed NOW constant entirely. The window is deliberately
+    # wide enough to include all three seeded rows, so the filters — not the
+    # range — are what narrow the result to one.
+    window = {"since": NOW - 10, "until": NOW + 100}
     with TestClient(app) as client:
         by_type = client.get(
             "/v1/operations",
-            params={"airport": "KBJC", "type": "landing"},
+            params={"airport": "KBJC", "type": "landing", **window},
             headers=auth(key),
         ).json()
         assert [row["id"] for row in by_type["data"]] == ["op-landing"]
 
         by_aircraft = client.get(
             "/v1/operations",
-            params={"airport": "KBJC", "icao24": "FFFFFF"},
+            params={"airport": "KBJC", "icao24": "FFFFFF", **window},
             headers=auth(key),
         ).json()
         assert [row["id"] for row in by_aircraft["data"]] == ["op-landing"]
