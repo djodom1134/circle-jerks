@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app import db
+from app.geo import bbox_for_radius
 from app.main import app
-from app.public_api import MAX_TRACK_SPAN_SECONDS
+from app.public_api import MAX_TRACK_SPAN_SECONDS, TRACK_RING_NM
 from test_public_api import auth, configure, mint
 
 NOW = 1_700_000_000
@@ -149,6 +150,84 @@ def test_tracks_by_airport_filters_to_the_ring_and_honours_restriction(tmp_path,
         )
         assert resp.status_code == 403
         assert resp.json()["error"]["code"] == "forbidden_airport"
+
+
+def test_restricted_key_without_airport_is_rejected_even_with_icao24(tmp_path, monkeypatch):
+    """Closes the bypass: an icao24-only request from a restricted key must not
+    silently reach the database and return samples for an arbitrary aircraft."""
+    db_path = configure(tmp_path, monkeypatch)
+    seed_tracks(db_path, 1)
+    restricted = mint(db_path, scopes=["tracks:read"], airports=["KLMO"])
+    with TestClient(app) as client:
+        resp = client.get(
+            "/v1/tracks",
+            params={"icao24": "a1b2c3", "since": NOW - 5, "until": NOW + 5},
+            headers=auth(restricted),
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "forbidden_airport"
+
+
+def test_restricted_key_with_airport_and_icao24_still_works(tmp_path, monkeypatch):
+    """The combined airport+icao24 path must keep working: a restricted key can
+    still follow a single aircraft within its own airport."""
+    db_path = configure(tmp_path, monkeypatch)
+    db.init_db(db_path)
+    with db.db_session(db_path) as conn:
+        klmo = db.get_airport(conn, "KLMO")
+    assert klmo is not None
+    min_lat, min_lon, max_lat, max_lon = bbox_for_radius(klmo.lat, klmo.lon, TRACK_RING_NM)
+    assert min_lat <= klmo.lat <= max_lat
+    assert min_lon <= klmo.lon <= max_lon
+
+    with db.db_session(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO track_archive
+            (icao24, timestamp, lat, lon, altitude_ft, heading_deg,
+             vertical_rate_fpm, callsign, in_window, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'test')
+            """,
+            ("d4e5f6", NOW, klmo.lat, klmo.lon, 5200.0, 200.0, 0.0, "N4KLMO"),
+        )
+
+    restricted = mint(db_path, scopes=["tracks:read"], airports=["KLMO"])
+    with TestClient(app) as client:
+        resp = client.get(
+            "/v1/tracks",
+            params={
+                "airport": "KLMO",
+                "icao24": "d4e5f6",
+                "since": NOW - 5,
+                "until": NOW + 5,
+            },
+            headers=auth(restricted),
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["data"], "expected the seeded KLMO sample to be returned"
+        assert {row["icao24"] for row in body["data"]} == {"d4e5f6"}
+
+
+def test_unrestricted_key_with_icao24_only_still_works(tmp_path, monkeypatch):
+    """An unrestricted key's icao24-only behaviour must be unchanged by the fix."""
+    db_path = configure(tmp_path, monkeypatch)
+    seed_tracks(db_path, 1)
+    key = mint(db_path, scopes=["tracks:read"], airports=None)
+    with TestClient(app) as client:
+        resp = client.get(
+            "/v1/tracks",
+            params={"icao24": "a1b2c3", "since": NOW - 5, "until": NOW + 5},
+            headers=auth(key),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"][0]["icao24"] == "a1b2c3"
+
+
+# test_tracks_by_airport_filters_to_the_ring_and_honours_restriction (above)
+# already covers a restricted key being rejected with 403 forbidden_airport
+# when it requests an airport it is not scoped to (KBJC, with a key restricted
+# to KLMO) — not duplicated here.
 
 
 def test_tracks_for_an_unknown_airport_is_404(tmp_path, monkeypatch):

@@ -516,6 +516,24 @@ async def list_tracks(
 ) -> dict:
     if not icao24 and not airport:
         raise ApiError(400, "invalid_request", "one of icao24 or airport is required")
+    # A key restricted to specific airports must not be able to reach raw
+    # position samples for an arbitrary aircraft by omitting `airport` and
+    # supplying only `icao24` — that would bypass the restriction entirely,
+    # since icao24-only queries carry no airport to check `require_airport`
+    # against. Force the airport parameter (and therefore the bbox filter
+    # below) whenever the key is scoped. This must run before the "both since
+    # and until are required" check: a restricted key with neither icao24 nor
+    # airport already fails above with the generic 400, but a restricted key
+    # that supplies icao24 alone (with or without a range) should be told
+    # about the airport requirement rather than getting a range error that
+    # would just repeat once "fixed".
+    if ctx.airports is not None and not airport:
+        raise ApiError(
+            403,
+            "forbidden_airport",
+            "key is restricted to specific airports; /v1/tracks requires the "
+            "airport parameter for restricted keys",
+        )
     # Declared optional so a missing range raises the /v1 envelope rather than
     # FastAPI's 422 {"detail": ...}. Raw tracks are never served unbounded.
     if not since or not until:
