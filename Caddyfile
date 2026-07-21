@@ -20,6 +20,7 @@ www.{$CADDY_DOMAIN} {
 			fields {
 				request>headers>Cookie delete
 				request>headers>Authorization delete
+				request>headers>X-Api-Key delete
 			}
 		}
 	}
@@ -92,6 +93,7 @@ www.{$CADDY_DOMAIN} {
 			fields {
 				request>headers>Cookie delete
 				request>headers>Authorization delete
+				request>headers>X-Api-Key delete
 			}
 		}
 	}

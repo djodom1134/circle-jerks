@@ -23,8 +23,10 @@ logging.basicConfig(
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db, patterns, public_api, track_history, pattern_circuits, vnap
 from .db import db_session
@@ -60,10 +62,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# The public /v1 namespace has its own error envelope. The handler is
-# registered app-wide, but only public_api raises ApiError, so internal
-# routes keep FastAPI's {"detail": ...} shape.
+# The public /v1 namespace has its own error envelope, and it must be total:
+# a bad query parameter or an unknown /v1 path has to look like every other
+# /v1 error. Only public_api raises ApiError; the validation and HTTP handlers
+# are app-wide but discriminate on the request path and delegate to FastAPI's
+# defaults elsewhere, so internal routes keep their {"detail": ...} shape.
 app.add_exception_handler(public_api.ApiError, public_api.api_error_handler)
+app.add_exception_handler(
+    RequestValidationError, public_api.validation_error_handler
+)
+app.add_exception_handler(
+    StarletteHTTPException, public_api.http_exception_handler
+)
 app.include_router(public_api.router)
 
 
