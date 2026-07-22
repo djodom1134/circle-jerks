@@ -1059,7 +1059,7 @@ async def admin_live_sources(
     }
 
 
-def _api_key_record(row: dict, settings: Settings, viewer_id: str | None = None) -> dict:
+def _api_key_record(row: dict, settings: Settings, *, viewer_id: str) -> dict:
     return {
         "id": row["id"],
         "name": row["name"],

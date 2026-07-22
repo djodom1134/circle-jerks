@@ -53,11 +53,12 @@ def test_create_returns_the_secret_exactly_once(tmp_path, monkeypatch):
         assert sorted(body["record"]["scopes"]) == ["aggregates:read", "ops:read"]
         assert body["record"]["created_by"] == "local-admin@invalid"
 
-        # The load-bearing one. Create is the ONLY route holding a row from
+        # The load-bearing one. Both create and revoke hold a row from
         # db.get_api_key, which does return secret_hash; _api_key_record's
-        # field whitelist is the sole thing keeping it out of the response.
-        # A regression to {**row, ...} would leak the hash here and nowhere
-        # else, so this is the assertion that has to exist.
+        # explicit field whitelist is the sole thing keeping it out of create's
+        # response. The revoke route must keep returning only its literal dict.
+        # A regression to {**row, ...} in create would leak the hash, so this
+        # assertion is load-bearing.
         assert "secret_hash" not in body["record"]
         assert _SECRET_HASH_RE.search(created.text) is None, "a sha256 digest reached the create response"
 

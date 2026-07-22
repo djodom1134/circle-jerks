@@ -40,7 +40,9 @@ def test_a_partner_may_mint_inside_their_grant(tmp_path, monkeypatch):
             "name": "mine", "scopes": ["ops:read"], "airports": ["KLMO"],
         })
         assert resp.status_code == 200
-        assert resp.json()["record"]["owner_user_id"] == "local-admin"
+        record = resp.json()["record"]
+        assert record["owner_user_id"] == "local-admin"
+        assert record["owned"] is True
 
 
 def test_a_partner_cannot_mint_a_scope_they_were_not_granted(tmp_path, monkeypatch):
@@ -97,8 +99,10 @@ def test_a_partner_sees_only_their_own_keys(tmp_path, monkeypatch):
         client.post("/admin/api-keys", json={
             "name": "mine", "scopes": ["ops:read"], "airports": ["KLMO"],
         })
-        names = [k["name"] for k in client.get("/admin/api-keys").json()["keys"]]
+        keys = client.get("/admin/api-keys").json()["keys"]
+        names = [k["name"] for k in keys]
         assert names == ["mine"]
+        assert keys[0]["owned"] is True
 
 
 def test_a_super_admin_sees_every_key_including_legacy_unowned(tmp_path, monkeypatch):
