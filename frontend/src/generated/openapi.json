@@ -389,6 +389,14 @@
               "null"
             ]
           },
+          "fraction_off_pattern": {
+            "description": "Time-weighted fraction of the lap spent farther than\n`constants.pattern_corridor_nm` from the selected published pattern.\nA fraction in 0..1 \u2014 0.42 means 42%. Null when no pattern was matched.\n",
+            "example": 0.42,
+            "maximum": 1,
+            "minimum": 0,
+            "nullable": true,
+            "type": "number"
+          },
           "icao24": {
             "description": "24-bit ICAO address",
             "lowercase hex.": null,
@@ -426,12 +434,6 @@
               "null"
             ]
           },
-          "pct_off_pattern": {
-            "type": [
-              "number",
-              "null"
-            ]
-          },
           "registration": {
             "description": "Tail number",
             "type": [
@@ -446,7 +448,17 @@
               "null"
             ]
           },
-          "timestamp": {
+          "time_off_pattern_s": {
+            "description": "Seconds spent outside the corridor. Numerator of `fraction_off_pattern`.",
+            "nullable": true,
+            "type": "integer"
+          },
+          "time_total_s": {
+            "description": "Seconds of lap track measured. Denominator of `fraction_off_pattern`.",
+            "nullable": true,
+            "type": "integer"
+          },
+          "timestamp_ts": {
             "description": "Unix seconds.",
             "type": "integer"
           },
@@ -488,7 +500,7 @@
           "id",
           "airport_icao",
           "type",
-          "timestamp"
+          "timestamp_ts"
         ],
         "type": "object"
       },
@@ -1293,7 +1305,7 @@
     },
     "/v1/operations": {
       "get": {
-        "description": "Each row is one detected operation \u2014 a touch-and-go, circle, low approach,\nlanding, or pass \u2014 with the runway, pattern deviation, wind at the time, and\nany resolved operator or flight school.\n\nRequires the `ops:read` scope. Keyset-paginated, ordered by\n`(timestamp, id)` ascending.\n",
+        "description": "Each row is one detected operation \u2014 a touch-and-go, circle, low approach,\nlanding, or pass \u2014 with the runway, pattern deviation, wind at the time, and\nany resolved operator or flight school.\n\nRequires the `ops:read` scope. Keyset-paginated, ordered by\n`(timestamp_ts, id)` ascending.\n",
         "operationId": "listOperations",
         "parameters": [
           {
@@ -1390,16 +1402,18 @@
                       "deviation_peak_nm": null,
                       "emitter_category": null,
                       "flight_school": null,
+                      "fraction_off_pattern": null,
                       "icao24": "a1b2c3",
                       "id": "op-000",
                       "min_altitude_ft_agl": 900,
                       "operator": null,
                       "origin_airport_icao": null,
                       "origin_label": null,
-                      "pct_off_pattern": null,
                       "registration": "N333RX",
                       "runway_id": "11",
-                      "timestamp": 1784664115,
+                      "time_off_pattern_s": null,
+                      "time_total_s": null,
+                      "timestamp_ts": 1784664115,
                       "turn_direction": "right",
                       "type": "touch_and_go",
                       "wind_from_deg": null,

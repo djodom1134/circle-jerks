@@ -64,3 +64,63 @@ def meta_out(ctx: api_keys.ApiKeyContext) -> MetaOut:
             axis_score_scale=AXIS_SCORE_SCALE,
         ),
     )
+
+
+class OperationOut(BaseModel):
+    id: str
+    airport_icao: str
+    icao24: str
+    callsign: str | None
+    registration: str | None
+    type: str
+    timestamp_ts: int
+    runway_id: str | None
+    turn_direction: str | None
+    min_altitude_ft_agl: int | None
+    emitter_category: str | None
+    deviation_mean_nm: float | None
+    deviation_peak_nm: float | None
+    # Was `pct_off_pattern`, which held a fraction. The name contradicted the
+    # value, and /stats' `stopped_pct` held a real percent — same prefix, two
+    # scales, one API.
+    fraction_off_pattern: float | None
+    time_off_pattern_s: int | None
+    time_total_s: int | None
+    wind_from_deg: int | None
+    wind_speed_kt: float | None
+    origin_airport_icao: str | None
+    origin_label: str | None
+    operator: str | None
+    flight_school: str | None
+
+
+class OperationPage(BaseModel):
+    data: list[OperationOut]
+    next_cursor: str | None
+
+
+def operation_out(row) -> OperationOut:
+    return OperationOut(
+        id=row["id"],
+        airport_icao=row["airport_icao"],
+        icao24=row["icao24"],
+        callsign=row["callsign"],
+        registration=row["registration"],
+        type=row["type"],
+        timestamp_ts=row["timestamp"],
+        runway_id=row["runway_id"],
+        turn_direction=row["turn_direction"],
+        min_altitude_ft_agl=row["min_altitude_ft_agl"],
+        emitter_category=row["emitter_category"],
+        deviation_mean_nm=row["deviation_mean_nm"],
+        deviation_peak_nm=row["deviation_peak_nm"],
+        fraction_off_pattern=row["pct_off_pattern"],
+        time_off_pattern_s=row["time_off_pattern_s"],
+        time_total_s=row["time_total_s"],
+        wind_from_deg=row["wind_from_deg"],
+        wind_speed_kt=row["wind_speed_kt"],
+        origin_airport_icao=row["origin_airport_icao"],
+        origin_label=row["origin_label"],
+        operator=row["operator"],
+        flight_school=row["flight_school"],
+    )

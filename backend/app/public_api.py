@@ -475,22 +475,6 @@ async def public_docs() -> HTMLResponse:
 # Default lookback when the caller supplies no range.
 DEFAULT_LOOKBACK_SECONDS = 7 * 86400
 
-# Frozen on purpose: new columns on `operations` must not silently appear in
-# the public contract.
-_OPERATION_FIELDS = (
-    "id", "icao24", "callsign", "registration", "type", "timestamp",
-    "runway_id", "turn_direction", "min_altitude_ft_agl", "emitter_category",
-    "deviation_mean_nm", "deviation_peak_nm", "pct_off_pattern",
-    "wind_from_deg", "wind_speed_kt", "origin_airport_icao", "origin_label",
-    "operator", "flight_school",
-)
-
-
-def operation_row(row) -> dict:
-    out = {field: row[field] for field in _OPERATION_FIELDS}
-    out["airport_icao"] = row["icao"]
-    return out
-
 
 def resolve_range(
     since: str | None, until: str | None, *, now: int, max_span: int | None = None
@@ -513,7 +497,10 @@ def resolve_range(
     return start_ts, end_ts
 
 
-@router.get("/operations", summary="Classified operations for an airport")
+@router.get(
+    "/operations", summary="Classified operations for an airport",
+    response_model=v1_schemas.OperationPage,
+)
 async def list_operations(
     ctx: Annotated[ApiKeyContext, Depends(require_scope("ops:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
@@ -525,7 +512,7 @@ async def list_operations(
     runway: str | None = None,
     cursor: str | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
-) -> dict:
+) -> v1_schemas.OperationPage:
     with db_session(settings.database_path) as conn:
         # `_known_airport`, the same gate the aggregates and the ledger proxy
         # use: the key's restriction is enforced BEFORE existence, so an
@@ -549,11 +536,20 @@ async def list_operations(
             limit=size,
         )
 
-    return paged(
-        [operation_row(row) for row in rows],
-        size,
-        lambda row: encode_cursor(row["timestamp"], row["id"]),
+    # `v1_schemas.operation_out` expects `airport_icao`; the stored column is
+    # `icao` (internal dict keys are not part of the /v1 contract and stay as
+    # they are). The rename happens here, at the serialization boundary, same
+    # as it always has.
+    data = [
+        v1_schemas.operation_out({**dict(row), "airport_icao": row["icao"]})
+        for row in rows
+    ]
+    next_cursor = (
+        encode_cursor(rows[-1]["timestamp"], rows[-1]["id"])
+        if len(rows) == size and rows
+        else None
     )
+    return v1_schemas.OperationPage(data=data, next_cursor=next_cursor)
 
 
 # Matches the scan ring used by the historical track-density view.

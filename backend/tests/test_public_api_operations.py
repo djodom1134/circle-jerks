@@ -100,9 +100,10 @@ def test_operations_returns_a_stable_field_set(tmp_path, monkeypatch):
         row = resp.json()["data"][0]
         assert set(row) == {
             "id", "airport_icao", "icao24", "callsign", "registration", "type",
-            "timestamp", "runway_id", "turn_direction", "min_altitude_ft_agl",
+            "timestamp_ts", "runway_id", "turn_direction", "min_altitude_ft_agl",
             "emitter_category", "deviation_mean_nm", "deviation_peak_nm",
-            "pct_off_pattern", "wind_from_deg", "wind_speed_kt",
+            "fraction_off_pattern", "time_off_pattern_s", "time_total_s",
+            "wind_from_deg", "wind_speed_kt",
             "origin_airport_icao", "origin_label", "operator", "flight_school",
         }
         assert row["airport_icao"] == "KBJC"

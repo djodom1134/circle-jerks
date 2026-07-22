@@ -182,7 +182,7 @@ paths:
         any resolved operator or flight school.
 
         Requires the `ops:read` scope. Keyset-paginated, ordered by
-        `(timestamp, id)` ascending.
+        `(timestamp_ts, id)` ascending.
       operationId: listOperations
       parameters:
         - name: airport
@@ -246,14 +246,16 @@ paths:
                     callsign: N333RX
                     registration: N333RX
                     type: touch_and_go
-                    timestamp: 1784664115
+                    timestamp_ts: 1784664115
                     runway_id: "11"
                     turn_direction: right
                     min_altitude_ft_agl: 900
                     emitter_category: null
                     deviation_mean_nm: null
                     deviation_peak_nm: null
-                    pct_off_pattern: null
+                    fraction_off_pattern: null
+                    time_off_pattern_s: null
+                    time_total_s: null
                     wind_from_deg: null
                     wind_speed_kt: null
                     origin_airport_icao: null
@@ -737,7 +739,7 @@ components:
     Operation:
       type: object
       description: One detected operation. Field set is frozen; new database columns do not appear here.
-      required: [id, airport_icao, type, timestamp]
+      required: [id, airport_icao, type, timestamp_ts]
       properties:
         id: { type: string, description: Stable identifier, also half of the cursor. }
         airport_icao: { type: string }
@@ -747,14 +749,31 @@ components:
         type:
           type: string
           enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
-        timestamp: { type: integer, description: Unix seconds. }
+        timestamp_ts: { type: integer, description: Unix seconds. }
         runway_id: { type: [string, "null"] }
         turn_direction: { type: [string, "null"], enum: [left, right, null] }
         min_altitude_ft_agl: { type: [integer, "null"] }
         emitter_category: { type: [string, "null"] }
         deviation_mean_nm: { type: [number, "null"], description: Mean lateral deviation from the published pattern. }
         deviation_peak_nm: { type: [number, "null"] }
-        pct_off_pattern: { type: [number, "null"] }
+        fraction_off_pattern:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: |
+            Time-weighted fraction of the lap spent farther than
+            `constants.pattern_corridor_nm` from the selected published pattern.
+            A fraction in 0..1 — 0.42 means 42%. Null when no pattern was matched.
+          example: 0.42
+        time_off_pattern_s:
+          type: integer
+          nullable: true
+          description: Seconds spent outside the corridor. Numerator of `fraction_off_pattern`.
+        time_total_s:
+          type: integer
+          nullable: true
+          description: Seconds of lap track measured. Denominator of `fraction_off_pattern`.
         wind_from_deg: { type: [integer, "null"] }
         wind_speed_kt: { type: [number, "null"] }
         origin_airport_icao: { type: [string, "null"] }
