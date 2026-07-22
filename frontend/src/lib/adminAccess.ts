@@ -61,3 +61,48 @@ export function clampScopes(selected: string[], session: AdminSession | null): s
     return true;
   });
 }
+
+export type AirportMode = "restricted" | "all";
+
+export type AirportsSelectionResult =
+  | { ok: true; airports: string[] | null }
+  | { ok: false; error: string };
+
+/**
+ * Turn the two-way "restrict to specific airports" / "all airports
+ * (unrestricted)" choice into the `airports` value the API expects.
+ *
+ * The backend maps an empty or absent airport list to `granted_airports =
+ * NULL`, and NULL means unrestricted — every airport at the site. That makes
+ * a blank text box the most dangerous default imaginable: leave it empty and
+ * you have (silently) granted everything. This function exists so "all
+ * airports" can only ever come from the caller explicitly picking `"all"`,
+ * never from an empty or whitespace-only restricted box, which is rejected
+ * as a validation error instead.
+ */
+export function resolveAirportsSelection(mode: AirportMode, raw: string): AirportsSelectionResult {
+  if (mode === "all") {
+    // Deliberate: whatever is left over in the restricted text box is
+    // discarded here. A stale value from a prior mode must never leak back
+    // in as a restriction once "all airports" has been chosen on purpose.
+    return { ok: true, airports: null };
+  }
+
+  const seen = new Set<string>();
+  const airports: string[] = [];
+  for (const token of raw.split(/[\s,]+/)) {
+    const icao = token.trim().toUpperCase();
+    if (!icao || seen.has(icao)) continue;
+    seen.add(icao);
+    airports.push(icao);
+  }
+
+  if (airports.length === 0) {
+    return {
+      ok: false,
+      error: "Enter at least one airport, or choose \"All airports\" to grant every airport explicitly."
+    };
+  }
+
+  return { ok: true, airports };
+}

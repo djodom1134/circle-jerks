@@ -5,6 +5,7 @@ import {
   allowedScopes,
   canManageUsers,
   clampScopes,
+  resolveAirportsSelection,
   visibleTabs,
   type AdminSession
 } from "./adminAccess";
@@ -92,5 +93,54 @@ describe("clampScopes", () => {
   it("leaves an admin's selection untouched", () => {
     const picked = ["ops:read", "ledger:read"];
     expect(clampScopes(picked, session({ role: "admin" }))).toEqual(picked);
+  });
+});
+
+describe("resolveAirportsSelection", () => {
+  // This is the single most likely way to over-grant a partner by accident:
+  // the backend maps an empty/absent airport list to granted_airports = NULL,
+  // which means every airport. "All airports" must therefore be a choice you
+  // make on purpose, never the thing you get from leaving a box blank.
+
+  it("uppercases and trims a valid restricted list", () => {
+    expect(resolveAirportsSelection("restricted", "klmo, kbjc")).toEqual({
+      ok: true,
+      airports: ["KLMO", "KBJC"]
+    });
+  });
+
+  it("rejects an empty restricted input instead of silently granting everything", () => {
+    const result = resolveAirportsSelection("restricted", "");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/airport/i);
+  });
+
+  it("rejects a whitespace-only restricted input", () => {
+    const result = resolveAirportsSelection("restricted", "   ");
+    expect(result.ok).toBe(false);
+  });
+
+  it("returns null airports only when 'all' is explicitly chosen", () => {
+    expect(resolveAirportsSelection("all", "")).toEqual({ ok: true, airports: null });
+  });
+
+  it("ignores any leftover restricted-box text when 'all' is chosen", () => {
+    // Switching from "restricted" to "all" without clearing the text field
+    // must not leak the stale text back in as a restriction.
+    expect(resolveAirportsSelection("all", "KLMO")).toEqual({ ok: true, airports: null });
+  });
+
+  it("splits on commas and whitespace alike", () => {
+    expect(resolveAirportsSelection("restricted", "KLMO KBJC, KDEN\tKAPA\nKBJC")).toEqual({
+      ok: true,
+      airports: ["KLMO", "KBJC", "KDEN", "KAPA"]
+    });
+  });
+
+  it("deduplicates case-insensitively while preserving first-seen order", () => {
+    expect(resolveAirportsSelection("restricted", "klmo, KLMO, Klmo, kbjc")).toEqual({
+      ok: true,
+      airports: ["KLMO", "KBJC"]
+    });
   });
 });

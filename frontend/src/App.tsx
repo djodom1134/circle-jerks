@@ -103,7 +103,15 @@ function storedLocation(preferences: StoredPreferences) {
 }
 
 export default function App() {
-  if (window.location.pathname.startsWith("/admin")) return <AdminDashboard />;
+  if (
+    window.location.pathname.startsWith("/admin") ||
+    window.location.pathname.startsWith("/developers")
+  ) {
+    // Same component either way. Which URL was used does not affect what
+    // renders — role does. /developers exists so partners get a URL that
+    // isn't labelled "admin".
+    return <AdminDashboard />;
+  }
   if (window.location.pathname.startsWith("/about")) return <AboutPage />;
   if (window.location.pathname.startsWith("/stats")) return <StatsPage />;
 

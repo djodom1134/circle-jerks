@@ -4,17 +4,30 @@ import {
   adminCreateApiKey,
   adminListApiKeys,
   adminRevokeApiKey,
-  API_KEY_SCOPES,
   ApiError,
   type ApiKeyRecord
 } from "../lib/api";
 import { formatDateTime } from "../lib/format";
+import { airportRequired, allowedScopes, clampScopes, type AdminSession } from "../lib/adminAccess";
 
-export default function ApiKeysPanel() {
+export default function ApiKeysPanel({ session }: { session: AdminSession | null }) {
+  const scopeOptions = allowedScopes(session);
+  const requireAirports = airportRequired(session);
+  const permittedAirports = session?.airports ?? null;
+
   const [keys, setKeys] = useState<ApiKeyRecord[]>([]);
   const [name, setName] = useState("");
-  const [scopes, setScopes] = useState<string[]>(["aggregates:read"]);
-  const [airports, setAirports] = useState("");
+  // Default to "aggregates:read" when it is in the caller's grant (matching
+  // the previous default for admins); otherwise fall back to whatever the
+  // grant actually allows, so a partner never opens the form to a dead
+  // checkbox for a scope they cannot pick.
+  const [scopes, setScopes] = useState<string[]>(() => {
+    const preferred = clampScopes(["aggregates:read"], session);
+    return preferred.length ? preferred : scopeOptions;
+  });
+  const [airports, setAirports] = useState(() =>
+    requireAirports ? (permittedAirports ?? []).join(", ") : ""
+  );
   const [revealed, setRevealed] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -60,21 +73,31 @@ export default function ApiKeysPanel() {
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!name.trim() || scopes.length === 0) {
-      setStatus("A name and at least one scope are required.");
+    // Presentation only — the server's enforce_grant is the real boundary.
+    // Clamping here just keeps the form from submitting a request that is
+    // certain to be refused.
+    const clamped = clampScopes(scopes, session);
+    if (!name.trim() || clamped.length === 0) {
+      setStatus("A name and at least one allowed scope are required.");
+      return;
+    }
+    const parsedAirports = airports
+      .split(",")
+      .map((icao) => icao.trim().toUpperCase())
+      .filter(Boolean);
+    if (requireAirports && parsedAirports.length === 0) {
+      setStatus(
+        `Airports required — this grant is restricted to: ${(permittedAirports ?? []).join(", ")}`
+      );
       return;
     }
     setBusy(true);
     setStatus("");
     try {
-      const parsedAirports = airports
-        .split(",")
-        .map((icao) => icao.trim().toUpperCase())
-        .filter(Boolean);
-      const created = await adminCreateApiKey(name.trim(), scopes, parsedAirports);
+      const created = await adminCreateApiKey(name.trim(), clamped, parsedAirports);
       setRevealed(created.key);
       setName("");
-      setAirports("");
+      setAirports(requireAirports ? (permittedAirports ?? []).join(", ") : "");
       await load();
     } catch (error) {
       setStatus(error instanceof ApiError ? error.message : "Could not create the key");
@@ -131,7 +154,7 @@ export default function ApiKeysPanel() {
           onChange={(event) => setName(event.target.value)}
         />
         <div className="api-key-scopes">
-          {API_KEY_SCOPES.map((scope) => (
+          {scopeOptions.map((scope) => (
             <label key={scope}>
               <input
                 type="checkbox"
@@ -144,10 +167,20 @@ export default function ApiKeysPanel() {
         </div>
         <input
           type="text"
-          placeholder="Airports (comma separated, blank = all)"
+          placeholder={
+            requireAirports
+              ? "Airports (required)"
+              : "Airports (comma separated, blank = all)"
+          }
           value={airports}
           onChange={(event) => setAirports(event.target.value)}
+          required={requireAirports}
         />
+        {requireAirports && (
+          <p className="admin-panel-status">
+            Your access is restricted to: {(permittedAirports ?? []).join(", ")}
+          </p>
+        )}
         <button type="submit" disabled={busy}>
           Create key
         </button>
@@ -161,6 +194,7 @@ export default function ApiKeysPanel() {
           <span>Prefix</span>
           <span>Scopes</span>
           <span>Airports</span>
+          <span>Owner</span>
           <span>Last used</span>
           <span>Status</span>
         </div>
@@ -178,11 +212,21 @@ export default function ApiKeysPanel() {
           </div>
         )}
         {keys.map((key) => (
-          <div className="admin-row" key={key.id}>
+          <div className={`admin-row${key.owned ? " admin-row-owned" : ""}`} key={key.id}>
             <span>{key.name}</span>
             <span><code>{key.prefix}</code></span>
             <span>{key.scopes.join(", ")}</span>
             <span>{key.airports ? key.airports.join(", ") : "all"}</span>
+            <span>
+              {key.owner_user_id === null ? (
+                <em>legacy (unowned)</em>
+              ) : (
+                <>
+                  {key.created_by ?? "—"}
+                  {key.owned && <span className="admin-badge" title="Owned by you">you</span>}
+                </>
+              )}
+            </span>
             <span>{formatDateTime(key.last_used_at)}</span>
             <span>
               {key.revoked_at ? (
