@@ -239,11 +239,23 @@ const REQUEST_TIMEOUT_MS = 60000;
 
 export class ApiError extends Error {
   status: number;
+  /**
+   * The parsed `detail` field from the error response body, if any.
+   *
+   * Historically every admin failure was a 401 with a string `detail`, which
+   * `detailToMessage` folds into `message`. Newer endpoints can return a
+   * structured `detail`, e.g. an authenticated-but-not-approved user gets a
+   * 403 with `detail: {status: "pending" | "rejected" | "suspended"}`.
+   * Callers that need that shape (rather than the human-readable message)
+   * should read `detail` directly.
+   */
+  detail: unknown;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, detail?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -264,13 +276,15 @@ function detailToMessage(detail: unknown): string | null {
 async function errorFromResponse(response: Response): Promise<ApiError> {
   const text = await response.text();
   let message = text || response.statusText;
+  let detail: unknown;
   try {
     const parsed = JSON.parse(text) as { detail?: unknown };
+    detail = parsed.detail;
     message = detailToMessage(parsed.detail) ?? message;
   } catch {
     // Keep the plain response text.
   }
-  return new ApiError(response.status, message || "Request failed");
+  return new ApiError(response.status, message || "Request failed", detail);
 }
 
 async function fetchWithTimeout(
@@ -740,8 +754,81 @@ export function adminLogout() {
   return adminJson<{ ok: boolean }>("/admin/logout", { method: "POST" });
 }
 
+export interface AdminUserRecord {
+  id: string;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  role: "super_admin" | "admin" | "partner";
+  status: "pending" | "approved" | "rejected" | "suspended";
+  scopes: string[];
+  airports: string[] | null;
+  requested_at: number;
+  decided_at: number | null;
+  last_login_at: number | null;
+}
+
+export interface AdminSessionResponse {
+  ok: boolean;
+  id: string;
+  email: string;
+  name: string | null;
+  username: string;
+  role: "super_admin" | "admin" | "partner";
+  status: "pending" | "approved" | "rejected" | "suspended";
+  scopes: string[];
+  airports: string[] | null;
+}
+
 export function adminSession() {
-  return adminJson<{ ok: boolean; username: string }>("/admin/session");
+  return adminJson<AdminSessionResponse>("/admin/session");
+}
+
+export function adminAuthMethods() {
+  return adminJson<{ google: boolean; password: boolean }>("/admin/auth/methods");
+}
+
+export function adminListUsers(status?: string) {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  return adminJson<{ users: AdminUserRecord[] }>(`/admin/users${query}`);
+}
+
+export function adminApproveUser(
+  id: string,
+  role: string,
+  scopes: string[],
+  airports: string[] | null
+) {
+  return adminJson<{ user: AdminUserRecord }>(`/admin/users/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ role, scopes, airports })
+  });
+}
+
+export function adminRejectUser(id: string) {
+  return adminJson<{ user: AdminUserRecord; revoked_keys: number }>(
+    `/admin/users/${id}/reject`,
+    { method: "POST" }
+  );
+}
+
+export function adminSuspendUser(id: string) {
+  return adminJson<{ user: AdminUserRecord; revoked_keys: number }>(
+    `/admin/users/${id}/suspend`,
+    { method: "POST" }
+  );
+}
+
+export function adminUpdateUser(
+  id: string,
+  role: string,
+  scopes: string[],
+  airports: string[] | null
+) {
+  return adminJson<{ user: AdminUserRecord; revoked_keys: number }>(`/admin/users/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role, scopes, airports })
+  });
 }
 
 export function adminDashboard() {
@@ -765,6 +852,8 @@ export interface ApiKeyRecord {
   created_by: string | null;
   last_used_at: number | null;
   revoked_at: number | null;
+  owner_user_id: string | null;
+  owned: boolean;
 }
 
 export function adminListApiKeys() {
