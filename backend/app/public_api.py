@@ -638,9 +638,9 @@ async def list_tracks(
 # helpers. main.py is shaped for the frontend and free to change with it; the
 # /v1 contract must not shift underneath partners when it does. Keeping a
 # second copy of `_STATS_WINDOWS` (as `_WINDOWS`) and of `_pattern_response`
-# (as `_pattern_out`) is the deliberate cost of that decoupling — main.py
-# imports this module, never the reverse, so importing from main.py here would
-# also create a circular import.
+# (as `v1_schemas.patterns_out`/`PatternOut`) is the deliberate cost of that
+# decoupling — main.py imports this module, never the reverse, so importing
+# from main.py here would also create a circular import.
 
 # Mirrors main.py's _STATS_WINDOWS so the public windows match the site's.
 _WINDOWS = {"1d": (86400, 3600), "7d": (7 * 86400, 86400),
@@ -664,19 +664,6 @@ def _known_airport(conn, ctx: ApiKeyContext, icao: str) -> str:
     if db.get_airport(conn, normalized) is None:
         raise ApiError(404, "not_found", f"unknown airport {normalized}")
     return normalized
-
-
-def _pattern_out(row) -> dict:
-    return {
-        "id": row["id"],
-        "airport_icao": row["icao"],
-        "runway_id": row["runway_id"],
-        "version": row["version"],
-        "name": row["name"],
-        "locked": bool(row["locked"]),
-        "geometry": json.loads(row["geometry_json"]),
-        "created_at": row["created_at"],
-    }
 
 
 @router.get(
@@ -819,29 +806,35 @@ async def airport_runways(
     return v1_schemas.runways_out(normalized, runways)
 
 
-@router.get("/airports/{icao}/patterns", summary="Current traffic patterns")
+@router.get(
+    "/airports/{icao}/patterns", summary="Current traffic patterns",
+    response_model=v1_schemas.PatternsOut,
+)
 async def airport_patterns(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.PatternsOut:
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         rows = db.current_patterns_for_airport(conn, normalized)
-    return {"airport_icao": normalized, "patterns": [_pattern_out(row) for row in rows]}
+    return v1_schemas.patterns_out(normalized, rows)
 
 
-@router.get("/airports/{icao}/flow", summary="Active runway and recent changes")
+@router.get(
+    "/airports/{icao}/flow", summary="Active runway and recent changes",
+    response_model=v1_schemas.FlowOut,
+)
 async def airport_flow(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.FlowOut:
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         active = db.current_flow(conn, normalized)
         changes = db.recent_runway_changes(conn, normalized, 20)
-    return {"airport_icao": normalized, "active": active, "recent_changes": changes}
+    return v1_schemas.flow_out(normalized, active, changes)
 
 
 # ─── Ledger proxy ────────────────────────────────────────────────────────────

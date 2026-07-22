@@ -172,6 +172,46 @@
       }
     },
     "schemas": {
+      "ActiveFlow": {
+        "description": "`active_runway_id` and `established_at_ts` are always present together\n\u2014 the row is only ever written once a runway is actually established.\n`ended_at_ts` is always null in practice (this route only ever returns\nthe currently-open row), but stays nullable because the underlying\nrecord is. `op_count` is reserved and always 0 today; it is not\nderived from the operations table.\n",
+        "properties": {
+          "active_runway_id": {
+            "type": "string"
+          },
+          "ended_at_ts": {
+            "description": "Unix seconds.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "established_at_ts": {
+            "description": "Unix seconds.",
+            "type": "integer"
+          },
+          "op_count": {
+            "type": "integer"
+          },
+          "wind_from_deg": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wind_speed_kt": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "active_runway_id",
+          "established_at_ts",
+          "op_count"
+        ],
+        "type": "object"
+      },
       "AirportStats": {
         "description": "Field set is frozen; new database columns do not appear here.",
         "properties": {
@@ -328,6 +368,41 @@
         "required": [
           "error"
         ],
+        "type": "object"
+      },
+      "Flow": {
+        "description": "The runway currently established as active for this airport, and its\nlast twenty runway changes (newest first). `active` is null when no\nflow has been established yet \u2014 too little recent touch-and-go/low-\napproach traffic to establish one.\n",
+        "properties": {
+          "active": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActiveFlow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "airport_icao": {
+            "type": "string"
+          },
+          "recent_changes": {
+            "items": {
+              "$ref": "#/components/schemas/RunwayChange"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "airport_icao",
+          "active",
+          "recent_changes"
+        ],
+        "type": "object"
+      },
+      "LedgerEnvelope": {
+        "additionalProperties": true,
+        "description": "Pass-through: the exact JSON body returned by the ledger-api sidecar, forwarded as-is. This API does not define or validate its shape here \u2014 only that it is a JSON object. See the `resource` parameter above for what `ledger` and `aircraft-fees` contain.",
         "type": "object"
       },
       "Meta": {
@@ -847,6 +922,67 @@
         ],
         "type": "object"
       },
+      "RunwayChange": {
+        "description": "One historical runway change, newest first. `triggering_callsign`,\n`triggering_icao24`, and `triggering_registration` (formerly\n`cowboy_*`) identify the aircraft whose trailing run of touch-and-gos\nor low approaches triggered the change \u2014 null together when no such\naircraft was recorded for that transition.\n",
+        "properties": {
+          "changed_at_ts": {
+            "description": "Unix seconds.",
+            "type": "integer"
+          },
+          "from_runway_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_runway_id": {
+            "type": "string"
+          },
+          "triggering_callsign": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "triggering_icao24": {
+            "description": "24-bit ICAO address, lowercase hex.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "triggering_registration": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wind_favored_new": {
+            "description": "Whether the new runway was the headwind-favored choice.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "wind_from_deg": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wind_speed_kt": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "changed_at_ts",
+          "to_runway_id"
+        ],
+        "type": "object"
+      },
       "StopBreakdown": {
         "properties": {
           "did_not_stop": {
@@ -1167,7 +1303,7 @@
   "paths": {
     "/v1/airports/{icao}/flow": {
       "get": {
-        "description": "The runway currently in use and the last twenty runway changes. `active` is\nnull when no flow has been established. Requires `aggregates:read`.\n",
+        "description": "The runway currently in use and the last twenty runway changes. `active` is\nnull when no flow has been established yet for this airport. Requires\n`aggregates:read`.\n",
         "operationId": "getFlow",
         "parameters": [
           {
@@ -1184,31 +1320,7 @@
                   "recent_changes": []
                 },
                 "schema": {
-                  "properties": {
-                    "active": {
-                      "additionalProperties": true,
-                      "type": [
-                        "object",
-                        "null"
-                      ]
-                    },
-                    "airport_icao": {
-                      "type": "string"
-                    },
-                    "recent_changes": {
-                      "items": {
-                        "additionalProperties": true,
-                        "type": "object"
-                      },
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "airport_icao",
-                    "active",
-                    "recent_changes"
-                  ],
-                  "type": "object"
+                  "$ref": "#/components/schemas/Flow"
                 }
               }
             },
@@ -1624,8 +1736,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/LedgerEnvelope"
                 }
               }
             },

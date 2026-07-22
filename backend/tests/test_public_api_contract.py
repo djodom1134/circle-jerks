@@ -400,3 +400,95 @@ def test_deviation_mean_nm_and_axis_scores_can_be_null():
     assert out.aircraft[0].deviation_mean_nm is None
     assert out.aircraft[0].axes[0].score is None
     assert out.composite_score is None
+
+
+# ─── /flow: drop internal ids, rename cowboy_*, epoch-suffix the timestamps ──
+#
+# The brief's three tests, verbatim.
+
+def test_flow_publishes_no_internal_identifiers():
+    active = {"id": 91, "icao": "KLMO", "active_runway_id": "29",
+              "established_at": 1784700000, "ended_at": None,
+              "wind_from_deg": 30, "wind_speed_kt": 6.0, "op_count": 12}
+    changes = [{"id": 5, "icao": "KLMO", "changed_at": 1784690000,
+                "from_runway_id": "11", "to_runway_id": "29",
+                "trigger_op_id": "abc123", "wind_favored_new": True,
+                "wind_from_deg": 30, "wind_speed_kt": 6.0,
+                "cowboy_callsign": "N919CW", "cowboy_icao24": "acb861",
+                "cowboy_registration": "N919CW"}]
+    out = v1_schemas.flow_out("KLMO", active, changes)
+    dumped = out.model_dump()
+    for banned in ("id", "icao", "trigger_op_id"):
+        assert banned not in dumped["active"]
+        assert banned not in dumped["recent_changes"][0]
+
+
+def test_product_voice_becomes_domain_language():
+    changes = [{"id": 5, "icao": "KLMO", "changed_at": 1784690000,
+                "from_runway_id": "11", "to_runway_id": "29",
+                "trigger_op_id": "abc123", "wind_favored_new": True,
+                "wind_from_deg": 30, "wind_speed_kt": 6.0,
+                "cowboy_callsign": "N919CW", "cowboy_icao24": "acb861",
+                "cowboy_registration": "N919CW"}]
+    out = v1_schemas.flow_out("KLMO", None, changes)
+    c = out.recent_changes[0]
+    assert c.triggering_callsign == "N919CW"
+    assert c.triggering_icao24 == "acb861"
+    assert not hasattr(c, "cowboy_callsign")
+
+
+def test_flow_timestamps_use_the_epoch_suffix():
+    active = {"id": 91, "icao": "KLMO", "active_runway_id": "29",
+              "established_at": 1784700000, "ended_at": None,
+              "wind_from_deg": 30, "wind_speed_kt": 6.0, "op_count": 12}
+    out = v1_schemas.flow_out("KLMO", active, [])
+    assert out.active.established_at_ts == 1784700000
+    assert out.active.ended_at_ts is None
+
+
+def test_triggering_fields_are_null_when_no_cowboy_was_recorded():
+    # insert_runway_change does `cowboy = cowboy or {}` then `.get(...)` on
+    # it -- a real, exercised path (test_public_api_aggregates.py's own flow
+    # fixture calls it with cowboy=None). Must round-trip as null, not KeyError.
+    changes = [{"id": 5, "icao": "KLMO", "changed_at": 1784690000,
+                "from_runway_id": "11", "to_runway_id": "29",
+                "trigger_op_id": None, "wind_favored_new": None,
+                "wind_from_deg": None, "wind_speed_kt": None,
+                "cowboy_callsign": None, "cowboy_icao24": None,
+                "cowboy_registration": None}]
+    out = v1_schemas.flow_out("KLMO", None, changes)
+    c = out.recent_changes[0]
+    assert c.triggering_callsign is None
+    assert c.triggering_icao24 is None
+    assert c.triggering_registration is None
+
+
+def test_flow_active_is_none_when_no_flow_established():
+    out = v1_schemas.flow_out("KLMO", None, [])
+    assert out.active is None
+    assert out.recent_changes == []
+
+
+# ─── /patterns: lift the existing explicit field list into a model ──────────
+
+def test_patterns_out_wraps_the_existing_field_list():
+    rows = [{"id": 3, "icao": "KLMO", "runway_id": "29", "version": 2,
+             "name": "left-base", "locked": 1,
+             "geometry_json": '{"points": [{"lat": 40.1, "lon": -105.1}], "closed": true}',
+             "created_at": 1784600000}]
+    out = v1_schemas.patterns_out("KLMO", rows)
+    assert out.airport_icao == "KLMO"
+    p = out.patterns[0]
+    assert p.id == 3
+    assert p.airport_icao == "KLMO"
+    assert p.runway_id == "29"
+    assert p.locked is True
+    assert p.geometry == {"points": [{"lat": 40.1, "lon": -105.1}], "closed": True}
+
+
+def test_patterns_out_name_can_be_null():
+    rows = [{"id": 3, "icao": "KLMO", "runway_id": "29", "version": 1,
+             "name": None, "locked": 0, "geometry_json": "{}",
+             "created_at": 1784600000}]
+    out = v1_schemas.patterns_out("KLMO", rows)
+    assert out.patterns[0].name is None

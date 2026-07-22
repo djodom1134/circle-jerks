@@ -548,7 +548,8 @@ paths:
       summary: Active runway and recent changes
       description: |
         The runway currently in use and the last twenty runway changes. `active` is
-        null when no flow has been established. Requires `aggregates:read`.
+        null when no flow has been established yet for this airport. Requires
+        `aggregates:read`.
       operationId: getFlow
       parameters:
         - $ref: "#/components/parameters/IcaoPath"
@@ -557,17 +558,7 @@ paths:
           description: Current flow and recent changes.
           content:
             application/json:
-              schema:
-                type: object
-                required: [airport_icao, active, recent_changes]
-                properties:
-                  airport_icao: { type: string }
-                  active:
-                    type: [object, "null"]
-                    additionalProperties: true
-                  recent_changes:
-                    type: array
-                    items: { type: object, additionalProperties: true }
+              schema: { $ref: "#/components/schemas/Flow" }
               example:
                 airport_icao: KBJC
                 active: null
@@ -614,7 +605,7 @@ paths:
           description: Ledger payload, passed through from the sidecar.
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema: { $ref: "#/components/schemas/LedgerEnvelope" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1118,6 +1109,73 @@ components:
                   lon: { type: number }
             closed: { type: boolean }
         created_at: { type: integer }
+
+    Flow:
+      type: object
+      description: |
+        The runway currently established as active for this airport, and its
+        last twenty runway changes (newest first). `active` is null when no
+        flow has been established yet — too little recent touch-and-go/low-
+        approach traffic to establish one.
+      required: [airport_icao, active, recent_changes]
+      properties:
+        airport_icao: { type: string }
+        active:
+          oneOf:
+            - $ref: "#/components/schemas/ActiveFlow"
+            - type: "null"
+        recent_changes:
+          type: array
+          items: { $ref: "#/components/schemas/RunwayChange" }
+
+    ActiveFlow:
+      type: object
+      description: |
+        `active_runway_id` and `established_at_ts` are always present together
+        — the row is only ever written once a runway is actually established.
+        `ended_at_ts` is always null in practice (this route only ever returns
+        the currently-open row), but stays nullable because the underlying
+        record is. `op_count` is reserved and always 0 today; it is not
+        derived from the operations table.
+      required: [active_runway_id, established_at_ts, op_count]
+      properties:
+        active_runway_id: { type: string }
+        established_at_ts: { type: integer, description: "Unix seconds." }
+        ended_at_ts: { type: [integer, "null"], description: "Unix seconds." }
+        wind_from_deg: { type: [integer, "null"] }
+        wind_speed_kt: { type: [number, "null"] }
+        op_count: { type: integer }
+
+    RunwayChange:
+      type: object
+      description: |
+        One historical runway change, newest first. `triggering_callsign`,
+        `triggering_icao24`, and `triggering_registration` (formerly
+        `cowboy_*`) identify the aircraft whose trailing run of touch-and-gos
+        or low approaches triggered the change — null together when no such
+        aircraft was recorded for that transition.
+      required: [changed_at_ts, to_runway_id]
+      properties:
+        changed_at_ts: { type: integer, description: "Unix seconds." }
+        from_runway_id: { type: [string, "null"] }
+        to_runway_id: { type: string }
+        wind_favored_new:
+          type: [boolean, "null"]
+          description: "Whether the new runway was the headwind-favored choice."
+        wind_from_deg: { type: [integer, "null"] }
+        wind_speed_kt: { type: [number, "null"] }
+        triggering_callsign: { type: [string, "null"] }
+        triggering_icao24: { type: [string, "null"], description: "24-bit ICAO address, lowercase hex." }
+        triggering_registration: { type: [string, "null"] }
+
+    LedgerEnvelope:
+      type: object
+      description: >-
+        Pass-through: the exact JSON body returned by the ledger-api sidecar,
+        forwarded as-is. This API does not define or validate its shape here —
+        only that it is a JSON object. See the `resource` parameter above for
+        what `ledger` and `aircraft-fees` contain.
+      additionalProperties: true
 
   responses:
     Unauthorized:

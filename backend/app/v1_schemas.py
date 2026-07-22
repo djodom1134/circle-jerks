@@ -13,7 +13,9 @@ columns, and the frontend keep their existing names.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+import json
+
+from pydantic import BaseModel, ConfigDict
 
 from . import api_keys
 from .deviation import CORRIDOR_NM
@@ -621,3 +623,166 @@ def vnap_compliance_out(airport_icao: str, window: dict, axis_codes,
             for r in aircraft_rows
         ],
     )
+
+
+# ─── Flow: the active runway and its recent changes ──────────────────────────
+#
+# `db.py`'s `runway_flow` and `runway_changes` tables (db.py:296-325) back
+# these two builders. `current_flow` returns the single OPEN row (`WHERE
+# ended_at IS NULL`) or None; `recent_runway_changes` returns the last N rows
+# regardless of how old they are.
+
+class ActiveFlowOut(BaseModel):
+    # `active_runway_id` and `established_at` are `TEXT`/`INTEGER NOT NULL`
+    # on `runway_flow` (db.py:296-307). The sole writer, `open_flow`
+    # (db.py:858), is only ever called from flow.py:94 with a `new_end` that
+    # flow.py:85-87 has already guarded to be non-None (`if new_end is None
+    # ...: return`). Non-nullable, unlike the brief's `str | None` / `int |
+    # None`.
+    active_runway_id: str
+    established_at_ts: int
+    # `ended_at` IS nullable on the table, and `current_flow` (db.py:842-848)
+    # only ever selects the OPEN row -- so this is always null on the wire
+    # today. Kept `int | None` anyway: that "always null today" is a property
+    # of the query (only the open flow is ever returned), not a guarantee the
+    # column itself makes.
+    ended_at_ts: int | None
+    wind_from_deg: int | None
+    wind_speed_kt: float | None
+    # `op_count INTEGER NOT NULL DEFAULT 0` (db.py:304), whose own inline
+    # comment says it plainly: "reserved... not maintained here". `open_flow`
+    # (db.py:858-866) never lists the column in its INSERT, so every row
+    # takes the DEFAULT of 0, and nothing ever updates it afterwards.
+    # Non-nullable, unlike the brief's `int | None`.
+    op_count: int
+
+
+class RunwayChangeOut(BaseModel):
+    # `changed_at` and `to_runway_id` are `INTEGER`/`TEXT NOT NULL` on
+    # `runway_changes` (db.py:310-324); `insert_runway_change`'s own
+    # signature (db.py:869) types `to_runway_id` as plain `str`, never
+    # Optional. `to_runway_id` non-nullable, unlike the brief's `str | None`.
+    changed_at_ts: int
+    # `from_runway_id` IS nullable on the table (no NOT NULL), and while
+    # flow.py's only call site (flow.py:96) fires solely when `prev_end is
+    # not None`, `insert_runway_change`'s own signature (db.py:869) still
+    # types the parameter `str | None` -- the column permits a future or
+    # alternate writer to leave it null. Kept nullable, matching the brief.
+    from_runway_id: str | None
+    to_runway_id: str
+    # `wind_favored_new` is a bare `INTEGER` (no NOT NULL) on the table.
+    wind_favored_new: bool | None
+    wind_from_deg: int | None
+    wind_speed_kt: float | None
+    # Was `cowboy_callsign` / `cowboy_icao24` / `cowboy_registration` — the
+    # product's voice, not a term a partner can interpret. Here `cowboy_*`
+    # identifies the aircraft that triggered this runway change, hence
+    # `triggering_*`. All three are nullable `TEXT` columns, and
+    # `insert_runway_change` (db.py:869-884) does `cowboy = cowboy or {}`
+    # then `.get(...)` on it — when no triggering aircraft was recorded
+    # (`cowboy=None`, a real path exercised end-to-end by
+    # test_public_api_aggregates.py's own flow fixture), all three land as
+    # NULL. Nullable, matching the brief.
+    triggering_callsign: str | None
+    triggering_icao24: str | None
+    triggering_registration: str | None
+
+
+class FlowOut(BaseModel):
+    airport_icao: str
+    active: ActiveFlowOut | None
+    recent_changes: list[RunwayChangeOut]
+
+
+def flow_out(airport_icao: str, active: dict | None, changes) -> FlowOut:
+    return FlowOut(
+        airport_icao=airport_icao,
+        active=None if not active else ActiveFlowOut(
+            active_runway_id=active["active_runway_id"],
+            established_at_ts=active["established_at"],
+            ended_at_ts=active["ended_at"],
+            wind_from_deg=active["wind_from_deg"],
+            wind_speed_kt=active["wind_speed_kt"],
+            op_count=active["op_count"],
+        ),
+        recent_changes=[
+            RunwayChangeOut(
+                changed_at_ts=c["changed_at"],
+                from_runway_id=c["from_runway_id"],
+                to_runway_id=c["to_runway_id"],
+                wind_favored_new=c["wind_favored_new"],
+                wind_from_deg=c["wind_from_deg"],
+                wind_speed_kt=c["wind_speed_kt"],
+                triggering_callsign=c["cowboy_callsign"],
+                triggering_icao24=c["cowboy_icao24"],
+                triggering_registration=c["cowboy_registration"],
+            )
+            for c in changes
+        ],
+    )
+
+
+# ─── Patterns: current published traffic-pattern geometry per runway ─────────
+#
+# Lifted from public_api.py's `_pattern_out` (an already-explicit field list)
+# rather than redesigned — see the module's own naming-rules discussion for
+# why /patterns gets no renames in this task. `runway_patterns` (db.py:278-
+# 293) backs it: `id`, `icao`, `runway_id`, `geometry_json`, `version`, and
+# `created_at` are all `NOT NULL`; `name` is the one nullable column.
+
+class PatternOut(BaseModel):
+    id: int
+    airport_icao: str
+    runway_id: str
+    version: int
+    name: str | None
+    locked: bool
+    # Deliberately untyped: `geometry` round-trips whatever JSON the pattern
+    # editor stored, and that shape is not contractually fixed — main.py's
+    # writers store `{points, closed, spline}`, but
+    # test_public_api_aggregates.py's own fixture stores an unrelated
+    # `{"marker": ...}` shape and asserts it comes back unchanged. A stricter
+    # nested model would reject that real, already-passing case.
+    geometry: dict
+    created_at: int
+
+
+class PatternsOut(BaseModel):
+    airport_icao: str
+    patterns: list[PatternOut]
+
+
+def patterns_out(airport_icao: str, rows) -> PatternsOut:
+    return PatternsOut(
+        airport_icao=airport_icao,
+        patterns=[
+            PatternOut(
+                id=row["id"],
+                airport_icao=row["icao"],
+                runway_id=row["runway_id"],
+                version=row["version"],
+                name=row["name"],
+                locked=bool(row["locked"]),
+                geometry=json.loads(row["geometry_json"]),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ],
+    )
+
+
+# ─── Ledger: documented pass-through, not modeled field-by-field ────────────
+#
+# `/v1/ledger/airports/{icao}/{resource}` (public_api.ledger_proxy) is an
+# HTTP proxy to the ledger-api sidecar: it forwards the sidecar's JSON body
+# back verbatim as a `JSONResponse`, never through a Pydantic model. Per spec
+# decision D7, the payload is the sidecar's own shape, not ours to define —
+# modeling it field-by-field here would claim ownership this codebase does
+# not have, and would either reject or silently reshape a legitimate sidecar
+# response we don't control. This class is deliberately empty and permissive:
+# it exists only so the pass-through contract has a named, discoverable
+# companion on the Python side, mirroring the `LedgerEnvelope` schema in
+# docs/api/openapi.yaml. It is NOT wired to the route via `response_model=` —
+# doing so would defeat the pass-through it documents.
+class LedgerEnvelope(BaseModel):
+    model_config = ConfigDict(extra="allow")
