@@ -25,7 +25,7 @@ import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -922,6 +922,26 @@ def _read_state_cookie(settings: Settings, raw: str | None) -> dict | None:
     return payload
 
 
+def _oauth_failure(status_code: int, detail: str) -> JSONResponse:
+    """A terminal failure response for admin_google_callback that also
+    clears the state cookie.
+
+    HTTPException cannot carry a Set-Cookie header, so the callback's
+    failure paths return this instead of raising. Body and status match
+    exactly what FastAPI's default HTTPException handler would have
+    produced (`{"detail": ...}` at the same status) — this route is not
+    under the /v1 envelope, so nothing else intercepts it — but the signed
+    {state, verifier} cookie is deleted here too. Without this, only the
+    success path deleted it, and the comment there ("consumed so the code
+    cannot be replayed") was true of the code but not of the cookie itself,
+    which is only a state/verifier pair, and lived out its TTL after any
+    failure.
+    """
+    response = JSONResponse(status_code=status_code, content={"detail": detail})
+    response.delete_cookie(google_oauth.OAUTH_STATE_COOKIE, path="/")
+    return response
+
+
 @app.get("/admin/auth/google/callback")
 async def admin_google_callback(
     request: Request,
@@ -945,32 +965,28 @@ async def admin_google_callback(
     if not state_ok:
         # One message for every failure mode here: which check failed is not
         # information a caller needs.
-        raise HTTPException(status_code=400, detail="sign-in could not be completed")
+        return _oauth_failure(400, "sign-in could not be completed")
     if not code:
-        raise HTTPException(status_code=400, detail="sign-in could not be completed")
+        return _oauth_failure(400, "sign-in could not be completed")
 
     try:
         tokens = await exchange_google_code(settings, code, stored["verifier"])
     except Exception as exc:  # noqa: BLE001 - upstream failure, logged not surfaced
         logger.warning("google token exchange failed: %s", exc)
-        raise HTTPException(status_code=502, detail="google sign-in is unavailable") from exc
+        return _oauth_failure(502, "google sign-in is unavailable")
 
     try:
         claims = google_oauth.decode_id_token(tokens.get("id_token", ""))
         google_oauth.validate_claims(claims, settings.google_oauth_client_id, int(time.time()))
     except google_oauth.EmailNotVerified as exc:
         logger.warning("google id_token rejected: %s", exc)
-        raise HTTPException(
-            status_code=403, detail="a verified Google account is required"
-        ) from exc
+        return _oauth_failure(403, "a verified Google account is required")
     except google_oauth.IdTokenError as exc:
         # The specific reason (bad aud/iss/exp, missing sub/email, ...) is
         # logged, never surfaced: an unauthenticated caller learning which
         # claim check failed is a fingerprinting/probing primitive.
         logger.warning("google id_token rejected: %s", exc)
-        raise HTTPException(
-            status_code=400, detail="sign-in could not be completed"
-        ) from exc
+        return _oauth_failure(400, "sign-in could not be completed")
 
     now = int(time.time())
     with db_session(settings.database_path) as conn:

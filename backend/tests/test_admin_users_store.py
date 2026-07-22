@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from app import api_keys, db
+from app import admin_users, api_keys, db
 
 
 @pytest.fixture()
@@ -186,6 +186,48 @@ def test_narrowing_a_grant_revokes_exactly_the_keys_that_exceed_it(conn):
 def test_widening_a_grant_revokes_nothing(conn):
     make_key(conn, "aaaaaaaaaaaaaaaa", "u1", scopes="ops:read", airports="KLMO")
     assert db.revoke_keys_outside_grant(conn, "u1", api_keys.UNRESTRICTED_GRANT, 9000) == 0
+
+
+def test_migrate_repairs_an_existing_local_admin_row_to_the_invalid_email(conn):
+    """admin_login resolves the break-glass row by id, not by the
+    LOCAL_ADMIN_EMAIL constant, so a row created before the constant changed
+    from local-admin@circlejerks.live to local-admin@invalid would otherwise
+    keep the old, routable address forever. That reopens exactly the
+    account-rebinding hole the constant change was meant to close: a
+    verified Google token for that address would match on email in
+    find_admin_user and inherit super_admin. _migrate must repair any
+    existing row on every startup.
+    """
+    conn.execute(
+        "INSERT INTO admin_users (id, email, role, status, requested_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (admin_users.LOCAL_ADMIN_ID, "local-admin@circlejerks.live", "super_admin", "approved", 1),
+    )
+    conn.commit()
+
+    db._migrate(conn)
+    conn.commit()
+
+    row = db.get_admin_user(conn, admin_users.LOCAL_ADMIN_ID)
+    assert row["email"] == admin_users.LOCAL_ADMIN_EMAIL
+
+
+def test_migrate_leaves_a_correct_local_admin_row_untouched(conn):
+    """Idempotency: once repaired (or created fresh), re-running _migrate
+    on every startup must be a no-op, not an error and not a second write.
+    """
+    conn.execute(
+        "INSERT INTO admin_users (id, email, role, status, requested_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (admin_users.LOCAL_ADMIN_ID, admin_users.LOCAL_ADMIN_EMAIL, "super_admin", "approved", 1),
+    )
+    conn.commit()
+
+    db._migrate(conn)
+    conn.commit()
+
+    row = db.get_admin_user(conn, admin_users.LOCAL_ADMIN_ID)
+    assert row["email"] == admin_users.LOCAL_ADMIN_EMAIL
 
 
 def test_email_is_unique(conn):

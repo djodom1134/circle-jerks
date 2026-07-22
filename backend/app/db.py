@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo
 
-from . import api_keys
+from . import admin_users, api_keys
 from .geo import Point, distance_nm
 
 
@@ -493,6 +493,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # api_keys entirely.
     if api_keys_existing:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_user_id)")
+
+    # admin_login (main.py) resolves the break-glass row by id, not by the
+    # LOCAL_ADMIN_EMAIL constant, so a row created before that constant
+    # changed from a routable local-admin@circlejerks.live address to the
+    # RFC 2606 local-admin@invalid one would otherwise keep the old email
+    # forever. That reopens the account-rebinding hole the constant change
+    # was meant to close (find_admin_user's email fallback would let a
+    # verified Google token for the old address rebind this row and inherit
+    # super_admin). Repair any existing row on every startup; a no-op once
+    # applied. Guarded on the table existing, same pattern as the
+    # idx_api_keys_owner index above: _migrate runs standalone against
+    # legacy test fixtures that predate admin_users entirely, and an
+    # unguarded UPDATE there raises "no such table".
+    admin_users_existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(admin_users)").fetchall()
+    }
+    if admin_users_existing:
+        conn.execute(
+            "UPDATE admin_users SET email = ? WHERE id = ? AND email <> ?",
+            (admin_users.LOCAL_ADMIN_EMAIL, admin_users.LOCAL_ADMIN_ID, admin_users.LOCAL_ADMIN_EMAIL),
+        )
 
 
 def seed_db(conn: sqlite3.Connection) -> None:

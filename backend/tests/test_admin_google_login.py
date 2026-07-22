@@ -269,3 +269,26 @@ def test_a_failed_token_exchange_is_a_502(tmp_path, monkeypatch):
             f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
         )
         assert resp.status_code == 502
+
+
+def test_state_cookie_is_cleared_on_failure_paths_too(tmp_path, monkeypatch):
+    """Not just the success path: a rejected callback must also delete the
+    signed {state, verifier} cookie, or it sits live for the rest of its TTL
+    even though the comment on the success path claims it is "consumed".
+
+    HTTPException cannot carry a Set-Cookie header, so this exercises that
+    the callback's 400 path actually clears the cookie (via a Response
+    rather than a raise) while leaving the status and body untouched.
+    """
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        start(client)
+        assert google_oauth.OAUTH_STATE_COOKIE in client.cookies
+
+        resp = client.get(
+            "/admin/auth/google/callback?code=abc&state=wrong", follow_redirects=False
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "sign-in could not be completed"}
+        assert google_oauth.OAUTH_STATE_COOKIE not in client.cookies
