@@ -267,3 +267,136 @@ def test_trend_fractions_are_zero_not_none_on_empty_days():
     assert out.recent_days[0].fraction_light_aircraft == 0.0
     assert out.recent_days[0].fraction_touch_and_go == 0.0
     assert out.monthly[0].fraction_touch_and_go == 0.0
+
+
+# ─── vnap-compliance: airport-specific field names become a uniform list ─────
+#
+# The brief's four tests, verbatim.
+
+def test_axes_are_a_uniform_list_not_airport_specific_keys():
+    # `averages.runway29` made the response schema change shape per airport.
+    # No typed client can model that, and no schema can honestly describe it.
+    averages = {"tightness": 42.9, "runway29": 86.7, "composite": 51.0}
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness", "runway29"], averages, [])
+    codes = [a.code for a in out.axes]
+    assert "runway_29" in codes
+    assert all(a.scale == "0..100" for a in out.axes)
+    assert isinstance(out.axes, list)
+
+
+def test_every_axis_carries_a_human_label():
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness"], {"tightness": 42.9}, [])
+    assert out.axes[0].label
+    assert out.axes[0].label != "tightness"
+
+
+def test_composite_is_reported_separately_from_the_axes():
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness"], {"tightness": 42.9, "composite": 51.0}, [])
+    assert out.composite_score == 51.0
+    assert "composite" not in [a.code for a in out.axes]
+
+
+def test_two_airports_produce_the_same_schema():
+    a = v1_schemas.vnap_compliance_out("KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+                                       ["tightness", "runway29"],
+                                       {"tightness": 1.0, "runway29": 2.0}, [])
+    b = v1_schemas.vnap_compliance_out("KBJC", {"code": "7d", "start_ts": 1, "end_ts": 2},
+                                       ["tightness", "runway11"],
+                                       {"tightness": 3.0, "runway11": 4.0}, [])
+    assert a.model_dump().keys() == b.model_dump().keys()
+    assert a.axes[0].model_dump().keys() == b.axes[0].model_dump().keys()
+
+
+# ─── Per-aircraft rows: what does/doesn't reach the wire, and nullability ────
+
+def _vnap_aircraft_row(**kw) -> dict:
+    base = {
+        "icao24": "a26f5e", "callsign": "N256SF", "registration": "N256SF",
+        "tail": "N256SF", "aircraft_type": "C172", "owner_class": "private",
+        "owner_source": "inferred", "vnap_score": 42.0, "reports": 2,
+        "operations": 10, "touch_and_gos": 4, "cowboy_count": 1,
+        "deviation_mean_nm": 0.31, "circles": 6,
+        "scores": {"tightness": 42.9, "runway29": 86.7},
+        "metrics": {"preferred_runway": 80.0, "rwy_against": 20.0},
+    }
+    base.update(kw)
+    return base
+
+
+def test_metrics_tail_and_owner_source_do_not_reach_the_wire():
+    # `metrics` (vnap.py's CSV-export real-unit map, a different key set from
+    # `scores`), `tail` (a duplicate of `registration`), and `owner_source`
+    # (internal provenance) are all deliberately dropped.
+    row = _vnap_aircraft_row()
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness", "runway29"], {"tightness": 42.9, "runway29": 86.7}, [row])
+    dumped = out.aircraft[0].model_dump()
+    assert "metrics" not in dumped
+    assert "tail" not in dumped
+    assert "owner_source" not in dumped
+
+
+def test_cowboy_count_is_renamed_and_never_null():
+    # vnap.py's cowboy_counts.get(icao24, 0) always defaults to 0 -- never
+    # None -- so the renamed field must stay non-nullable.
+    row = _vnap_aircraft_row(cowboy_count=3)
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness"], {"tightness": 42.9}, [row])
+    assert out.aircraft[0].runway_changes_initiated == 3
+    assert not hasattr(out.aircraft[0], "cowboy_count")
+
+
+def test_callsign_and_owner_class_are_never_null():
+    # vnap.py always supplies a fallback (`icao24.upper()` / the literal
+    # string "unknown"), so both are non-Optional -- the controller brief's
+    # `str | None` for both was wrong.
+    row = _vnap_aircraft_row(callsign="A26F5E", owner_class="unknown")
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness"], {"tightness": 42.9}, [row])
+    assert out.aircraft[0].callsign == "A26F5E"
+    assert out.aircraft[0].owner_class == "unknown"
+
+
+def test_vnap_score_is_never_null_by_contract():
+    # vnap.py's composite_score always has at least `timeofday` to average
+    # (timeofday_score only returns None when the aircraft has zero rows,
+    # which never happens for a row that exists at all) -- non-nullable,
+    # unlike the controller brief's `float | None`.
+    row = _vnap_aircraft_row(vnap_score=0.0)
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness"], {"tightness": 42.9}, [row])
+    assert out.aircraft[0].vnap_score == 0.0
+
+
+def test_vnap_score_null_is_rejected_not_silently_accepted():
+    from pydantic import ValidationError
+
+    row = _vnap_aircraft_row(vnap_score=None)
+    with pytest.raises(ValidationError):
+        v1_schemas.vnap_compliance_out(
+            "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+            ["tightness"], {"tightness": 42.9}, [row])
+
+
+def test_deviation_mean_nm_and_axis_scores_can_be_null():
+    # vnap.py: `deviation_mean_nm` is None when the aircraft flew no scored
+    # circles; per-axis scores are None whenever their inputs are absent
+    # (e.g. no wind data for the runway axis). Both must round-trip as null,
+    # not 500 the response.
+    row = _vnap_aircraft_row(deviation_mean_nm=None, scores={"tightness": None, "runway29": None})
+    out = v1_schemas.vnap_compliance_out(
+        "KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2},
+        ["tightness", "runway29"], {"tightness": None, "runway29": None}, [row])
+    assert out.aircraft[0].deviation_mean_nm is None
+    assert out.aircraft[0].axes[0].score is None
+    assert out.composite_score is None

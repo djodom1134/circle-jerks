@@ -780,23 +780,28 @@ async def airport_operations_trends(
     )
 
 
-@router.get("/airports/{icao}/vnap-compliance", summary="Per-aircraft VNAP compliance")
+@router.get(
+    "/airports/{icao}/vnap-compliance", summary="Per-aircraft VNAP compliance",
+    response_model=v1_schemas.VnapComplianceOut,
+)
 async def airport_vnap_compliance(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
     window: str = "7d",
-) -> dict:
+) -> v1_schemas.VnapComplianceOut:
     now = int(time.time())
     start_ts, end_ts, _bucket = _window(window, now)
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         compliance = vnap.compute_aircraft_compliance(conn, normalized, start_ts, end_ts)
-    return {
-        "airport_icao": normalized,
-        "window": {"code": window, "start_ts": start_ts, "end_ts": end_ts},
-        **compliance,
-    }
+    return v1_schemas.vnap_compliance_out(
+        normalized,
+        {"code": window, "start_ts": start_ts, "end_ts": end_ts},
+        compliance["axes"],
+        compliance["averages"],
+        compliance["aircraft"],
+    )
 
 
 @router.get(

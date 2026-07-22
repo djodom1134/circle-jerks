@@ -468,3 +468,156 @@ def trends_out(airport_icao: str, timezone: str, data_since: int | None,
         ],
         time_of_day=[HourBucket(**h) for h in time_of_day],
     )
+
+
+# ─── VNAP compliance: airport-specific field names become a uniform list ─────
+#
+# vnap.py's AXES ends with `runway29` — a KLMO-specific runway number used as
+# a dict key (vnap.py:10). That made the response schema change shape per
+# airport (a KBJC key would be `runway11`): no typed client can model that,
+# and no OpenAPI schema can honestly describe it. `axes` below is the same
+# shape — a list of {code, label, score, scale} — at every airport; only the
+# codes and how many of them there are vary.
+
+AXIS_LABELS = {
+    "tightness": "Pattern tightness",
+    "altitude": "Pattern altitude",
+    "timeofday": "Time of day",
+    "tg_volume": "Touch-and-go volume",
+    "circle_restraint": "Circle restraint",
+    "left_traffic": "Left traffic adherence",
+    "preferred_runway": "Preferred runway use",
+}
+
+
+def _axis_label(code: str) -> str:
+    """Runway axes are named per airport (`runway29` at KLMO). Label them
+    generically so the schema does not encode one airport's layout."""
+    if code in AXIS_LABELS:
+        return AXIS_LABELS[code]
+    if code.startswith("runway"):
+        return f"Runway {code.removeprefix('runway')} preference"
+    return code.replace("_", " ").capitalize()
+
+
+def _axis_code(code: str) -> str:
+    """Normalize `runway29` to `runway_29` so codes read consistently."""
+    if code.startswith("runway") and not code.startswith("runway_"):
+        return "runway_" + code.removeprefix("runway")
+    return code
+
+
+class AxisScore(BaseModel):
+    code: str
+    label: str
+    # vnap.py's per-axis scorers (altitude_score, timeofday_score,
+    # runway_pref_score, ...) each return None when their inputs are absent
+    # for the aircraft/window (no pass-over-user ops -> altitude is None; no
+    # wind data -> the runway axis is None; vnap.py:336 for the airport-level
+    # average). Both the per-airport average and a given aircraft's own axis
+    # score are genuinely nullable.
+    score: float | None
+    scale: str
+
+
+class VnapAircraftOut(BaseModel):
+    icao24: str
+    registration: str | None
+    # vnap.py: `callsign = next((r["callsign"] for r in reversed(ac_rows) if
+    # r["callsign"]), icao24.upper())` — always falls back to the aircraft's
+    # own uppercased icao24, never None. Non-nullable, unlike the controller
+    # brief's `str | None`.
+    callsign: str
+    aircraft_type: str | None
+    # vnap.py: `owner_class = override if override else inferred`, where
+    # `inferred` itself defaults to the literal string "unknown" (never
+    # None) via `next((...), "unknown")`. Non-nullable, unlike the
+    # controller brief's `str | None` — the same correction Task 5 already
+    # made for Offender.owner_class.
+    owner_class: str
+    operations: int
+    circles: int
+    touch_and_gos: int
+    reports: int
+    # Was `cowboy_count`. vnap.py's query for this field (unlike db.py's
+    # airport-level `cowboys` list and services.py's `is_cowboy`, both of
+    # which filter `wind_favored_new = 0`) counts EVERY runway_changes row
+    # this aircraft initiated in the window, wind-favored or not — so it is
+    # not a count of flagged/violating operations, and "flagged" would
+    # overstate it. Renamed to describe what it actually counts. Always an
+    # int (`cowboy_counts.get(icao24, 0)` defaults to 0), never None.
+    runway_changes_initiated: int
+    deviation_mean_nm: float | None
+    # vnap.py: `vnap_score = composite_score(scores, rules)`, then
+    # overridden to 0.0 when the aircraft hasn't cleared the scoring gate.
+    # composite_score returns None only when every axis score in `scores` is
+    # None — but `scores["timeofday"]` is always populated here
+    # (timeofday_score only returns None when `total` is 0, and an aircraft
+    # is only in this list because it has >=1 row), so composite_score's
+    # `vals` list is never empty for a real row. Non-nullable, unlike the
+    # controller brief's `float | None`.
+    vnap_score: float
+    axes: list[AxisScore]
+
+
+class VnapWindow(BaseModel):
+    code: str
+    start_ts: int
+    end_ts: int
+
+
+class VnapComplianceOut(BaseModel):
+    airport_icao: str
+    window: VnapWindow
+    # vnap.py's `_averages`: `comps = [a["vnap_score"] for a in aircraft if
+    # a["vnap_score"] is not None]`; `vnap_score` itself is never None (see
+    # VnapAircraftOut above), but `aircraft` can be an EMPTY list — no
+    # aircraft matched the window at all, a real case for a quiet window or
+    # a freshly seeded airport — which makes `comps` empty and `composite`
+    # None. Nullable for that reason.
+    composite_score: float | None
+    axes: list[AxisScore]
+    aircraft: list[VnapAircraftOut]
+
+
+def _axes(codes, scores: dict) -> list[AxisScore]:
+    return [
+        AxisScore(code=_axis_code(c), label=_axis_label(c),
+                  score=scores.get(c), scale=AXIS_SCORE_SCALE)
+        for c in codes
+    ]
+
+
+def vnap_compliance_out(airport_icao: str, window: dict, axis_codes,
+                        averages: dict, aircraft_rows) -> VnapComplianceOut:
+    return VnapComplianceOut(
+        airport_icao=airport_icao,
+        window=VnapWindow(**window),
+        composite_score=averages.get("composite"),
+        axes=_axes(axis_codes, averages),
+        aircraft=[
+            VnapAircraftOut(
+                icao24=r["icao24"],
+                # These rows carry BOTH `registration` and `tail` — the same
+                # value under two names (vnap.py: `"tail": registration or
+                # callsign`). Take `registration`; `tail` is dropped.
+                registration=r["registration"],
+                callsign=r["callsign"],
+                aircraft_type=r["aircraft_type"],
+                owner_class=r["owner_class"],
+                operations=r["operations"],
+                circles=r["circles"],
+                touch_and_gos=r["touch_and_gos"],
+                reports=r["reports"],
+                runway_changes_initiated=r["cowboy_count"],
+                deviation_mean_nm=r["deviation_mean_nm"],
+                vnap_score=r["vnap_score"],
+                # `owner_source` (internal provenance) and `metrics` (a
+                # second opaque map, keyed differently from `scores` and
+                # documented in vnap.py as existing "for the CSV export") are
+                # both read from `r` nowhere below — dropped, not forwarded.
+                axes=_axes(axis_codes, r.get("scores") or {}),
+            )
+            for r in aircraft_rows
+        ],
+    )

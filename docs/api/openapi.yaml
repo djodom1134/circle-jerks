@@ -459,7 +459,11 @@ paths:
       summary: Per-aircraft VNAP compliance
       description: |
         Voluntary Noise Abatement Procedure compliance scored per aircraft over the
-        window. Requires `aggregates:read`.
+        window, 0..100 on every axis and on `vnap_score`/`composite_score` (see
+        /v1/meta's constants.axis_score_scale and constants.vnap_score_scale).
+        Axis codes vary by airport — a preferred-runway axis is coded `runway_29`
+        at KLMO — but the shape around each axis, and around this whole response,
+        never does: see VnapCompliance. Requires `aggregates:read`.
       operationId: getVnapCompliance
       parameters:
         - $ref: "#/components/parameters/IcaoPath"
@@ -469,13 +473,7 @@ paths:
           description: Compliance scoring for the window.
           content:
             application/json:
-              schema:
-                type: object
-                required: [airport_icao, window]
-                properties:
-                  airport_icao: { type: string }
-                  window: { $ref: "#/components/schemas/Window" }
-                additionalProperties: true
+              schema: { $ref: "#/components/schemas/VnapCompliance" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -924,6 +922,94 @@ components:
         last_reported_at_ts:
           type: [integer, "null"]
           description: Unix seconds of the most recent public report against this aircraft, or null if it has never been reported.
+
+    AxisScore:
+      type: object
+      description: |
+        One VNAP axis. The set of codes varies by airport — KLMO's
+        preferred-runway axis is coded `runway_29`, KBJC's would be
+        `runway_11` — but this object's own shape never does: every axis in
+        every /v1 response is {code, label, score, scale}.
+      required: [code, label, scale]
+      properties:
+        code: { type: string, description: "Stable per-axis identifier." }
+        label: { type: string, description: "Human-readable name for the axis." }
+        score:
+          type: [number, "null"]
+          description: |
+            0..100. See /v1/meta's constants.axis_score_scale. Null when the
+            axis's inputs are absent for this row (e.g. no wind data for a
+            runway-preference axis, or too few laps to score tightness).
+        scale: { type: string, example: "0..100" }
+
+    VnapAircraft:
+      type: object
+      required:
+        - icao24
+        - callsign
+        - owner_class
+        - operations
+        - circles
+        - touch_and_gos
+        - reports
+        - runway_changes_initiated
+        - vnap_score
+        - axes
+      properties:
+        icao24: { type: string, description: "24-bit ICAO address, lowercase hex." }
+        registration: { type: [string, "null"], description: "Tail number, when resolvable." }
+        callsign: { type: string }
+        aircraft_type: { type: [string, "null"], description: "Airframe model from the registry, when known." }
+        owner_class: { type: string, description: "e.g. flight_school, private, commercial, unknown." }
+        operations: { type: integer }
+        circles: { type: integer }
+        touch_and_gos: { type: integer }
+        reports: { type: integer, description: "Lifetime public report count for this aircraft." }
+        runway_changes_initiated:
+          type: integer
+          description: |
+            Count of runway changes in the window that this aircraft
+            triggered, wind-favored or not. Was `cowboy_count` — not a count
+            of violations, and distinct from the `operations` table.
+        deviation_mean_nm:
+          type: [number, "null"]
+          description: |
+            Mean lateral deviation from the published pattern, averaged over
+            this aircraft's scored circles. Null when it flew none.
+        vnap_score:
+          type: number
+          description: 0..100. See /v1/meta's constants.vnap_score_scale.
+        axes:
+          type: array
+          description: This aircraft's own score per axis.
+          items: { $ref: "#/components/schemas/AxisScore" }
+
+    VnapCompliance:
+      type: object
+      description: |
+        Per-aircraft VNAP compliance for the window. `axes` (airport-wide
+        averages) and each aircraft's own `axes` are the SAME shape at every
+        airport — a list of {code, label, score, scale} — even though the
+        codes, and how many of them there are, vary by airport. Was an
+        inline object whose properties literally changed name per airport
+        (`averages.runway29` at KLMO, `averages.runway11` at KBJC); no
+        schema could describe that honestly.
+      required: [airport_icao, window, axes, aircraft]
+      properties:
+        airport_icao: { type: string }
+        window: { $ref: "#/components/schemas/Window" }
+        composite_score:
+          type: [number, "null"]
+          description: |
+            0..100, the mean of every scored aircraft's vnap_score. Null
+            when no aircraft were scored in the window.
+        axes:
+          type: array
+          description: Airport-wide average score per axis.
+          items: { $ref: "#/components/schemas/AxisScore" }
+        aircraft:
+          type: array
+          items: { $ref: "#/components/schemas/VnapAircraft" }
 
     OperationsTrends:
       type: object

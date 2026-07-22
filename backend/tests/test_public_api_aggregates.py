@@ -414,3 +414,41 @@ def test_flow_reflects_the_requested_airports_flow_and_changes(tmp_path, monkeyp
     assert klmo["active"]["active_runway_id"] == "11"
     assert [c["to_runway_id"] for c in kbjc["recent_changes"]] == ["12L"]
     assert [c["to_runway_id"] for c in klmo["recent_changes"]] == ["11"]
+
+
+def test_vnap_compliance_axes_are_airport_independent_on_the_wire(tmp_path, monkeypatch):
+    """End-to-end version of the v1_schemas unit tests: a real KLMO aircraft
+    scored through the actual route must publish `runway29` as `runway_29`
+    (KLMO's preferred-runway axis code, per vnap.py's AXES), never leak
+    `metrics`/`tail`/`owner_source`, and rename `cowboy_count` to
+    `runway_changes_initiated` -- proving the wiring, not just the builder."""
+    db_path = configure(tmp_path, monkeypatch)
+    now = int(time.time())
+    _seed_scored_aircraft(db_path, "KLMO", "aaaaaa", now)
+    key = mint(db_path, scopes=["aggregates:read"])
+
+    with TestClient(app) as client:
+        resp = client.get("/v1/airports/KLMO/vnap-compliance", headers=auth(key))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["airport_icao"] == "KLMO"
+
+    top_codes = [a["code"] for a in body["axes"]]
+    assert "runway_29" in top_codes
+    assert "runway29" not in top_codes
+
+    assert len(body["aircraft"]) == 1
+    ac = body["aircraft"][0]
+    assert ac["icao24"] == "aaaaaa"
+    ac_codes = [a["code"] for a in ac["axes"]]
+    assert "runway_29" in ac_codes
+    assert "runway29" not in ac_codes
+    assert "runway_changes_initiated" in ac
+    # The three fields dropped at the model layer, by key -- not a substring
+    # scan of the whole body, which could false-positive on an unrelated
+    # field name.
+    assert "metrics" not in ac
+    assert "tail" not in ac
+    assert "owner_source" not in ac
+    assert "cowboy_count" not in ac
