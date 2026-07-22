@@ -1,8 +1,14 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Signs the admin session cookie and the OAuth state cookie (see main.py's
+# hmac.new(settings.app_secret...) call sites). This literal is public --
+# it ships in this open-source repo -- so a production deploy that forgets
+# to override it is fully cookie-forgeable by anyone who reads the source.
+DEFAULT_APP_SECRET = "local-development-secret"
 
 
 class Settings(BaseSettings):
@@ -16,7 +22,7 @@ class Settings(BaseSettings):
     app_name: str = "Circle Jerks: Automated Noise Complaint Generator"
     environment: Literal["local", "test", "production"] = "local"
     public_base_url: str = "http://localhost:5173"
-    app_secret: str = "local-development-secret"
+    app_secret: str = DEFAULT_APP_SECRET
 
     database_path: str = "data/circlejerk.sqlite3"
     redis_url: str = "memory://"
@@ -159,6 +165,22 @@ class Settings(BaseSettings):
 
     max_aircraft_per_scan: int = 500
     request_timeout_seconds: float = 10.0
+
+    @model_validator(mode="after")
+    def _require_app_secret_override_in_production(self) -> "Settings":
+        # Fail fast at startup: a production deploy with the default secret
+        # is fully cookie-forgeable (see DEFAULT_APP_SECRET comment above).
+        # Scoped to "production" only -- "local" and "test" must stay silent
+        # so local dev and the test suite are unaffected.
+        if self.environment == "production" and self.app_secret == DEFAULT_APP_SECRET:
+            raise ValueError(
+                "CIRCLEJERK_APP_SECRET must be set to a unique, non-default value "
+                "when CIRCLEJERK_ENVIRONMENT=production. The default value signs "
+                "the admin session cookie and the OAuth state cookie; leaving it "
+                "unset makes every admin session forgeable by anyone who reads "
+                "this open-source default."
+            )
+        return self
 
     def opensky_credentials(self) -> tuple[str | None, str | None]:
         if self.opensky_client_id and self.opensky_client_secret:
