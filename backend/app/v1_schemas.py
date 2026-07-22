@@ -159,8 +159,8 @@ _ALTITUDE_DATUM_BY_SOURCE = {
 class TrackSampleOut(BaseModel):
     icao24: str
     timestamp_ts: int
-    lat: float
-    lon: float
+    lat: float | None
+    lon: float | None
     altitude_ft: float | None
     altitude_datum: str
     baro_altitude_ft: float | None

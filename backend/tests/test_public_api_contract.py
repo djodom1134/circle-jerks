@@ -98,3 +98,40 @@ def test_track_timestamp_uses_the_epoch_suffix():
     out = v1_schemas.track_sample_out(track_row())
     assert out.timestamp_ts == 1784752242
     assert not hasattr(out, "timestamp")
+
+
+def test_track_sample_serializes_null_lat_lon():
+    """Regression test: lat/lon can be NULL in the database, and the model must
+    serialize them as null rather than raising ValidationError. The published
+    OpenAPI schema already documents them as nullable, so the model must match."""
+    out = v1_schemas.track_sample_out(track_row(lat=None, lon=None))
+    assert out.lat is None
+    assert out.lon is None
+    # Verify it round-trips through the model as JSON-serializable null
+    serialized = out.model_dump()
+    assert serialized["lat"] is None
+    assert serialized["lon"] is None
+
+
+@pytest.mark.parametrize("source,expected_datum", [
+    ("adsbx", "barometric"),
+    ("self_hosted", "barometric"),
+    ("adsb_lol", "barometric"),
+    ("adsb_fi", "barometric"),
+    ("airplanes_live", "barometric"),
+    ("opensky", "barometric"),
+    ("flightaware_aeroapi", "unknown"),
+])
+def test_altitude_datum_is_mapped_for_every_known_source(source, expected_datum):
+    """Each key in _ALTITUDE_DATUM_BY_SOURCE must be asserted by a specific-value
+    test. A typo in any key silently degrades that source's altitude to 'unknown',
+    a quiet loss of meaning — precisely what this project exists to prevent."""
+    out = v1_schemas.track_sample_out(track_row(altitude_ft=1200.0, source=source))
+    assert out.altitude_datum == expected_datum
+
+
+def test_altitude_datum_is_unknown_for_unmapped_source():
+    """Sources not in the map must fall through to 'unknown' rather than raising
+    or silently using a stale cached value."""
+    out = v1_schemas.track_sample_out(track_row(altitude_ft=1200.0, source="unknown_future_source"))
+    assert out.altitude_datum == "unknown"
