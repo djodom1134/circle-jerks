@@ -173,7 +173,7 @@
     },
     "schemas": {
       "AirportStats": {
-        "additionalProperties": true,
+        "description": "Field set is frozen; new database columns do not appear here.",
         "properties": {
           "airport_icao": {
             "type": "string"
@@ -220,10 +220,41 @@
           },
           "runway_usage": {
             "items": {
-              "additionalProperties": true,
+              "properties": {
+                "crosswind": {
+                  "type": "integer"
+                },
+                "downwind": {
+                  "type": "integer"
+                },
+                "no_wind_data": {
+                  "type": "integer"
+                },
+                "runway_id": {
+                  "type": "string"
+                },
+                "total": {
+                  "type": "integer"
+                },
+                "upwind": {
+                  "type": "integer"
+                }
+              },
               "type": "object"
             },
             "type": "array"
+          },
+          "stop_classification": {
+            "description": "Per-aircraft (not per-operation) stop rate: of the distinct tails\nseen, how many landed at least once. `all` counts every tail in\nthe window; `pattern` counts only tails that worked the pattern\n(circle/touch-and-go/low-approach/landing), excluding pure\noverflights.\n",
+            "properties": {
+              "all": {
+                "$ref": "#/components/schemas/StopBreakdown"
+              },
+              "pattern": {
+                "$ref": "#/components/schemas/StopBreakdown"
+              }
+            },
+            "type": "object"
           },
           "window": {
             "$ref": "#/components/schemas/Window"
@@ -557,12 +588,10 @@
         "type": "object"
       },
       "Runway": {
+        "description": "No `icao` here: it duplicates the envelope's `airport_icao` and is\ninternal-only. All four geometry fields are non-null \u2014 the underlying\n`runways` table declares them NOT NULL and every row is fully seeded.\n",
         "properties": {
           "heading_deg": {
             "type": "number"
-          },
-          "icao": {
-            "type": "string"
           },
           "lat_threshold": {
             "type": "number"
@@ -577,6 +606,40 @@
             "type": "string"
           }
         },
+        "required": [
+          "runway_id",
+          "lat_threshold",
+          "lon_threshold",
+          "heading_deg",
+          "length_ft"
+        ],
+        "type": "object"
+      },
+      "StopBreakdown": {
+        "properties": {
+          "did_not_stop": {
+            "type": "integer"
+          },
+          "fraction_stopped": {
+            "description": "Fraction of `total` that stopped (landed at least once). Was\n`stopped_pct`, a real percent (28.9) that shared a \"pct\" prefix\nwith /operations' fraction_off_pattern despite holding a\ndifferent scale. Null when `total` is 0 (no aircraft in the\nwindow) rather than a divide-by-zero artifact.\n",
+            "example": 0.289,
+            "maximum": 1,
+            "minimum": 0,
+            "nullable": true,
+            "type": "number"
+          },
+          "stopped": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "stopped",
+          "did_not_stop"
+        ],
         "type": "object"
       },
       "TrackSample": {
@@ -947,7 +1010,6 @@
                   "runways": [
                     {
                       "heading_deg": 120.0,
-                      "icao": "KBJC",
                       "lat_threshold": 39.9215,
                       "length_ft": 9000,
                       "lon_threshold": -105.1321,
@@ -998,7 +1060,7 @@
     },
     "/v1/airports/{icao}/stats": {
       "get": {
-        "description": "Counters, an operations-over-time series, stop classification, wind\nbreakdown, deviation summary, runway usage, and recent runway changes for\none airport. Requires `aggregates:read`.\n",
+        "description": "Counters, an operations-over-time series, runway usage, and per-aircraft\nstop classification for one airport and window. Requires\n`aggregates:read`.\n",
         "operationId": "getAirportStats",
         "parameters": [
           {
@@ -1039,6 +1101,20 @@
                       "upwind": 0
                     }
                   ],
+                  "stop_classification": {
+                    "all": {
+                      "did_not_stop": 2,
+                      "fraction_stopped": 0.333,
+                      "stopped": 1,
+                      "total": 3
+                    },
+                    "pattern": {
+                      "did_not_stop": 2,
+                      "fraction_stopped": 0.333,
+                      "stopped": 1,
+                      "total": 3
+                    }
+                  },
                   "window": {
                     "bucket_seconds": 86400,
                     "code": "7d",
@@ -1069,7 +1145,7 @@
             "$ref": "#/components/responses/RateLimited"
           }
         },
-        "summary": "Operation counts, buckets, and derived breakdowns",
+        "summary": "Operation counts, buckets, and stop classification",
         "tags": [
           "aggregates"
         ]

@@ -679,24 +679,26 @@ def _pattern_out(row) -> dict:
     }
 
 
-@router.get("/airports/{icao}/stats", summary="Operation counts and buckets")
+@router.get(
+    "/airports/{icao}/stats", summary="Operation counts and buckets",
+    response_model=v1_schemas.AirportStatsOut,
+)
 async def airport_stats(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
     window: str = "7d",
-) -> dict:
+) -> v1_schemas.AirportStatsOut:
     now = int(time.time())
     start_ts, end_ts, bucket = _window(window, now)
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         stats = db.airport_stats(conn, normalized, start_ts, end_ts, bucket_seconds=bucket)
-    return {
-        "airport_icao": normalized,
-        "window": {"code": window, "start_ts": start_ts, "end_ts": end_ts,
-                   "bucket_seconds": bucket},
-        **stats,
-    }
+    return v1_schemas.airport_stats_out(
+        normalized,
+        {"code": window, "start_ts": start_ts, "end_ts": end_ts, "bucket_seconds": bucket},
+        stats,
+    )
 
 
 def _suppress_foreign_fallback(conn, ctx: ApiKeyContext, requested: str,
@@ -780,16 +782,19 @@ async def airport_vnap_compliance(
     }
 
 
-@router.get("/airports/{icao}/runways", summary="Runway geometry")
+@router.get(
+    "/airports/{icao}/runways", summary="Runway geometry",
+    response_model=v1_schemas.RunwaysOut,
+)
 async def airport_runways(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.RunwaysOut:
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         runways = db.runways_for_airport(conn, normalized)
-    return {"airport_icao": normalized, "runways": runways}
+    return v1_schemas.runways_out(normalized, runways)
 
 
 @router.get("/airports/{icao}/patterns", summary="Current traffic patterns")

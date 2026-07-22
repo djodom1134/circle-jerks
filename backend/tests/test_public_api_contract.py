@@ -135,3 +135,34 @@ def test_altitude_datum_is_unknown_for_unmapped_source():
     or silently using a stale cached value."""
     out = v1_schemas.track_sample_out(track_row(altitude_ft=1200.0, source="unknown_future_source"))
     assert out.altitude_datum == "unknown"
+
+
+def test_stopped_percent_becomes_a_fraction():
+    # The headline inconsistency: this held 28.9 (a percent) while
+    # operations' pct_off_pattern held 0.42 (a fraction). Same prefix.
+    stats = {
+        "counters": {"circles": 1, "touch_and_gos": 2, "low_approaches": 3,
+                     "landings": 4, "passes": 5, "unique_aircraft": 6,
+                     "runway_changes": 7},
+        "ops_over_time": [{"bucket": 1784000000, "count": 3}],
+        "runway_usage": [],
+        "stop_classification": {
+            "all": {"total": 532, "stopped": 154, "did_not_stop": 378, "stopped_pct": 28.9},
+            "pattern": {"total": 237, "stopped": 154, "did_not_stop": 83, "stopped_pct": 65.0},
+        },
+    }
+    out = v1_schemas.airport_stats_out("KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2,
+                                                "bucket_seconds": 3600}, stats)
+    assert out.stop_classification.all.fraction_stopped == 0.289
+    assert 0.0 <= out.stop_classification.all.fraction_stopped <= 1.0
+    assert not hasattr(out.stop_classification.all, "stopped_pct")
+
+
+def test_runways_drop_the_duplicated_internal_icao():
+    rows = [{"icao": "KLMO", "runway_id": "29", "lat_threshold": 40.1,
+             "lon_threshold": -105.1, "heading_deg": 290, "length_ft": 4800}]
+    out = v1_schemas.runways_out("KLMO", rows)
+    assert out.airport_icao == "KLMO"
+    dumped = out.runways[0].model_dump()
+    assert "icao" not in dumped
+    assert dumped["runway_id"] == "29"

@@ -197,3 +197,124 @@ def track_sample_out(row) -> TrackSampleOut:
         emitter_category=row["emitter_category"],
         source=row["source"],
     )
+
+
+class StopBreakdown(BaseModel):
+    total: int
+    stopped: int
+    did_not_stop: int
+    # Was `stopped_pct`, holding 28.9 (a real percent) while /operations'
+    # fraction_off_pattern held a fraction — same "pct"/"fraction" prefix
+    # confusion this whole project exists to remove. Now a fraction.
+    #
+    # db.py's `_stop_bucket` leaves `stopped_pct` as None when `total` is 0
+    # (no aircraft at all in the window — a real, reachable case: a freshly
+    # seeded airport or a quiet window has zero unique_aircraft). Nullable
+    # here for the same reason Task 3's lat/lon had to be: a non-optional
+    # float would 500 the whole page on that airport/window combination.
+    fraction_stopped: float | None
+
+
+class StopClassification(BaseModel):
+    all: StopBreakdown
+    pattern: StopBreakdown
+
+
+class OpsBucket(BaseModel):
+    bucket: int
+    count: int
+
+
+class StatsWindow(BaseModel):
+    code: str
+    start_ts: int
+    end_ts: int
+    bucket_seconds: int
+
+
+class Counters(BaseModel):
+    circles: int
+    touch_and_gos: int
+    low_approaches: int
+    landings: int
+    passes: int
+    unique_aircraft: int
+    runway_changes: int
+
+
+class RunwayUsage(BaseModel):
+    runway_id: str
+    total: int
+    upwind: int
+    crosswind: int
+    downwind: int
+    no_wind_data: int
+
+
+class AirportStatsOut(BaseModel):
+    airport_icao: str
+    window: StatsWindow
+    counters: Counters
+    ops_over_time: list[OpsBucket]
+    runway_usage: list[RunwayUsage]
+    stop_classification: StopClassification
+
+
+def _stop_breakdown(raw: dict) -> StopBreakdown:
+    pct = raw["stopped_pct"]
+    return StopBreakdown(
+        total=raw["total"],
+        stopped=raw["stopped"],
+        did_not_stop=raw["did_not_stop"],
+        # See the None guard note on StopBreakdown.fraction_stopped above:
+        # `pct` is None exactly when `total` is 0, and None / 100.0 raises.
+        fraction_stopped=round(pct / 100.0, 4) if pct is not None else None,
+    )
+
+
+def airport_stats_out(airport_icao: str, window: dict, stats: dict) -> AirportStatsOut:
+    return AirportStatsOut(
+        airport_icao=airport_icao,
+        window=StatsWindow(**window),
+        counters=Counters(**stats["counters"]),
+        ops_over_time=[OpsBucket(**b) for b in stats["ops_over_time"]],
+        runway_usage=[RunwayUsage(**u) for u in stats.get("runway_usage", [])],
+        stop_classification=StopClassification(
+            all=_stop_breakdown(stats["stop_classification"]["all"]),
+            pattern=_stop_breakdown(stats["stop_classification"]["pattern"]),
+        ),
+    )
+
+
+class RunwayOut(BaseModel):
+    runway_id: str
+    # lat_threshold, lon_threshold, heading_deg, length_ft are all `REAL/
+    # INTEGER NOT NULL` on the `runways` table (backend/app/db.py), and the
+    # sole insert path (RUNWAY_SEED) populates every one — no optional here,
+    # unlike the brief's example. `icao` is deliberately absent: it dupes the
+    # envelope's airport_icao.
+    lat_threshold: float
+    lon_threshold: float
+    heading_deg: float
+    length_ft: int
+
+
+class RunwaysOut(BaseModel):
+    airport_icao: str
+    runways: list[RunwayOut]
+
+
+def runways_out(airport_icao: str, rows) -> RunwaysOut:
+    return RunwaysOut(
+        airport_icao=airport_icao,
+        runways=[
+            RunwayOut(
+                runway_id=r["runway_id"],
+                lat_threshold=r["lat_threshold"],
+                lon_threshold=r["lon_threshold"],
+                heading_deg=r["heading_deg"],
+                length_ft=r["length_ft"],
+            )
+            for r in rows
+        ],
+    )

@@ -357,11 +357,11 @@ paths:
   /v1/airports/{icao}/stats:
     get:
       tags: [aggregates]
-      summary: Operation counts, buckets, and derived breakdowns
+      summary: Operation counts, buckets, and stop classification
       description: |
-        Counters, an operations-over-time series, stop classification, wind
-        breakdown, deviation summary, runway usage, and recent runway changes for
-        one airport. Requires `aggregates:read`.
+        Counters, an operations-over-time series, runway usage, and per-aircraft
+        stop classification for one airport and window. Requires
+        `aggregates:read`.
       operationId: getAirportStats
       parameters:
         - $ref: "#/components/parameters/IcaoPath"
@@ -387,6 +387,9 @@ paths:
                   - { bucket: 1784592000, count: 3 }
                 runway_usage:
                   - { runway_id: "11", total: 3, upwind: 0, crosswind: 0, downwind: 0, no_wind_data: 3 }
+                stop_classification:
+                  all: { total: 3, stopped: 1, did_not_stop: 2, fraction_stopped: 0.333 }
+                  pattern: { total: 3, stopped: 1, did_not_stop: 2, fraction_stopped: 0.333 }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -509,8 +512,7 @@ paths:
               example:
                 airport_icao: KBJC
                 runways:
-                  - icao: KBJC
-                    runway_id: 12L
+                  - runway_id: 12L
                     lat_threshold: 39.9215
                     lon_threshold: -105.1321
                     heading_deg: 120.0
@@ -817,6 +819,7 @@ components:
 
     AirportStats:
       type: object
+      description: Field set is frozen; new database columns do not appear here.
       required: [airport_icao, window]
       properties:
         airport_icao: { type: string }
@@ -840,8 +843,46 @@ components:
               count: { type: integer }
         runway_usage:
           type: array
-          items: { type: object, additionalProperties: true }
-      additionalProperties: true
+          items:
+            type: object
+            properties:
+              runway_id: { type: string }
+              total: { type: integer }
+              upwind: { type: integer }
+              crosswind: { type: integer }
+              downwind: { type: integer }
+              no_wind_data: { type: integer }
+        stop_classification:
+          type: object
+          description: |
+            Per-aircraft (not per-operation) stop rate: of the distinct tails
+            seen, how many landed at least once. `all` counts every tail in
+            the window; `pattern` counts only tails that worked the pattern
+            (circle/touch-and-go/low-approach/landing), excluding pure
+            overflights.
+          properties:
+            all: { $ref: "#/components/schemas/StopBreakdown" }
+            pattern: { $ref: "#/components/schemas/StopBreakdown" }
+
+    StopBreakdown:
+      type: object
+      required: [total, stopped, did_not_stop]
+      properties:
+        total: { type: integer }
+        stopped: { type: integer }
+        did_not_stop: { type: integer }
+        fraction_stopped:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: |
+            Fraction of `total` that stopped (landed at least once). Was
+            `stopped_pct`, a real percent (28.9) that shared a "pct" prefix
+            with /operations' fraction_off_pattern despite holding a
+            different scale. Null when `total` is 0 (no aircraft in the
+            window) rather than a divide-by-zero artifact.
+          example: 0.289
 
     WorstOffenders:
       type: object
@@ -862,8 +903,12 @@ components:
 
     Runway:
       type: object
+      description: |
+        No `icao` here: it duplicates the envelope's `airport_icao` and is
+        internal-only. All four geometry fields are non-null — the underlying
+        `runways` table declares them NOT NULL and every row is fully seeded.
+      required: [runway_id, lat_threshold, lon_threshold, heading_deg, length_ft]
       properties:
-        icao: { type: string }
         runway_id: { type: string }
         lat_threshold: { type: number }
         lon_threshold: { type: number }
