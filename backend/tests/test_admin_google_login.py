@@ -26,12 +26,21 @@ def configure(tmp_path, monkeypatch, *, google=True, superusers=None):
         monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "secret")
         monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", REDIRECT)
     else:
-        monkeypatch.delenv("GOOGLE_OAUTH_CLIENT_ID", raising=False)
-        monkeypatch.delenv("GOOGLE_OAUTH_CLIENT_SECRET", raising=False)
+        # Use empty string instead of delenv: pydantic-settings reads from the
+        # .env file on disk (SettingsConfigDict(env_file=(".env", "../.env")))
+        # even when a variable is deleted from os.environ. Explicitly setting to
+        # empty string takes precedence over .env, so google_configured() sees
+        # False regardless of what the developer has locally.
+        monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "")
+        monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+        monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "")
     if superusers:
         monkeypatch.setenv("ADMIN_SUPERUSERS", superusers)
     else:
-        monkeypatch.delenv("ADMIN_SUPERUSERS", raising=False)
+        # Use empty string instead of delenv: pydantic-settings reads from the
+        # .env file on disk even when a variable is deleted from os.environ.
+        # Explicitly setting to empty string takes precedence over .env.
+        monkeypatch.setenv("ADMIN_SUPERUSERS", "")
     get_settings.cache_clear()
 
 
