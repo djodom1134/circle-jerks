@@ -45,11 +45,11 @@ class MetaOut(BaseModel):
     constants: Constants
 
 
-def meta_out(ctx: api_keys.ApiKeyContext, environment: str) -> MetaOut:
-    from .public_api import MAX_PAGE_SIZE, MAX_TRACK_SPAN_SECONDS, RATE_LIMIT_PER_MINUTE
+def meta_out(ctx: api_keys.ApiKeyContext) -> MetaOut:
+    from .public_api import API_VERSION, MAX_PAGE_SIZE, MAX_TRACK_SPAN_SECONDS, RATE_LIMIT_PER_MINUTE
 
     return MetaOut(
-        version="v1",
+        version=API_VERSION,
         name=ctx.name,
         scopes=sorted(ctx.scopes),
         airports=sorted(ctx.airports) if ctx.airports is not None else None,

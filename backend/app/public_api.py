@@ -360,11 +360,10 @@ def paged(rows: list[dict], limit: int, cursor_of) -> dict:
 @router.get("/meta", summary="Describe the calling key", response_model=v1_schemas.MetaOut)
 async def meta(
     ctx: Annotated[ApiKeyContext, Depends(resolve_key)],
-    settings: Annotated[Settings, Depends(settings_from_app)],
 ) -> v1_schemas.MetaOut:
     """Echoes this key's own scopes and airport restriction, so a 403 can be
     diagnosed without contacting us."""
-    return v1_schemas.meta_out(ctx, settings.environment)
+    return v1_schemas.meta_out(ctx)
 
 
 _OPENAPI_DOCUMENT_PATH = Path(__file__).resolve().parent / "generated" / "openapi.json"
