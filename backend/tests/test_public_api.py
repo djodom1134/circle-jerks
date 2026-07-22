@@ -16,7 +16,6 @@ from app.public_api import (
     ApiError,
     decode_cursor,
     encode_cursor,
-    normalize_prefix,
     page_limit,
     paged,
     parse_time,
@@ -469,59 +468,41 @@ def test_paged_emits_next_cursor_only_on_a_full_page():
     assert paged([], 5, lambda row: row["id"]) == {"data": [], "next_cursor": None}
 
 
-# ─── OpenAPI servers and security schemes ────────────────────────────────────
-
-@pytest.mark.parametrize("raw, expected", [
-    ("/api", "/api"),
-    ("/live", "/live"),
-    ("/api/", "/api"),
-    ("/deep/nest/", "/deep/nest"),
-    ("  /api  ", "/api"),
-    (None, None),
-    ("", None),
-    ("/", None),
-    ("api", None),
-    ("https://evil.example/api", None),
-    # Protocol-relative: rooted at "/" but an absolute URL to another host.
-    # Left through, Swagger's "Try it out" would send the key off-site.
-    ("//evil.example/api", None),
-    ("//evil.example", None),
-])
-def test_normalize_prefix(raw, expected):
-    assert normalize_prefix(raw) == expected
-
-
-# The proxies strip their prefix before FastAPI sees the request, so these go
-# through the real app with the header Caddy and Vite actually set.
-@pytest.mark.parametrize("prefix", ["/api", "/live"])
-def test_openapi_servers_follow_the_forwarded_prefix(tmp_path, monkeypatch, prefix):
-    configure(tmp_path, monkeypatch)
-    with TestClient(app) as client:
-        schema = client.get(
-            "/v1/openapi.json", headers={"X-Forwarded-Prefix": prefix},
-        ).json()
-    assert schema["servers"] == [{"url": prefix}]
-
-
-def test_openapi_omits_servers_without_a_forwarded_prefix(tmp_path, monkeypatch):
-    """Direct uvicorn access: no proxy, no header, no servers block at all."""
-    configure(tmp_path, monkeypatch)
-    with TestClient(app) as client:
-        schema = client.get("/v1/openapi.json").json()
-    assert "servers" not in schema
-
+# ─── OpenAPI: the served document is the hand-written partner contract ───────
+#
+# /v1/openapi.json used to be FastAPI's generated schema, built fresh per
+# request from `router.routes` with a servers block computed from the
+# X-Forwarded-Prefix header. That schema was thinner than the partner-facing
+# docs/api/openapi.yaml (no error envelope, and it still advertised 422 after
+# validation moved to 400), so it is now served pre-generated instead — see
+# scripts/build_openapi_json.py and backend/app/generated/openapi.json. The
+# document is static and committed, so there is no longer a per-request
+# servers/prefix computation to test; the servers block is whatever
+# docs/api/openapi.yaml declares.
 
 def test_openapi_declares_both_auth_mechanisms(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
     with TestClient(app) as client:
         schema = client.get("/v1/openapi.json").json()
     schemes = schema["components"]["securitySchemes"]
-    assert schemes["bearerAuth"] == {
-        "type": "http", "scheme": "bearer",
-        "description": "Authorization: Bearer <key>",
-    }
+    assert schemes["bearerAuth"]["type"] == "http"
+    assert schemes["bearerAuth"]["scheme"] == "bearer"
     assert schemes["apiKeyHeader"]["type"] == "apiKey"
     assert schemes["apiKeyHeader"]["in"] == "header"
     assert schemes["apiKeyHeader"]["name"] == "X-API-Key"
     assert {"bearerAuth": []} in schema["security"]
     assert {"apiKeyHeader": []} in schema["security"]
+
+
+def test_served_openapi_is_the_partner_document(tmp_path, monkeypatch):
+    # The FastAPI-generated schema this replaced was thinner: no error
+    # envelope, and it advertised 422 after validation moved to 400.
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        body = client.get("/v1/openapi.json").json()
+    assert body["info"]["title"] == "Circle Jerks Public API"
+    # The error envelope: {"error": {"code": ..., "message": ...}}.
+    assert set(body["components"]["schemas"]["Error"]["properties"]) == {"error"}
+    operations_get = body["paths"]["/v1/operations"]["get"]
+    assert "400" in operations_get["responses"]
+    assert "422" not in operations_get["responses"]

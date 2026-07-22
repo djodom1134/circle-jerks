@@ -22,6 +22,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "api" / "openapi.yaml"
 
+# So the sibling `build_openapi_json` import below resolves regardless of cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 # Import the app against a throwaway database so this never touches real data.
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.update(
@@ -75,6 +78,20 @@ def main() -> int:
     for section, name in sorted(set(re.findall(r"#/components/(\w+)/(\w+)", raw))):
         if name not in doc.get("components", {}).get(section, {}):
             problems.append(f"dangling $ref: #/components/{section}/{name}")
+
+    # The committed JSON is what the admin docs panel and /v1/openapi.json
+    # serve. If it drifts from the YAML, partners read one contract while the
+    # API advertises another.
+    from build_openapi_json import TARGETS, build  # noqa: E402
+
+    expected = build()
+    for target in TARGETS:
+        if not target.exists():
+            problems.append(f"{target} is missing; run scripts/build_openapi_json.py")
+        elif target.read_text() != expected:
+            problems.append(
+                f"{target} is stale; run scripts/build_openapi_json.py"
+            )
 
     if problems:
         print(f"{DOC.relative_to(ROOT)} is out of sync with the app:\n")

@@ -13,6 +13,8 @@ import binascii
 import json
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Annotated
 
 import httpx
@@ -23,7 +25,6 @@ from fastapi.exception_handlers import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -373,73 +374,26 @@ async def meta(ctx: Annotated[ApiKeyContext, Depends(resolve_key)]) -> dict:
     }
 
 
-_SECURITY_SCHEMES = {
-    "bearerAuth": {
-        "type": "http",
-        "scheme": "bearer",
-        "description": "Authorization: Bearer <key>",
-    },
-    "apiKeyHeader": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-API-Key",
-        "description": "The same key presented as a header instead.",
-    },
-}
+_OPENAPI_DOCUMENT_PATH = Path(__file__).resolve().parent / "generated" / "openapi.json"
 
 
-_FORWARDED_PREFIX_HEADER = "X-Forwarded-Prefix"
+@lru_cache(maxsize=1)
+def _openapi_document() -> dict:
+    """The hand-written partner contract, not FastAPI's generated schema.
 
-
-def normalize_prefix(raw: str | None) -> str | None:
-    """Normalize a forwarded prefix, or None when there isn't a usable one.
-
-    Trailing slashes are dropped so the value concatenates cleanly with the
-    "/v1/..." paths in the schema, and anything that is not rooted at "/" is
-    discarded rather than trusted.
-
-    A protocol-relative value like "//evil.example/api" is rooted at "/" but
-    is an absolute URL to another host. Left through, it would land in the
-    schema's `servers` entry and Swagger's "Try it out" would send the
-    partner's API key off-site, so it is rejected explicitly.
+    The generated schema omits the error envelope and the auth and pagination
+    rules, and it still advertised 422 after validation moved to 400. The
+    document served here is generated from docs/api/openapi.yaml by
+    scripts/build_openapi_json.py and committed at
+    backend/app/generated/openapi.json; scripts/verify_openapi_doc.py fails
+    the build if the committed copy drifts from the YAML.
     """
-    if not raw:
-        return None
-    prefix = raw.strip().rstrip("/")
-    if not prefix.startswith("/") or prefix.startswith("//"):
-        return None
-    return prefix
-
-
-def external_prefix(request: Request) -> str | None:
-    """The path prefix a proxy stripped, as that proxy declared it.
-
-    Every proxy in front of this app strips its prefix before forwarding:
-    Caddy uses `handle_path /api/*` (and `/live/*` on the ledger domain) and
-    Vite rewrites `/api` away, so `request.url.path` is always the bare
-    "/v1/..." and cannot tell us anything. The prefix therefore has to be
-    declared out of band, via X-Forwarded-Prefix, which each of those proxies
-    sets. Under direct uvicorn nobody sets it and this is None.
-    """
-    return normalize_prefix(request.headers.get(_FORWARDED_PREFIX_HEADER))
+    return json.loads(_OPENAPI_DOCUMENT_PATH.read_text())
 
 
 @router.get("/openapi.json", include_in_schema=False)
-async def public_openapi(request: Request) -> JSONResponse:
-    """A schema built from this router alone, so internal routes never leak."""
-    prefix = external_prefix(request)
-    schema = get_openapi(
-        title="Circle Jerks Public API",
-        version=API_VERSION,
-        description="Read-only access to operations, tracks, aggregates, and the ledger.",
-        routes=router.routes,
-        servers=[{"url": prefix}] if prefix else None,
-    )
-    # Partners have to be told how to authenticate; both accepted mechanisms
-    # are declared, and applied to every operation by default.
-    schema.setdefault("components", {})["securitySchemes"] = _SECURITY_SCHEMES
-    schema["security"] = [{"bearerAuth": []}, {"apiKeyHeader": []}]
-    return JSONResponse(schema)
+async def public_openapi() -> dict:
+    return _openapi_document()
 
 
 @router.get("/docs", include_in_schema=False)
