@@ -106,3 +106,23 @@ export function resolveAirportsSelection(mode: AirportMode, raw: string): Airpor
 
   return { ok: true, airports };
 }
+
+/**
+ * Render a stored grant (role / scopes / airports) as a short, unambiguous
+ * summary — e.g. "partner · ops:read, aggregates:read · KLMO, KBJC", or
+ * "partner · ops:read · all airports" when unrestricted.
+ *
+ * Exists so a decided-user row whose editable controls have been seeded from
+ * a draft (and may since have been changed) still has one place that reads
+ * back the record as it actually is, not what a pending edit says. Purely a
+ * display formatter — it derives nothing that gets sent to the server.
+ */
+export function describeGrant(role: string, scopes: string[], airports: string[] | null): string {
+  if (role !== "partner") {
+    return `${role} · all airports (role-granted)`;
+  }
+  const scopesLabel = scopes.length ? scopes.join(", ") : "no scopes";
+  const airportsLabel =
+    airports === null ? "all airports" : airports.length ? airports.join(", ") : "no airports";
+  return `${role} · ${scopesLabel} · ${airportsLabel}`;
+}

@@ -11,7 +11,7 @@ import {
   type AdminUserRecord
 } from "../lib/api";
 import { formatDateTime } from "../lib/format";
-import { resolveAirportsSelection, type AirportMode } from "../lib/adminAccess";
+import { describeGrant, resolveAirportsSelection, type AirportMode } from "../lib/adminAccess";
 
 type Draft = {
   role: string;
@@ -314,6 +314,15 @@ export default function PendingUsersPanel() {
                   <td>
                     <strong>{user.name ?? user.email}</strong>
                     <small>{user.email}</small>
+                    {/* The controls to the right are an editable draft, seeded
+                        from this record but free to diverge from it as soon as
+                        the operator touches them. This line is the only
+                        remaining read of what is actually stored — without it
+                        there is no way to tell a pending edit apart from the
+                        real grant. */}
+                    <small className="admin-grant-current">
+                      currently: {describeGrant(user.role, user.scopes, user.airports)}
+                    </small>
                   </td>
                   <td>
                     <select value={draft.role} onChange={(e) => setEditDraft(user, { role: e.target.value })}>
@@ -388,11 +397,19 @@ export default function PendingUsersPanel() {
                     {user.status === "suspended" && (
                       <button
                         disabled={busy === user.id}
-                        onClick={() =>
-                          run(user.id, () =>
-                            adminApproveUser(user.id, user.role, user.scopes, user.airports)
-                          )
-                        }
+                        onClick={() => {
+                          // Route through the same funnel as Save grant: the
+                          // operator is looking at the draft on screen, not the
+                          // stored record, so reinstating must submit what the
+                          // form shows (and bail on the same validation error
+                          // when the draft is incomplete) rather than silently
+                          // reinstating the old stored grant underneath it.
+                          const grant = resolveGrant(errorKey, draft);
+                          if (!grant) return;
+                          void run(user.id, () =>
+                            adminApproveUser(user.id, grant.role, grant.scopes, grant.airports)
+                          );
+                        }}
                       >
                         Reinstate
                       </button>

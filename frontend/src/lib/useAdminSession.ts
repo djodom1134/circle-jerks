@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, adminSession } from "./api";
 import type { AdminSession, AdminStatus } from "./adminAccess";
 
@@ -31,9 +31,15 @@ export function useAdminSession(): SessionState {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [blockedStatus, setBlockedStatus] = useState<AdminStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  // Tracks whether the very first probe has completed. Only that first probe
+  // should blank the whole shell to a loading state — a background re-probe
+  // (e.g. the dashboard's 401/403 handler retrying every 30s against a
+  // session stuck denied) must not flicker the shell back to "Loading…" on
+  // every cycle.
+  const hasLoadedOnce = useRef(false);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedOnce.current) setLoading(true);
     try {
       const body = await adminSession();
       setSession(body);
@@ -45,6 +51,7 @@ export function useAdminSession(): SessionState {
       // (401, network error, malformed detail) just means signed out.
       setBlockedStatus(blockedStatusFromError(error));
     } finally {
+      hasLoadedOnce.current = true;
       setLoading(false);
     }
   }, []);

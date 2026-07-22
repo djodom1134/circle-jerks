@@ -1649,6 +1649,11 @@ input[type="range"] {
   color: var(--muted);
 }
 
+.admin-grant-current {
+  margin-top: 6px;
+  font-style: italic;
+}
+
 .admin-edit-scopes {
   display: flex;
   flex-direction: column;

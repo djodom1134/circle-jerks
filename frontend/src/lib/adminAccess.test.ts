@@ -5,6 +5,7 @@ import {
   allowedScopes,
   canManageUsers,
   clampScopes,
+  describeGrant,
   resolveAirportsSelection,
   visibleTabs,
   type AdminSession
@@ -142,5 +143,33 @@ describe("resolveAirportsSelection", () => {
       ok: true,
       airports: ["KLMO", "KBJC"]
     });
+  });
+});
+
+describe("describeGrant", () => {
+  // This backstops the decided-users table: once the Role/Scopes/Airports
+  // cells became editable drafts, this is the only remaining read of what is
+  // actually stored, which is what makes a stray edit (or a stale
+  // Reinstate) visible before it is submitted.
+
+  it("summarizes a restricted partner grant", () => {
+    expect(describeGrant("partner", ["ops:read", "aggregates:read"], ["KLMO", "KBJC"])).toBe(
+      "partner · ops:read, aggregates:read · KLMO, KBJC"
+    );
+  });
+
+  it("summarizes an unrestricted partner grant distinctly from a restricted one", () => {
+    expect(describeGrant("partner", ["ops:read"], null)).toBe("partner · ops:read · all airports");
+  });
+
+  it("calls out a partner with no scopes or airports rather than hiding it", () => {
+    expect(describeGrant("partner", [], [])).toBe("partner · no scopes · no airports");
+  });
+
+  it("describes admin and super_admin as role-granted, ignoring stored scopes/airports", () => {
+    expect(describeGrant("admin", [], null)).toBe("admin · all airports (role-granted)");
+    expect(describeGrant("super_admin", ["ops:read"], ["KLMO"])).toBe(
+      "super_admin · all airports (role-granted)"
+    );
   });
 });

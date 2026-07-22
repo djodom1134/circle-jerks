@@ -63,6 +63,35 @@ const TAB_LABELS: Record<TabId, string> = {
   docs: "API docs"
 };
 
+/**
+ * The "you can't be here" screen — used both for an explicitly blocked
+ * status (pending/rejected/suspended, surfaced via a 403's `detail`) and as a
+ * fallback for a session that isn't blocked but also isn't approved for any
+ * tab. Defined at module scope: an inline definition would get a new
+ * identity every render and remount its subtree needlessly.
+ */
+function BlockedScreen({
+  title,
+  body,
+  onSignOut
+}: {
+  title: string;
+  body: string;
+  onSignOut: () => void;
+}) {
+  return (
+    <main className="admin-login-shell">
+      <div className="admin-login-card">
+        <h1>{title}</h1>
+        <p>{body}</p>
+        <button className="primary-action" onClick={onSignOut}>
+          <LogOut size={17} /> Sign out
+        </button>
+      </div>
+    </main>
+  );
+}
+
 export default function AdminDashboard() {
   const { session, blockedStatus, loading: sessionLoading, refresh } = useAdminSession();
   const tabs = useMemo(() => visibleTabs(session), [session]);
@@ -134,20 +163,25 @@ export default function AdminDashboard() {
             title: "Access denied",
             body: "This account does not have access to the developer area."
           };
-    return (
-      <main className="admin-login-shell">
-        <div className="admin-login-card">
-          <h1>{copy.title}</h1>
-          <p>{copy.body}</p>
-          <button className="primary-action" onClick={signOut}>
-            <LogOut size={17} /> Sign out
-          </button>
-        </div>
-      </main>
-    );
+    return <BlockedScreen title={copy.title} body={copy.body} onSignOut={signOut} />;
   }
 
   if (!session) return <AdminLogin onAuthed={refresh} />;
+
+  if (tabs.length === 0) {
+    // Today the backend returns 403 for any non-approved status, which the
+    // blockedStatus branch above already catches, making this unreachable in
+    // practice. It's a defensive fallback: without it, a session object that
+    // somehow carries a non-approved status without a matching 403 would
+    // render a topbar and an empty nav with no panel and no explanation.
+    return (
+      <BlockedScreen
+        title="Access denied"
+        body="This account does not have access to the developer area."
+        onSignOut={signOut}
+      />
+    );
+  }
 
   return (
     <main className="admin-shell">
