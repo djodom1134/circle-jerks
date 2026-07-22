@@ -48,8 +48,20 @@ export default function AdminLogin({ onAuthed }: { onAuthed: () => void }) {
               Plain <a href>, not a fetch: the browser must follow the
               redirect to Google as a top-level navigation. An XHR would be
               blocked by CORS and would not set the session cookie.
+
+              `next` carries the page a partner started from (/admin or
+              /developers) through the flow, so D6's whole point — a partner
+              who clicked in from /developers lands back on /developers, not
+              /admin — survives the round trip through Google. The backend
+              stores it in the signed state cookie and validates it against
+              a strict allowlist before ever using it as a redirect target,
+              so sending the raw pathname here is safe: anything else is
+              just ignored server-side, never trusted.
             */}
-            <a className="admin-google-button" href={`${API_BASE}/admin/auth/google/start`}>
+            <a
+              className="admin-google-button"
+              href={`${API_BASE}/admin/auth/google/start?next=${encodeURIComponent(window.location.pathname)}`}
+            >
               Continue with Google
             </a>
             {methods.password && <p className="admin-login-divider">or</p>}

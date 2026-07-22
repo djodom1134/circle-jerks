@@ -11,7 +11,18 @@ export interface SessionState {
 }
 
 function isAdminStatus(value: unknown): value is AdminStatus {
-  return value === "pending" || value === "rejected" || value === "suspended" || value === "approved";
+  // Deliberately excludes "approved": this predicate feeds
+  // `blockedStatusFromError`, which decides whether to show the "you can't
+  // be here" screen. `require_admin`/`require_super_admin` return
+  // `403 {"status": "approved", "role": ...}` for an approved user who
+  // simply lacks the role a route requires — that is not a blocked-account
+  // state, and showing that screen to an approved partner would be a wrong
+  // "access denied" for a user who very much has access. Today only
+  // GET /admin/session feeds this helper (guarded by require_user, which
+  // cannot 403 an approved user), so this case cannot fire yet — but the
+  // moment any require_admin/require_super_admin 403 routes through here,
+  // it must not be read as a blocked status.
+  return value === "pending" || value === "rejected" || value === "suspended";
 }
 
 /**

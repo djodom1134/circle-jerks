@@ -5,6 +5,7 @@ import {
   allowedScopes,
   canManageUsers,
   clampScopes,
+  defaultTabFor,
   describeGrant,
   resolveAirportsSelection,
   visibleTabs,
@@ -121,14 +122,18 @@ describe("resolveAirportsSelection", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("returns null airports only when 'all' is explicitly chosen", () => {
-    expect(resolveAirportsSelection("all", "")).toEqual({ ok: true, airports: null });
+  it("returns the explicit all-airports sentinel only when 'all' is chosen", () => {
+    // The server rejects null/omitted airports for a partner grant (see
+    // _normalize_access on the backend) — ["*"] is the only way to express
+    // "every airport" now, and it must only ever come from an explicit
+    // choice, never a default.
+    expect(resolveAirportsSelection("all", "")).toEqual({ ok: true, airports: ["*"] });
   });
 
   it("ignores any leftover restricted-box text when 'all' is chosen", () => {
     // Switching from "restricted" to "all" without clearing the text field
     // must not leak the stale text back in as a restriction.
-    expect(resolveAirportsSelection("all", "KLMO")).toEqual({ ok: true, airports: null });
+    expect(resolveAirportsSelection("all", "KLMO")).toEqual({ ok: true, airports: ["*"] });
   });
 
   it("splits on commas and whitespace alike", () => {
@@ -171,5 +176,30 @@ describe("describeGrant", () => {
     expect(describeGrant("super_admin", ["ops:read"], ["KLMO"])).toBe(
       "super_admin · all airports (role-granted)"
     );
+  });
+});
+
+describe("defaultTabFor", () => {
+  // AdminDashboard used to always initialize to "keys", which is reachable
+  // for every role, so the "keep the tab reachable" effect never corrected
+  // it — a super_admin landed on API keys with no reason to open the users
+  // tab, where the pending-requests badge (the only notification mechanism,
+  // since email is out of scope) lives.
+
+  it("lands a super_admin on the dashboard", () => {
+    expect(defaultTabFor(session({ role: "super_admin" }))).toBe("dashboard");
+  });
+
+  it("lands a plain admin on the dashboard", () => {
+    expect(defaultTabFor(session({ role: "admin" }))).toBe("dashboard");
+  });
+
+  it("lands a partner on keys", () => {
+    expect(defaultTabFor(session({ role: "partner" }))).toBe("keys");
+  });
+
+  it("falls back to keys for a signed-out or non-approved session", () => {
+    expect(defaultTabFor(null)).toBe("keys");
+    expect(defaultTabFor(session({ role: "super_admin", status: "pending" }))).toBe("keys");
   });
 });

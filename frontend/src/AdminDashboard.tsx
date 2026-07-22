@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ClipboardList,
   LogOut,
@@ -11,13 +11,14 @@ import {
 } from "lucide-react";
 import {
   adminDashboard,
+  adminListUsers,
   adminLogout,
   ApiError,
   type ActivityAircraft,
   type AdminDashboardResponse
 } from "./lib/api";
 import { formatDateTime } from "./lib/format";
-import { visibleTabs, type TabId } from "./lib/adminAccess";
+import { canManageUsers, defaultTabFor, visibleTabs, type TabId } from "./lib/adminAccess";
 import { useAdminSession } from "./lib/useAdminSession";
 import AdminLogin from "./components/AdminLogin";
 import PendingUsersPanel from "./components/PendingUsersPanel";
@@ -96,6 +97,22 @@ export default function AdminDashboard() {
   const { session, blockedStatus, loading: sessionLoading, refresh } = useAdminSession();
   const tabs = useMemo(() => visibleTabs(session), [session]);
   const [tab, setTab] = useState<TabId>("keys");
+  // Applies defaultTabFor exactly once per sign-in, not on every session
+  // refresh: a super_admin who has deliberately switched to another tab must
+  // not get yanked back to "dashboard" the next time the session is
+  // re-probed (e.g. the dashboard poll's 401/403 handler).
+  const appliedDefaultTab = useRef(false);
+
+  useEffect(() => {
+    if (session) {
+      if (!appliedDefaultTab.current) {
+        appliedDefaultTab.current = true;
+        setTab(defaultTabFor(session));
+      }
+    } else {
+      appliedDefaultTab.current = false;
+    }
+  }, [session]);
 
   useEffect(() => {
     // Keep the selected tab reachable: a partner must never be left staring
@@ -108,6 +125,36 @@ export default function AdminDashboard() {
   const [dashboard, setDashboard] = useState<AdminDashboardResponse | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardStatus, setDashboardStatus] = useState("");
+
+  // The pending-requests badge is the entire notification mechanism for new
+  // access requests (email notification is deliberately out of scope, per
+  // the design doc). It has to be visible on the tab label itself, not only
+  // inside the panel, or a super_admin who lands on "dashboard" by default
+  // has no reason to ever discover it.
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!canManageUsers(session)) {
+      setPendingCount(null);
+      return;
+    }
+    let cancelled = false;
+    async function loadPendingCount() {
+      try {
+        const body = await adminListUsers("pending");
+        if (!cancelled) setPendingCount(body.users.length);
+      } catch {
+        // Silent: the users tab itself surfaces a load failure when opened;
+        // this badge is a convenience, not the source of truth.
+      }
+    }
+    void loadPendingCount();
+    const id = window.setInterval(() => void loadPendingCount(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [session]);
 
   const recentSubmissions = dashboard?.recent_submissions ?? [];
   const summary = useMemo(() => dashboard?.summary, [dashboard]);
@@ -209,6 +256,7 @@ export default function AdminDashboard() {
         {tabs.map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
             {TAB_LABELS[t]}
+            {t === "users" && !!pendingCount && <span className="admin-badge">{pendingCount}</span>}
           </button>
         ))}
       </nav>

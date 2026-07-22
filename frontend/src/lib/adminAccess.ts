@@ -37,6 +37,25 @@ export function canManageUsers(session: AdminSession | null): boolean {
   return approved(session) && session.role === "super_admin";
 }
 
+/**
+ * The tab a session should land on right after sign-in.
+ *
+ * `AdminDashboard` used to always initialize to "keys", which happened to be
+ * in `visibleTabs` for every role, so the "keep the selected tab reachable"
+ * effect never fired to correct it. A super_admin or admin landed on API
+ * keys — and the pending-requests badge lives inside the users tab, which
+ * they now had no reason to open. With email notification out of scope, that
+ * badge is the entire notification mechanism for new access requests, so the
+ * wrong landing tab made it effectively invisible. A partner has no
+ * "dashboard" tab at all, so they still land on keys.
+ */
+export function defaultTabFor(session: AdminSession | null): TabId {
+  if (approved(session) && (session.role === "super_admin" || session.role === "admin")) {
+    return "dashboard";
+  }
+  return "keys";
+}
+
 export function allowedScopes(session: AdminSession | null): string[] {
   if (!approved(session)) return [];
   return isAdmin(session) ? [...API_KEY_SCOPES] : session.scopes;
@@ -64,28 +83,37 @@ export function clampScopes(selected: string[], session: AdminSession | null): s
 
 export type AirportMode = "restricted" | "all";
 
+/** Sent for a partner grant's "all airports" choice. The server maps this
+ *  exact single-element list to a stored NULL (unrestricted) grant — see
+ *  `_normalize_access` on the backend. It never accepts `null`/omitted or
+ *  `[]` for a partner grant, precisely because those used to be silently
+ *  read as "every airport" one layer down. */
+export const ALL_AIRPORTS_SENTINEL = "*";
+
 export type AirportsSelectionResult =
-  | { ok: true; airports: string[] | null }
+  | { ok: true; airports: string[] }
   | { ok: false; error: string };
 
 /**
  * Turn the two-way "restrict to specific airports" / "all airports
  * (unrestricted)" choice into the `airports` value the API expects.
  *
- * The backend maps an empty or absent airport list to `granted_airports =
- * NULL`, and NULL means unrestricted — every airport at the site. That makes
- * a blank text box the most dangerous default imaginable: leave it empty and
- * you have (silently) granted everything. This function exists so "all
- * airports" can only ever come from the caller explicitly picking `"all"`,
- * never from an empty or whitespace-only restricted box, which is rejected
- * as a validation error instead.
+ * The server requires a partner grant to state `airports` explicitly: a list
+ * of ICAO codes, or the single-element sentinel `["*"]` for every airport.
+ * `null`/omitted and `[]` are both rejected with a 400, because
+ * `api_keys.serialize_airports` would otherwise read either one as "every
+ * airport" — the most dangerous possible default for a text box left blank.
+ * This function exists so that hazard can never reach the wire from here:
+ * "all airports" only ever comes from the caller explicitly picking `"all"`,
+ * which is sent as `["*"]`, never from an empty or whitespace-only
+ * restricted box, which is rejected as a validation error instead.
  */
 export function resolveAirportsSelection(mode: AirportMode, raw: string): AirportsSelectionResult {
   if (mode === "all") {
     // Deliberate: whatever is left over in the restricted text box is
     // discarded here. A stale value from a prior mode must never leak back
     // in as a restriction once "all airports" has been chosen on purpose.
-    return { ok: true, airports: null };
+    return { ok: true, airports: [ALL_AIRPORTS_SENTINEL] };
   }
 
   const seen = new Set<string>();

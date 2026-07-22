@@ -102,6 +102,16 @@ export default function PendingUsersPanel() {
   // requests", which a super-admin can read as truth and leave someone waiting.
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  // Reject is terminal (the spec calls it that on purpose) and has no undo
+  // from the UI. `confirmingReject === user.id` means Reject was just clicked
+  // once for that row and is armed to fire on a second click; any other
+  // interaction with that row clears it back to null rather than leaving a
+  // stale "Confirm reject?" armed for a later, unrelated click.
+  const [confirmingReject, setConfirmingReject] = useState<string | null>(null);
+
+  function clearRejectConfirm(id: string) {
+    setConfirmingReject((prev) => (prev === id ? null : prev));
+  }
 
   async function load() {
     try {
@@ -122,6 +132,7 @@ export default function PendingUsersPanel() {
   }
 
   function setPendingDraft(id: string, patch: Partial<Draft>) {
+    clearRejectConfirm(id);
     setPendingDrafts((prev) => ({ ...prev, [id]: { ...(prev[id] ?? EMPTY_DRAFT), ...patch } }));
   }
 
@@ -189,6 +200,7 @@ export default function PendingUsersPanel() {
     id: string,
     action: () => Promise<{ user: AdminUserRecord; revoked_keys?: number }>
   ) {
+    clearRejectConfirm(id);
     setBusy(id);
     setStatus("");
     try {
@@ -267,6 +279,7 @@ export default function PendingUsersPanel() {
               <button
                 disabled={busy === user.id}
                 onClick={() => {
+                  clearRejectConfirm(user.id);
                   const grant = resolveGrant(user.id, draft);
                   if (!grant) return;
                   void run(user.id, () =>
@@ -279,9 +292,21 @@ export default function PendingUsersPanel() {
               <button
                 className="admin-danger"
                 disabled={busy === user.id}
-                onClick={() => run(user.id, () => adminRejectUser(user.id))}
+                onClick={() => {
+                  // Reject is terminal and has no undo from this UI, so a
+                  // misclick must not fire it immediately: the first click
+                  // only arms confirmation; a second, deliberate click on the
+                  // same button is what actually calls the API. window.confirm
+                  // is deliberately avoided — it blocks the page with a
+                  // browser-native modal.
+                  if (confirmingReject === user.id) {
+                    void run(user.id, () => adminRejectUser(user.id));
+                  } else {
+                    setConfirmingReject(user.id);
+                  }
+                }}
               >
-                <UserX size={14} /> Reject
+                <UserX size={14} /> {confirmingReject === user.id ? "Confirm reject?" : "Reject"}
               </button>
             </div>
           </div>
