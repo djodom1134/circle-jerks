@@ -582,6 +582,15 @@
       "TrackSample": {
         "description": "One raw position sample. Field set is frozen.",
         "properties": {
+          "altitude_datum": {
+            "description": "The datum `altitude_ft` is measured against. Varies by `source`;\n`unknown` when no altitude is present or the source does not say.\n",
+            "enum": [
+              "barometric",
+              "geometric",
+              "unknown"
+            ],
+            "type": "string"
+          },
           "altitude_ft": {
             "type": [
               "number",
@@ -640,7 +649,7 @@
               "null"
             ]
           },
-          "timestamp": {
+          "timestamp_ts": {
             "description": "Unix seconds.",
             "type": "integer"
           },
@@ -653,7 +662,7 @@
         },
         "required": [
           "icao24",
-          "timestamp"
+          "timestamp_ts"
         ],
         "type": "object"
       },
@@ -1480,7 +1489,7 @@
     },
     "/v1/tracks": {
       "get": {
-        "description": "Per-aircraft position samples as recorded, without smoothing or\ninterpolation. This is the heaviest endpoint in the API.\n\nRequires the `tracks:read` scope. Both `since` and `until` are required, and\nthe span may not exceed 31 days \u2014 page through longer ranges with the\ncursor. Supply at least one of `icao24` or `airport`.\n\n**If your key is restricted to specific airports you must pass `airport`.**\nAn `icao24`-only request from a restricted key returns `403\nforbidden_airport`. Combine `airport` and `icao24` to follow one aircraft\nwithin one field.\n\nSelecting by `airport` uses a bounding box around the field, so aircraft\noperating at a nearby airport inside that radius can appear.\n\nOrdered by `(timestamp, icao24)` ascending; the cursor encodes that pair.\n",
+        "description": "Per-aircraft position samples as recorded, without smoothing or\ninterpolation. This is the heaviest endpoint in the API.\n\nRequires the `tracks:read` scope. Both `since` and `until` are required, and\nthe span may not exceed 31 days \u2014 page through longer ranges with the\ncursor. Supply at least one of `icao24` or `airport`.\n\n**If your key is restricted to specific airports you must pass `airport`.**\nAn `icao24`-only request from a restricted key returns `403\nforbidden_airport`. Combine `airport` and `icao24` to follow one aircraft\nwithin one field.\n\nSelecting by `airport` uses a bounding box around the field, so aircraft\noperating at a nearby airport inside that radius can appear.\n\nOrdered by `(timestamp_ts, icao24)` ascending; the cursor encodes that pair.\n",
         "operationId": "listTracks",
         "parameters": [
           {
@@ -1546,6 +1555,7 @@
                 "example": {
                   "data": [
                     {
+                      "altitude_datum": "barometric",
                       "altitude_ft": 6500.0,
                       "baro_altitude_ft": 6480.0,
                       "callsign": "N333RX",
@@ -1556,7 +1566,7 @@
                       "lat": 39.9088,
                       "lon": -105.1172,
                       "source": "adsb_lol",
-                      "timestamp": 1784664115,
+                      "timestamp_ts": 1784664115,
                       "vertical_rate_fpm": -64.0
                     }
                   ],

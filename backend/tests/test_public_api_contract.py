@@ -61,3 +61,40 @@ def test_deviation_fields_are_absent_when_not_computed():
     ))
     assert out.fraction_off_pattern is None
     assert out.time_off_pattern_s is None
+
+
+def track_row(**kw) -> dict:
+    base = {
+        "icao24": "ad076f", "timestamp": 1784752242, "lat": 40.038288,
+        "lon": -105.233185, "altitude_ft": None, "baro_altitude_ft": 0.0,
+        "geo_altitude_ft": 5225.0, "heading_deg": 0.0,
+        "vertical_rate_fpm": 0.0, "callsign": "N939DM",
+        "emitter_category": "A1", "source": "adsbx",
+    }
+    base.update(kw)
+    return base
+
+
+def test_altitude_carries_its_datum():
+    # altitude_ft is populated from a different path than the ADS-B baro/geo
+    # fields, so its datum varies by source. A number whose datum cannot be
+    # stated is exactly what this whole change exists to eliminate.
+    out = v1_schemas.track_sample_out(track_row(altitude_ft=1200.0, source="flightaware"))
+    assert out.altitude_ft == 1200.0
+    assert out.altitude_datum in {"barometric", "geometric", "unknown"}
+
+
+def test_adsb_sourced_altitude_is_reported_barometric():
+    out = v1_schemas.track_sample_out(track_row(altitude_ft=900.0, source="adsbx"))
+    assert out.altitude_datum == "barometric"
+
+
+def test_datum_is_unknown_when_there_is_no_altitude():
+    out = v1_schemas.track_sample_out(track_row(altitude_ft=None))
+    assert out.altitude_datum == "unknown"
+
+
+def test_track_timestamp_uses_the_epoch_suffix():
+    out = v1_schemas.track_sample_out(track_row())
+    assert out.timestamp_ts == 1784752242
+    assert not hasattr(out, "timestamp")

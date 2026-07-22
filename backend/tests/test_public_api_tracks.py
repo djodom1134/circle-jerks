@@ -91,9 +91,10 @@ def test_tracks_returns_samples_for_an_aircraft(tmp_path, monkeypatch):
         assert resp.status_code == 200
         row = resp.json()["data"][0]
         assert set(row) == {
-            "icao24", "timestamp", "lat", "lon", "altitude_ft",
-            "baro_altitude_ft", "geo_altitude_ft", "heading_deg",
-            "vertical_rate_fpm", "callsign", "emitter_category", "source",
+            "icao24", "timestamp_ts", "lat", "lon", "altitude_ft",
+            "altitude_datum", "baro_altitude_ft", "geo_altitude_ft",
+            "heading_deg", "vertical_rate_fpm", "callsign",
+            "emitter_category", "source",
         }
         assert row["icao24"] == "a1b2c3"
 
@@ -112,7 +113,7 @@ def test_tracks_paginate_without_gaps(tmp_path, monkeypatch):
                 params={**params, **({"cursor": cursor} if cursor else {})},
                 headers=auth(key),
             ).json()
-            seen.extend(item["timestamp"] for item in page["data"])
+            seen.extend(item["timestamp_ts"] for item in page["data"])
             cursor = page["next_cursor"]
             if not cursor:
                 break

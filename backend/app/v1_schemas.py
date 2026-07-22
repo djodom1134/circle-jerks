@@ -124,3 +124,76 @@ def operation_out(row) -> OperationOut:
         operator=row["operator"],
         flight_school=row["flight_school"],
     )
+
+
+# Which datum each live source's `altitude_ft` carries. live_sources.py maps
+# ADS-B alt_baro/alt_geom into the explicit baro_/geo_ fields for these six —
+# verified against CIRCLEJERK_LIVE_SOURCE_PRIORITY in .env.example
+# (adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky) and the
+# `known_sources` set in live_sources.py, so these are the exact strings that
+# land in a row's `source` column, not approximations.
+#
+# altitude_ft itself is populated by other paths whose datum is not knowable
+# from the source name alone:
+#   - flightaware.py's AeroAPI positions carry `source="flightaware_aeroapi"`
+#     (NOT the bare "flightaware" string — that spelling only ever appears in
+#     an unrelated backfill-job status dict, never in a track sample's own
+#     `source` column, so it would never actually match a real row).
+#   - adsblol_historical.py's trace parser carries
+#     `source="adsblol_historical"` and fills altitude_ft from whichever of
+#     baro/geo is present per point, so even the source name can't say which
+#     datum a given row used.
+# Both are left out of the map on purpose: the `.get(..., "unknown")` default
+# already reports them honestly rather than guessing.
+_ALTITUDE_DATUM_BY_SOURCE = {
+    "adsbx": "barometric",
+    "self_hosted": "barometric",
+    "adsb_lol": "barometric",
+    "adsb_fi": "barometric",
+    "airplanes_live": "barometric",
+    "opensky": "barometric",
+    "flightaware_aeroapi": "unknown",
+}
+
+
+class TrackSampleOut(BaseModel):
+    icao24: str
+    timestamp_ts: int
+    lat: float
+    lon: float
+    altitude_ft: float | None
+    altitude_datum: str
+    baro_altitude_ft: float | None
+    geo_altitude_ft: float | None
+    heading_deg: float | None
+    vertical_rate_fpm: float | None
+    callsign: str | None
+    emitter_category: str | None
+    source: str | None
+
+
+class TrackPage(BaseModel):
+    data: list[TrackSampleOut]
+    next_cursor: str | None
+
+
+def track_sample_out(row) -> TrackSampleOut:
+    altitude = row["altitude_ft"]
+    datum = "unknown"
+    if altitude is not None:
+        datum = _ALTITUDE_DATUM_BY_SOURCE.get(row["source"], "unknown")
+    return TrackSampleOut(
+        icao24=row["icao24"],
+        timestamp_ts=row["timestamp"],
+        lat=row["lat"],
+        lon=row["lon"],
+        altitude_ft=altitude,
+        altitude_datum=datum,
+        baro_altitude_ft=row["baro_altitude_ft"],
+        geo_altitude_ft=row["geo_altitude_ft"],
+        heading_deg=row["heading_deg"],
+        vertical_rate_fpm=row["vertical_rate_fpm"],
+        callsign=row["callsign"],
+        emitter_category=row["emitter_category"],
+        source=row["source"],
+    )

@@ -349,8 +349,15 @@ def decode_cursor(raw: str) -> tuple[int, str]:
         raise ApiError(400, "invalid_request", "cursor is not valid") from exc
 
 
-def paged(rows: list[dict], limit: int, cursor_of) -> dict:
-    """Wrap a page of rows, emitting next_cursor only when the page was full."""
+def paged(rows: list, limit: int, cursor_of) -> dict:
+    """Wrap a page of rows, emitting next_cursor only when the page was full.
+
+    `rows` is whatever the caller is about to publish as `data` — a list of
+    dicts or of Pydantic models, either works. `cursor_of` is supplied by the
+    caller and reads the cursor fields off one element of `rows`; it decides
+    how (dict subscript, attribute access, ...), so this stays agnostic to
+    the row shape.
+    """
     next_cursor = cursor_of(rows[-1]) if len(rows) == limit and rows else None
     return {"data": rows, "next_cursor": next_cursor}
 
@@ -544,29 +551,19 @@ async def list_operations(
         v1_schemas.operation_out({**dict(row), "airport_icao": row["icao"]})
         for row in rows
     ]
-    next_cursor = (
-        encode_cursor(rows[-1]["timestamp"], rows[-1]["id"])
-        if len(rows) == size and rows
-        else None
+    return v1_schemas.OperationPage(
+        **paged(data, size, lambda item: encode_cursor(item.timestamp_ts, item.id))
     )
-    return v1_schemas.OperationPage(data=data, next_cursor=next_cursor)
 
 
 # Matches the scan ring used by the historical track-density view.
 TRACK_RING_NM = 8.0
 
-_TRACK_FIELDS = (
-    "icao24", "timestamp", "lat", "lon", "altitude_ft", "baro_altitude_ft",
-    "geo_altitude_ft", "heading_deg", "vertical_rate_fpm", "callsign",
-    "emitter_category", "source",
+
+@router.get(
+    "/tracks", summary="Raw ADS-B position samples",
+    response_model=v1_schemas.TrackPage,
 )
-
-
-def track_row(row) -> dict:
-    return {field: row[field] for field in _TRACK_FIELDS}
-
-
-@router.get("/tracks", summary="Raw ADS-B position samples")
 async def list_tracks(
     ctx: Annotated[ApiKeyContext, Depends(require_scope("tracks:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
@@ -576,7 +573,7 @@ async def list_tracks(
     airport: str | None = None,
     cursor: str | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
-) -> dict:
+) -> v1_schemas.TrackPage:
     if not icao24 and not airport:
         raise ApiError(400, "invalid_request", "one of icao24 or airport is required")
     # A key restricted to specific airports must not be able to reach raw
@@ -629,10 +626,9 @@ async def list_tracks(
             limit=size,
         )
 
-    return paged(
-        [track_row(row) for row in rows],
-        size,
-        lambda row: encode_cursor(row["timestamp"], row["icao24"]),
+    data = [v1_schemas.track_sample_out(row) for row in rows]
+    return v1_schemas.TrackPage(
+        **paged(data, size, lambda item: encode_cursor(item.timestamp_ts, item.icao24))
     )
 
 

@@ -289,7 +289,7 @@ paths:
         Selecting by `airport` uses a bounding box around the field, so aircraft
         operating at a nearby airport inside that radius can appear.
 
-        Ordered by `(timestamp, icao24)` ascending; the cursor encodes that pair.
+        Ordered by `(timestamp_ts, icao24)` ascending; the cursor encodes that pair.
       operationId: listTracks
       parameters:
         - name: since
@@ -335,10 +335,11 @@ paths:
               example:
                 data:
                   - icao24: a1b2c3
-                    timestamp: 1784664115
+                    timestamp_ts: 1784664115
                     lat: 39.9088
                     lon: -105.1172
                     altitude_ft: 6500.0
+                    altitude_datum: barometric
                     baro_altitude_ft: 6480.0
                     geo_altitude_ft: 6520.0
                     heading_deg: 110.0
@@ -784,13 +785,19 @@ components:
     TrackSample:
       type: object
       description: One raw position sample. Field set is frozen.
-      required: [icao24, timestamp]
+      required: [icao24, timestamp_ts]
       properties:
         icao24: { type: string }
-        timestamp: { type: integer, description: Unix seconds. }
+        timestamp_ts: { type: integer, description: Unix seconds. }
         lat: { type: [number, "null"] }
         lon: { type: [number, "null"] }
         altitude_ft: { type: [number, "null"] }
+        altitude_datum:
+          type: string
+          enum: [barometric, geometric, unknown]
+          description: |
+            The datum `altitude_ft` is measured against. Varies by `source`;
+            `unknown` when no altitude is present or the source does not say.
         baro_altitude_ft: { type: [number, "null"] }
         geo_altitude_ft: { type: [number, "null"] }
         heading_deg: { type: [number, "null"] }
