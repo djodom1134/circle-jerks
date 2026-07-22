@@ -41,6 +41,47 @@ def test_only_a_super_admin_reaches_the_user_list(tmp_path, monkeypatch):
         assert client.get("/admin/users").status_code == 200
 
 
+def become(client, role, status="approved"):
+    """Rewrite the local-admin row's role/status in place.
+
+    The session cookie names a row (local-admin), not a role, so this is how
+    the same authenticated session can be re-tested as a plain admin or a
+    partner without a second login flow.
+    """
+    with db_session(get_settings().database_path) as conn:
+        db.set_admin_user_access(
+            conn, "local-admin", role=role, status=status,
+            granted_scopes=None, granted_airports=None, decided_by=None, now=1,
+        )
+
+
+def assert_all_five_routes_are_forbidden(client):
+    approve_payload = {"role": "partner", "scopes": [], "airports": None}
+    assert client.get("/admin/users").status_code == 403
+    assert client.post("/admin/users/u2/approve", json=approve_payload).status_code == 403
+    assert client.post("/admin/users/u2/reject").status_code == 403
+    assert client.post("/admin/users/u2/suspend").status_code == 403
+    assert client.patch("/admin/users/u2", json=approve_payload).status_code == 403
+
+
+def test_only_a_super_admin_may_use_the_five_user_management_routes(tmp_path, monkeypatch):
+    # Every other test in this file drives these routes as local-admin, a
+    # super_admin. That leaves the actual regression that matters here — a
+    # route dropped from require_super_admin to require_admin, letting a
+    # plain admin promote themselves to super_admin — invisible to the
+    # suite. Re-test the same session after rewriting its role in place.
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+
+        become(client, "admin")
+        assert_all_five_routes_are_forbidden(client)
+
+        become(client, "partner")
+        assert_all_five_routes_are_forbidden(client)
+
+
 def test_pending_users_are_listed(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -64,6 +105,49 @@ def test_approving_records_role_and_grant(tmp_path, monkeypatch):
         assert user["status"] == "approved"
         assert user["scopes"] == ["ops:read"]
         assert user["airports"] == ["KLMO"]
+
+
+def test_reapproving_an_approved_partner_with_a_narrowed_grant_revokes_keys(tmp_path, monkeypatch):
+    # approve has no status precondition: calling it again on an
+    # already-approved partner is a grant edit, and must cascade exactly
+    # like PATCH does.
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner(status="approved")
+        client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read", "ledger:read"], "airports": ["KLMO"],
+        })
+        make_key("u2", "aaaaaaaaaaaaaaaa", scopes="ops:read", airports="KLMO")
+        make_key("u2", "bbbbbbbbbbbbbbbb", scopes="ledger:read", airports="KLMO")
+
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": ["KLMO"],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["revoked_keys"] == 1
+        with db_session(get_settings().database_path) as conn:
+            assert db.get_api_key(conn, "aaaaaaaaaaaaaaaa")["revoked_at"] is None
+            assert db.get_api_key(conn, "bbbbbbbbbbbbbbbb")["revoked_at"] is not None
+
+
+def test_reapproving_an_approved_partner_with_a_widened_grant_revokes_nothing(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner(status="approved")
+        client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": ["KLMO"],
+        })
+        make_key("u2", "aaaaaaaaaaaaaaaa", scopes="ops:read", airports="KLMO")
+
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read", "ledger:read"], "airports": ["KLMO"],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["revoked_keys"] == 0
+        with db_session(get_settings().database_path) as conn:
+            assert db.get_api_key(conn, "aaaaaaaaaaaaaaaa")["revoked_at"] is None
 
 
 def test_approving_as_admin_stores_an_unrestricted_grant(tmp_path, monkeypatch):
@@ -206,6 +290,29 @@ def test_one_super_admin_may_demote_another(tmp_path, monkeypatch):
         assert resp.json()["user"]["role"] == "partner"
         # local-admin, the actor, is untouched and still in control.
         assert client.get("/admin/session").json()["role"] == "super_admin"
+
+
+def test_unknown_role_is_rejected(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "root", "scopes": [], "airports": None,
+        })
+        assert resp.status_code == 400
+        with db_session(get_settings().database_path) as conn:
+            # The row must be untouched: a rejected write must not leak a
+            # partial change into the database.
+            assert db.get_admin_user(conn, "u2")["role"] == "partner"
+            assert db.get_admin_user(conn, "u2")["status"] == "pending"
+
+
+def test_unknown_status_filter_is_rejected(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        assert client.get("/admin/users?status=bogus").status_code == 400
 
 
 def test_unknown_user_is_404(tmp_path, monkeypatch):

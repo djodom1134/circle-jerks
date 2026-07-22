@@ -1167,16 +1167,23 @@ def _normalize_access(payload: UserAccessRequest) -> tuple[str, str | None, str 
     return payload.role, scopes, api_keys.serialize_airports(payload.airports)
 
 
-def _load_target(conn, user_id: str, actor: admin_users.AdminUser, settings: Settings):
+def _load_target(conn, user_id: str, actor: admin_users.AdminUser, settings: Settings) -> dict:
     row = db.get_admin_user(conn, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="user not found")
     target = admin_users.from_row(row)
+    # This SELECT runs in autocommit; the write transaction doesn't open
+    # until the caller's first UPDATE, so there is a TOCTOU window between
+    # this guard check and the write. It is harmless here: the guard's
+    # inputs are the path user_id, the actor's own id, and env-derived
+    # ADMIN_SUPERUSERS, and none of these routes can mutate any of those
+    # between the read and the write within one request. Do not "fix" this
+    # by restructuring the transaction to close the window.
     try:
         admin_users.guard_modification(actor, target, superuser_emails(settings))
     except admin_users.GuardViolation as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return row, target
+    return row
 
 
 @app.get("/admin/users")
@@ -1199,15 +1206,26 @@ async def admin_approve_user(
     actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
+    """Approve (or re-approve) a user's role and grant.
+
+    Re-approving an already-approved user is a grant edit like PATCH, not a
+    fresh admission, so it must cascade the same way: narrowing revokes the
+    keys that now exceed the grant, in the same transaction; widening revokes
+    nothing.
+    """
     role, scopes, airports = _normalize_access(payload)
+    now = int(time.time())
     with db_session(settings.database_path) as conn:
         _load_target(conn, user_id, actor, settings)
         db.set_admin_user_access(
             conn, user_id, role=role, status="approved", granted_scopes=scopes,
-            granted_airports=airports, decided_by=actor.id, now=int(time.time()),
+            granted_airports=airports, decided_by=actor.id, now=now,
         )
-        row = db.get_admin_user(conn, user_id)
-    return {"user": _user_record(row)}
+        updated = db.get_admin_user(conn, user_id)
+        revoked = db.revoke_keys_outside_grant(
+            conn, user_id, admin_users.from_row(updated).grant, now
+        )
+    return {"user": _user_record(updated), "revoked_keys": revoked}
 
 
 @app.post("/admin/users/{user_id}/reject")
@@ -1218,7 +1236,7 @@ async def admin_reject_user(
 ):
     now = int(time.time())
     with db_session(settings.database_path) as conn:
-        row, _target = _load_target(conn, user_id, actor, settings)
+        row = _load_target(conn, user_id, actor, settings)
         db.set_admin_user_access(
             conn, user_id, role=row["role"], status="rejected", granted_scopes=None,
             granted_airports=None, decided_by=actor.id, now=now,
@@ -1241,7 +1259,7 @@ async def admin_suspend_user(
     """
     now = int(time.time())
     with db_session(settings.database_path) as conn:
-        row, _target = _load_target(conn, user_id, actor, settings)
+        row = _load_target(conn, user_id, actor, settings)
         db.set_admin_user_access(
             conn, user_id, role=row["role"], status="suspended",
             granted_scopes=row["granted_scopes"], granted_airports=row["granted_airports"],
@@ -1267,7 +1285,7 @@ async def admin_update_user(
     role, scopes, airports = _normalize_access(payload)
     now = int(time.time())
     with db_session(settings.database_path) as conn:
-        row, _target = _load_target(conn, user_id, actor, settings)
+        row = _load_target(conn, user_id, actor, settings)
         db.set_admin_user_access(
             conn, user_id, role=role, status=row["status"], granted_scopes=scopes,
             granted_airports=airports, decided_by=actor.id, now=now,
