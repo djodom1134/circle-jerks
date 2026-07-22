@@ -29,6 +29,15 @@ class IdTokenError(ValueError):
     """The ID token is malformed or fails a claim check."""
 
 
+class EmailNotVerified(IdTokenError):
+    """The Google account's email is not verified.
+
+    Split out from IdTokenError so the callback can give this one case its
+    own status code (403) without sniffing the exception message — every
+    other claim failure stays a generic 400.
+    """
+
+
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -80,11 +89,17 @@ def validate_claims(claims: dict, client_id: str, now: int) -> None:
         raise IdTokenError("id_token was not issued for this client")
     if claims.get("iss") not in _ISSUERS:
         raise IdTokenError("unexpected issuer")
-    if int(claims.get("exp", 0)) <= now:
+    try:
+        exp = int(claims.get("exp", 0))
+    except (TypeError, ValueError) as exc:
+        # A non-numeric or list-valued exp is still a malformed token, not a
+        # Python exception the caller needs to know how to catch.
+        raise IdTokenError("id_token has an invalid exp claim") from exc
+    if exp <= now:
         raise IdTokenError("id_token has expired")
     if not claims.get("sub"):
         raise IdTokenError("id_token has no subject")
     if not claims.get("email"):
         raise IdTokenError("id_token has no email")
     if claims.get("email_verified") is not True:
-        raise IdTokenError("a verified Google account is required")
+        raise EmailNotVerified("a verified Google account is required")

@@ -110,6 +110,17 @@ def test_a_forged_cookie_is_rejected(tmp_path, monkeypatch):
         assert client.get("/admin/session").status_code == 401
 
 
+def test_a_non_ascii_session_cookie_is_rejected_not_a_500(tmp_path, monkeypatch):
+    # A hand-crafted or corrupted cookie can carry bytes outside ASCII.
+    # decode_admin_token's str.encode("ascii") / compare_digest must fail
+    # closed (401) rather than escape as an uncaught 500.
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        raw_cookie = "circlejerk_admin=caf\xe9.deadbeef".encode("latin-1")
+        resp = client.get("/admin/session", headers=[(b"cookie", raw_cookie)])
+        assert resp.status_code == 401
+
+
 def test_a_cookie_naming_a_deleted_user_is_rejected(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
     with TestClient(app) as client:

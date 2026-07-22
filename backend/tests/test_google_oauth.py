@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from app.google_oauth import (
+    EmailNotVerified,
     IdTokenError,
     build_authorize_url,
     decode_id_token,
@@ -102,9 +103,30 @@ def test_unverified_email_is_rejected():
     assert "verified" in str(exc.value)
 
 
+def test_unverified_email_raises_the_typed_subclass():
+    # main.py branches on this type (not the message text) to pick 403 vs
+    # 400. EmailNotVerified must actually be raised, not just something
+    # that happens to mention "verified".
+    with pytest.raises(EmailNotVerified):
+        validate_claims(claims(email_verified=False), CLIENT_ID, now=1000)
+
+
 def test_missing_email_or_sub_is_rejected():
     for missing in ("email", "sub"):
         broken = claims()
         broken.pop(missing)
         with pytest.raises(IdTokenError):
             validate_claims(broken, CLIENT_ID, now=1000)
+
+
+def test_a_non_numeric_exp_raises_idtokenerror_not_a_bare_valueerror():
+    # int(claims["exp"]) on a non-numeric value raises ValueError/TypeError
+    # directly. The callback only catches IdTokenError, so this must be
+    # wrapped rather than escaping as a 500.
+    with pytest.raises(IdTokenError):
+        validate_claims(claims(exp="not-a-number"), CLIENT_ID, now=1000)
+
+
+def test_a_list_valued_exp_raises_idtokenerror():
+    with pytest.raises(IdTokenError):
+        validate_claims(claims(exp=[1, 2, 3]), CLIENT_ID, now=1000)

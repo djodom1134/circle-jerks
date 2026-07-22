@@ -307,10 +307,15 @@ def sign_admin_token(settings: Settings, user_id: str) -> str:
 def decode_admin_token(settings: Settings, token: str) -> dict | None:
     try:
         body, signature = token.split(".", 1)
-    except ValueError:
-        return None
-    expected = hmac.new(settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).hexdigest()
-    if not secrets.compare_digest(signature, expected):
+        expected = hmac.new(
+            settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        if not secrets.compare_digest(signature, expected):
+            return None
+    except (ValueError, UnicodeEncodeError, TypeError):
+        # A non-ASCII session cookie (a stale/corrupted value, or a probe)
+        # makes str.encode("ascii") or compare_digest raise instead of just
+        # failing the check. Treat that the same as any other bad cookie.
         return None
     try:
         payload = json.loads(_b64decode(body))
@@ -854,14 +859,20 @@ async def admin_auth_methods(settings: Annotated[Settings, Depends(settings_dep)
 
 @app.get("/admin/auth/google/start")
 async def admin_google_start(
-    response: Response,
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
     if not google_configured(settings):
         raise HTTPException(status_code=503, detail="google sign-in is not configured")
     state = secrets.token_urlsafe(24)
     verifier, challenge = google_oauth.make_pkce()
-    payload = json.dumps({"state": state, "verifier": verifier}, separators=(",", ":"))
+    payload = json.dumps(
+        {
+            "state": state,
+            "verifier": verifier,
+            "exp": int(time.time()) + google_oauth.STATE_TTL_SECONDS,
+        },
+        separators=(",", ":"),
+    )
     body = _b64encode(payload.encode("utf-8"))
     signature = hmac.new(
         settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
@@ -890,17 +901,25 @@ def _read_state_cookie(settings: Settings, raw: str | None) -> dict | None:
         return None
     try:
         body, signature = raw.split(".", 1)
-    except ValueError:
-        return None
-    expected = hmac.new(
-        settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
-    ).hexdigest()
-    if not secrets.compare_digest(signature, expected):
+        expected = hmac.new(
+            settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        if not secrets.compare_digest(signature, expected):
+            return None
+    except (ValueError, UnicodeEncodeError, TypeError):
+        # A non-ASCII body (a hand-crafted cookie) makes str.encode("ascii")
+        # or compare_digest raise instead of just failing the check. Treat
+        # that the same as any other malformed cookie: no match.
         return None
     try:
-        return json.loads(_b64decode(body))
+        payload = json.loads(_b64decode(body))
     except (ValueError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    return payload
 
 
 @app.get("/admin/auth/google/callback")
@@ -914,7 +933,16 @@ async def admin_google_callback(
         raise HTTPException(status_code=503, detail="google sign-in is not configured")
 
     stored = _read_state_cookie(settings, request.cookies.get(google_oauth.OAUTH_STATE_COOKIE))
-    if not stored or not state or not secrets.compare_digest(stored.get("state", ""), state):
+    try:
+        state_ok = bool(stored) and bool(state) and secrets.compare_digest(
+            stored.get("state", ""), state
+        )
+    except TypeError:
+        # compare_digest raises on a non-ASCII `state` query parameter
+        # instead of just returning False. Treat that the same as any other
+        # mismatch: fail closed, not with a 500.
+        state_ok = False
+    if not state_ok:
         # One message for every failure mode here: which check failed is not
         # information a caller needs.
         raise HTTPException(status_code=400, detail="sign-in could not be completed")
@@ -930,9 +958,19 @@ async def admin_google_callback(
     try:
         claims = google_oauth.decode_id_token(tokens.get("id_token", ""))
         google_oauth.validate_claims(claims, settings.google_oauth_client_id, int(time.time()))
+    except google_oauth.EmailNotVerified as exc:
+        logger.warning("google id_token rejected: %s", exc)
+        raise HTTPException(
+            status_code=403, detail="a verified Google account is required"
+        ) from exc
     except google_oauth.IdTokenError as exc:
-        status = 403 if "verified" in str(exc) else 400
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
+        # The specific reason (bad aud/iss/exp, missing sub/email, ...) is
+        # logged, never surfaced: an unauthenticated caller learning which
+        # claim check failed is a fingerprinting/probing primitive.
+        logger.warning("google id_token rejected: %s", exc)
+        raise HTTPException(
+            status_code=400, detail="sign-in could not be completed"
+        ) from exc
 
     now = int(time.time())
     with db_session(settings.database_path) as conn:

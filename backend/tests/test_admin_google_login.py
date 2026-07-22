@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 from urllib.parse import parse_qs, urlparse
 
-import pytest
-
 from fastapi.testclient import TestClient
 
-from app import db
+from app import db, google_oauth
 from app.main import app, db_session
 from app.settings import get_settings
 
@@ -68,6 +68,24 @@ def start(client: TestClient) -> str:
     resp = client.get("/admin/auth/google/start", follow_redirects=False)
     assert resp.status_code == 307
     return parse_qs(urlparse(resp.headers["location"]).query)["state"][0]
+
+
+def sign_state_cookie(state: str, verifier: str, exp: int) -> str:
+    """Mint a state cookie value by hand, mirroring admin_google_start.
+
+    Lets tests hand the callback a payload with an arbitrary embedded `exp`
+    without going through /admin/auth/google/start and waiting on the clock.
+    """
+    settings = get_settings()
+    body = base64.urlsafe_b64encode(
+        json.dumps(
+            {"state": state, "verifier": verifier, "exp": exp}, separators=(",", ":")
+        ).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    return f"{body}.{signature}"
 
 
 def test_methods_reports_what_is_configured(tmp_path, monkeypatch):
@@ -161,6 +179,10 @@ def test_an_unverified_email_is_refused(tmp_path, monkeypatch):
             f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
         )
         assert resp.status_code == 403
+        # This one message is intentionally specific per the design doc's
+        # error table; it is not the leaked-internal-reason the 400 path
+        # guards against below.
+        assert resp.json() == {"detail": "a verified Google account is required"}
 
 
 def test_a_token_for_another_client_is_refused(tmp_path, monkeypatch):
@@ -170,6 +192,53 @@ def test_a_token_for_another_client_is_refused(tmp_path, monkeypatch):
         state = start(client)
         resp = client.get(
             f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert resp.status_code == 400
+        # The regression this guards against: an unauthenticated caller
+        # must not learn *which* claim check failed.
+        assert resp.json() == {"detail": "sign-in could not be completed"}
+        assert "issued for this client" not in resp.text
+        assert "aud" not in resp.text.lower()
+
+
+def test_an_expired_google_token_is_refused_generically(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch, token=id_token(exp=1))
+    with TestClient(app) as client:
+        state = start(client)
+        resp = client.get(
+            f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "sign-in could not be completed"}
+        assert "expired" not in resp.text
+
+
+def test_a_non_ascii_state_query_param_is_rejected_not_a_500(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        # A real, valid state cookie is on the client, but the state query
+        # param is non-ASCII, which secrets.compare_digest cannot even
+        # compare. Must fail closed with 400, not crash with 500.
+        start(client)
+        resp = client.get(
+            "/admin/auth/google/callback?code=abc&state=%C3%A9", follow_redirects=False
+        )
+        assert resp.status_code == 400
+
+
+def test_an_expired_state_cookie_is_rejected(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        cookie_value = sign_state_cookie(
+            state="state-1", verifier="verifier-1", exp=1
+        )
+        resp = client.get(
+            "/admin/auth/google/callback?code=abc&state=state-1",
+            headers={"cookie": f"{google_oauth.OAUTH_STATE_COOKIE}={cookie_value}"},
+            follow_redirects=False,
         )
         assert resp.status_code == 400
 

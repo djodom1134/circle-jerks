@@ -47,7 +47,7 @@ screen is misconfigured, or Google is unreachable, the operator can still get in
 without a redeploy.
 
 **Mechanically, the password login upserts a real row** (`id = "local-admin"`,
-`email = "local-admin@circlejerks.live"`, `role = super_admin`, `status = approved`)
+`email = "local-admin@invalid"`, `role = super_admin`, `status = approved`)
 rather than minting a synthetic identity. Every downstream consumer — key ownership,
 `created_by`, `decided_by`, the audit trail — then has exactly one identity model with
 no special case to thread through.

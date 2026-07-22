@@ -18,7 +18,11 @@ STATUSES: tuple[str, ...] = ("pending", "approved", "rejected", "suspended")
 _UNRESTRICTED_ROLES = frozenset({"super_admin", "admin"})
 
 LOCAL_ADMIN_ID = "local-admin"
-LOCAL_ADMIN_EMAIL = "local-admin@circlejerks.live"
+# .invalid is an RFC 2606 reserved TLD: no registry will ever delegate it, so
+# Google can never issue a verified id_token for this address. That is what
+# keeps a Google-authenticated caller from ever rebinding the break-glass
+# super_admin row — do not "fix" this back to a real-looking domain.
+LOCAL_ADMIN_EMAIL = "local-admin@invalid"
 
 
 class GuardViolation(ValueError):

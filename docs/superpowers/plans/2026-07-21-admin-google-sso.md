@@ -330,7 +330,7 @@ STATUSES: tuple[str, ...] = ("pending", "approved", "rejected", "suspended")
 _UNRESTRICTED_ROLES = frozenset({"super_admin", "admin"})
 
 LOCAL_ADMIN_ID = "local-admin"
-LOCAL_ADMIN_EMAIL = "local-admin@circlejerks.live"
+LOCAL_ADMIN_EMAIL = "local-admin@invalid"
 
 
 class GuardViolation(ValueError):
@@ -1231,7 +1231,7 @@ In `backend/tests/test_admin_api_keys.py`, `created_by` is now the acting user's
 
 ```python
 -        assert body["record"]["created_by"] == "admin"
-+        assert body["record"]["created_by"] == "local-admin@circlejerks.live"
++        assert body["record"]["created_by"] == "local-admin@invalid"
 ```
 
 - [ ] **Step 7: Run tests**
