@@ -14,6 +14,15 @@ services:
       CIRCLEJERK_ADMIN_USERNAME: ${CIRCLEJERK_ADMIN_USERNAME:-admin}
       CIRCLEJERK_ADMIN_PASSWORD: ${CIRCLEJERK_ADMIN_PASSWORD:-}
       CIRCLEJERK_ADMIN_PASSWORD_HASH: ${CIRCLEJERK_ADMIN_PASSWORD_HASH:-}
+      # Admin Google SSO. This file enumerates every variable explicitly, so a
+      # var present in .env but missing HERE never reaches the container - and
+      # the failure is silent: /admin/auth/methods reports google:false and the
+      # login screen renders with no Google button, which reads as a frontend
+      # bug. Adding a field to settings.py is not enough; list it here too.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
+      ADMIN_SUPERUSERS: ${ADMIN_SUPERUSERS:-}
       CIRCLEJERK_BUY_ME_COFFEE_URL: ${CIRCLEJERK_BUY_ME_COFFEE_URL:-https://buymeacoffee.com/djodom}
       CIRCLEJERK_LIVE_SOURCE_PRIORITY: ${CIRCLEJERK_LIVE_SOURCE_PRIORITY:-adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky}
       CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS: ${CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS:-10}
