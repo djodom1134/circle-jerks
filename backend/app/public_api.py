@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import api_keys, db, vnap
+from . import api_keys, db, v1_schemas, vnap
 from .api_keys import ApiKeyContext
 from .db import db_session
 from .geo import bbox_for_radius
@@ -357,21 +357,14 @@ def paged(rows: list[dict], limit: int, cursor_of) -> dict:
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
-@router.get("/meta", summary="Describe the calling key")
-async def meta(ctx: Annotated[ApiKeyContext, Depends(resolve_key)]) -> dict:
+@router.get("/meta", summary="Describe the calling key", response_model=v1_schemas.MetaOut)
+async def meta(
+    ctx: Annotated[ApiKeyContext, Depends(resolve_key)],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+) -> v1_schemas.MetaOut:
     """Echoes this key's own scopes and airport restriction, so a 403 can be
     diagnosed without contacting us."""
-    return {
-        "version": API_VERSION,
-        "name": ctx.name,
-        "scopes": sorted(ctx.scopes),
-        "airports": sorted(ctx.airports) if ctx.airports is not None else None,
-        "limits": {
-            "requests_per_minute": RATE_LIMIT_PER_MINUTE,
-            "max_page_size": MAX_PAGE_SIZE,
-            "max_track_span_seconds": MAX_TRACK_SPAN_SECONDS,
-        },
-    }
+    return v1_schemas.meta_out(ctx, settings.environment)
 
 
 _OPENAPI_DOCUMENT_PATH = Path(__file__).resolve().parent / "generated" / "openapi.json"

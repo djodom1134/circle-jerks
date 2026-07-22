@@ -281,6 +281,32 @@
               "null"
             ]
           },
+          "constants": {
+            "description": "Values a consumer needs in order to interpret other responses.\nPublished once here rather than repeated on every row.\n",
+            "properties": {
+              "axis_score_scale": {
+                "description": "Range of every per-axis `score`.",
+                "example": "0..100",
+                "type": "string"
+              },
+              "pattern_corridor_nm": {
+                "description": "Perpendicular distance from the published pattern beyond which an\naircraft counts as \"off pattern\". `fraction_off_pattern` on\n/v1/operations is measured against this.\n",
+                "example": 0.25,
+                "type": "number"
+              },
+              "vnap_score_scale": {
+                "description": "Range of every `vnap_score`.",
+                "example": "0..100",
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern_corridor_nm",
+              "vnap_score_scale",
+              "axis_score_scale"
+            ],
+            "type": "object"
+          },
           "limits": {
             "properties": {
               "max_page_size": {
@@ -321,7 +347,8 @@
           "name",
           "scopes",
           "airports",
-          "limits"
+          "limits",
+          "constants"
         ],
         "type": "object"
       },

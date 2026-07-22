@@ -692,7 +692,7 @@ components:
 
     Meta:
       type: object
-      required: [version, name, scopes, airports, limits]
+      required: [version, name, scopes, airports, limits, constants]
       properties:
         version: { type: string, example: v1 }
         name:
@@ -711,6 +711,28 @@ components:
             requests_per_minute: { type: integer }
             max_page_size: { type: integer }
             max_track_span_seconds: { type: integer }
+        constants:
+          type: object
+          description: |
+            Values a consumer needs in order to interpret other responses.
+            Published once here rather than repeated on every row.
+          required: [pattern_corridor_nm, vnap_score_scale, axis_score_scale]
+          properties:
+            pattern_corridor_nm:
+              type: number
+              description: |
+                Perpendicular distance from the published pattern beyond which an
+                aircraft counts as "off pattern". `fraction_off_pattern` on
+                /v1/operations is measured against this.
+              example: 0.25
+            vnap_score_scale:
+              type: string
+              description: Range of every `vnap_score`.
+              example: "0..100"
+            axis_score_scale:
+              type: string
+              description: Range of every per-axis `score`.
+              example: "0..100"
 
     Operation:
       type: object
