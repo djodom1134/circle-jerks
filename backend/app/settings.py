@@ -1,8 +1,14 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Signs the admin session cookie and the OAuth state cookie (see main.py's
+# hmac.new(settings.app_secret...) call sites). This literal is public --
+# it ships in this open-source repo -- so a production deploy that forgets
+# to override it is fully cookie-forgeable by anyone who reads the source.
+DEFAULT_APP_SECRET = "local-development-secret"
 
 
 class Settings(BaseSettings):
@@ -16,7 +22,7 @@ class Settings(BaseSettings):
     app_name: str = "Circle Jerks: Automated Noise Complaint Generator"
     environment: Literal["local", "test", "production"] = "local"
     public_base_url: str = "http://localhost:5173"
-    app_secret: str = "local-development-secret"
+    app_secret: str = DEFAULT_APP_SECRET
 
     database_path: str = "data/circlejerk.sqlite3"
     redis_url: str = "memory://"
@@ -66,6 +72,11 @@ class Settings(BaseSettings):
     self_hosted_feeder_path_style: Literal["lat_lon_dist", "point"] = "lat_lon_dist"
     adsbx_rapidapi_key: str | None = Field(default=None, validation_alias="ADSBX_RAPIDAPI_KEY")
     adsbx_rapidapi_host: str = "adsbexchange-com1.p.rapidapi.com"
+
+    # The ledger sidecar. Proxied rather than read directly: ledger-api owns
+    # its own SQLite file, and opening it from here would put two writers on
+    # one lock — the exact thing that split was made to avoid.
+    ledger_api_base_url: str = "http://ledger-api:8100"
 
     default_airport_icao: str = "KBJC"
     monitor_ttl_seconds: int = 900
@@ -134,6 +145,16 @@ class Settings(BaseSettings):
     admin_password: str | None = Field(default=None, exclude=True)
     admin_password_hash: str | None = Field(default=None, exclude=True)
     admin_session_seconds: int = 12 * 3600
+    admin_superusers: str | None = Field(default=None, validation_alias="ADMIN_SUPERUSERS")
+    google_oauth_client_id: str | None = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_CLIENT_ID"
+    )
+    google_oauth_client_secret: str | None = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_CLIENT_SECRET", exclude=True
+    )
+    google_oauth_redirect_uri: str | None = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_REDIRECT_URI"
+    )
     active_user_window_seconds: int = 90
     buy_me_coffee_url: str | None = "https://buymeacoffee.com/djodom"
     bmc_api_token: str | None = Field(default=None, validation_alias="BMC_API_TOKEN")
@@ -144,6 +165,22 @@ class Settings(BaseSettings):
 
     max_aircraft_per_scan: int = 500
     request_timeout_seconds: float = 10.0
+
+    @model_validator(mode="after")
+    def _require_app_secret_override_in_production(self) -> "Settings":
+        # Fail fast at startup: a production deploy with the default secret
+        # is fully cookie-forgeable (see DEFAULT_APP_SECRET comment above).
+        # Scoped to "production" only -- "local" and "test" must stay silent
+        # so local dev and the test suite are unaffected.
+        if self.environment == "production" and self.app_secret == DEFAULT_APP_SECRET:
+            raise ValueError(
+                "CIRCLEJERK_APP_SECRET must be set to a unique, non-default value "
+                "when CIRCLEJERK_ENVIRONMENT=production. The default value signs "
+                "the admin session cookie and the OAuth state cookie; leaving it "
+                "unset makes every admin session forgeable by anyone who reads "
+                "this open-source default."
+            )
+        return self
 
     def opensky_credentials(self) -> tuple[str | None, str | None]:
         if self.opensky_client_id and self.opensky_client_secret:

@@ -1,35 +1,29 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ClipboardList,
-  LockKeyhole,
   LogOut,
   MapPin,
   Network,
   Plane,
   Radio,
   RefreshCw,
-  ShieldCheck,
   Users
 } from "lucide-react";
 import {
   adminDashboard,
-  adminLogin,
+  adminListUsers,
   adminLogout,
   ApiError,
   type ActivityAircraft,
   type AdminDashboardResponse
 } from "./lib/api";
-
-function formatDateTime(ts?: number | null) {
-  if (!ts) return "-";
-  return new Date(ts * 1000).toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true
-  });
-}
+import { formatDateTime } from "./lib/format";
+import { canManageUsers, defaultTabFor, visibleTabs, type TabId } from "./lib/adminAccess";
+import { useAdminSession } from "./lib/useAdminSession";
+import AdminLogin from "./components/AdminLogin";
+import PendingUsersPanel from "./components/PendingUsersPanel";
+import ApiKeysPanel from "./components/ApiKeysPanel";
+import ApiDocsPanel from "./components/ApiDocsPanel";
 
 function shortId(value?: string | null) {
   if (!value) return "-";
@@ -53,57 +47,6 @@ function mapUrl(lat?: number | null, lon?: number | null) {
   return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=15/${lat}/${lon}`;
 }
 
-function LoginPanel({ onAuthed }: { onAuthed: () => void }) {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("");
-  const [status, setStatus] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusy(true);
-    setStatus("");
-    try {
-      await adminLogin(username, password);
-      onAuthed();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Login failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <main className="admin-login-shell">
-      <form className="admin-login-card" onSubmit={submit}>
-        <div className="admin-login-icon"><LockKeyhole size={24} /></div>
-        <div>
-          <div className="eyebrow">Admin dashboard</div>
-          <h1>Sign in</h1>
-        </div>
-        <label>
-          <span>Username</span>
-          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
-        </label>
-        <label>
-          <span>Password</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
-            autoFocus
-          />
-        </label>
-        {status && <div className="admin-form-error">{status}</div>}
-        <button className="primary-action" type="submit" disabled={busy}>
-          <ShieldCheck size={17} /> {busy ? "Signing in" : "Sign in"}
-        </button>
-      </form>
-    </main>
-  );
-}
-
 function StatCard({ icon: Icon, label, value }: { icon: typeof ClipboardList; label: string; value: number }) {
   return (
     <div className="admin-stat">
@@ -114,192 +57,346 @@ function StatCard({ icon: Icon, label, value }: { icon: typeof ClipboardList; la
   );
 }
 
+const TAB_LABELS: Record<TabId, string> = {
+  dashboard: "Dashboard",
+  users: "Access requests",
+  keys: "API keys",
+  docs: "API docs"
+};
+
+/**
+ * The "you can't be here" screen — used both for an explicitly blocked
+ * status (pending/rejected/suspended, surfaced via a 403's `detail`) and as a
+ * fallback for a session that isn't blocked but also isn't approved for any
+ * tab. Defined at module scope: an inline definition would get a new
+ * identity every render and remount its subtree needlessly.
+ */
+function BlockedScreen({
+  title,
+  body,
+  onSignOut
+}: {
+  title: string;
+  body: string;
+  onSignOut: () => void;
+}) {
+  return (
+    <main className="admin-login-shell">
+      <div className="admin-login-card">
+        <h1>{title}</h1>
+        <p>{body}</p>
+        <button className="primary-action" onClick={onSignOut}>
+          <LogOut size={17} /> Sign out
+        </button>
+      </div>
+    </main>
+  );
+}
+
 export default function AdminDashboard() {
+  const { session, blockedStatus, loading: sessionLoading, refresh } = useAdminSession();
+  const tabs = useMemo(() => visibleTabs(session), [session]);
+  const [tab, setTab] = useState<TabId>("keys");
+  // Applies defaultTabFor exactly once per sign-in, not on every session
+  // refresh: a super_admin who has deliberately switched to another tab must
+  // not get yanked back to "dashboard" the next time the session is
+  // re-probed (e.g. the dashboard poll's 401/403 handler).
+  const appliedDefaultTab = useRef(false);
+
+  useEffect(() => {
+    if (session) {
+      if (!appliedDefaultTab.current) {
+        appliedDefaultTab.current = true;
+        setTab(defaultTabFor(session));
+      }
+    } else {
+      appliedDefaultTab.current = false;
+    }
+  }, [session]);
+
+  useEffect(() => {
+    // Keep the selected tab reachable: a partner must never be left staring
+    // at a dashboard tab that no longer exists for them, and a role edit
+    // (e.g. narrowing someone from admin to partner) must not leave the
+    // shell parked on a tab that just disappeared either.
+    if (tabs.length > 0 && !tabs.includes(tab)) setTab(tabs[0]);
+  }, [tabs, tab]);
+
   const [dashboard, setDashboard] = useState<AdminDashboardResponse | null>(null);
-  const [authed, setAuthed] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("");
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardStatus, setDashboardStatus] = useState("");
+
+  // The pending-requests badge is the entire notification mechanism for new
+  // access requests (email notification is deliberately out of scope, per
+  // the design doc). It has to be visible on the tab label itself, not only
+  // inside the panel, or a super_admin who lands on "dashboard" by default
+  // has no reason to ever discover it.
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!canManageUsers(session)) {
+      setPendingCount(null);
+      return;
+    }
+    let cancelled = false;
+    async function loadPendingCount() {
+      try {
+        const body = await adminListUsers("pending");
+        if (!cancelled) setPendingCount(body.users.length);
+      } catch {
+        // Silent: the users tab itself surfaces a load failure when opened;
+        // this badge is a convenience, not the source of truth.
+      }
+    }
+    void loadPendingCount();
+    const id = window.setInterval(() => void loadPendingCount(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [session]);
 
   const recentSubmissions = dashboard?.recent_submissions ?? [];
-
   const summary = useMemo(() => dashboard?.summary, [dashboard]);
 
-  async function load() {
-    setLoading(true);
-    setStatus("");
+  async function loadDashboard() {
+    setDashboardLoading(true);
+    setDashboardStatus("");
     try {
-      const data = await adminDashboard();
-      setDashboard(data);
-      setAuthed(true);
+      setDashboard(await adminDashboard());
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
-        setAuthed(false);
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        // The session cookie died mid-visit. Re-probe through the shared
+        // session hook rather than just showing an error over stale numbers,
+        // so the shell drops to the login/blocked screen like it should.
+        void refresh();
       } else {
-        setStatus(error instanceof Error ? error.message : "Dashboard failed");
+        setDashboardStatus(error instanceof ApiError ? error.message : "Dashboard failed");
       }
     } finally {
-      setLoading(false);
+      setDashboardLoading(false);
     }
   }
 
-  async function logout() {
+  useEffect(() => {
+    if (tab !== "dashboard") return;
+    void loadDashboard();
+    const id = window.setInterval(() => void loadDashboard(), 30000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  async function signOut() {
     await adminLogout().catch(() => undefined);
-    setDashboard(null);
-    setAuthed(false);
+    await refresh();
   }
 
-  useEffect(() => {
-    load();
-    const id = window.setInterval(() => {
-      if (authed) void load();
-    }, 30000);
-    return () => window.clearInterval(id);
-  }, [authed]);
+  if (sessionLoading) {
+    return (
+      <main className="admin-shell">
+        <p>Loading…</p>
+      </main>
+    );
+  }
 
-  if (!authed && !loading) return <LoginPanel onAuthed={load} />;
+  if (blockedStatus) {
+    const copy =
+      blockedStatus === "pending"
+        ? {
+            title: "Access requested",
+            body: "Your request is waiting for an administrator to review it."
+          }
+        : {
+            title: "Access denied",
+            body: "This account does not have access to the developer area."
+          };
+    return <BlockedScreen title={copy.title} body={copy.body} onSignOut={signOut} />;
+  }
+
+  if (!session) return <AdminLogin onAuthed={refresh} />;
+
+  if (tabs.length === 0) {
+    // Today the backend returns 403 for any non-approved status, which the
+    // blockedStatus branch above already catches, making this unreachable in
+    // practice. It's a defensive fallback: without it, a session object that
+    // somehow carries a non-approved status without a matching 403 would
+    // render a topbar and an empty nav with no panel and no explanation.
+    return (
+      <BlockedScreen
+        title="Access denied"
+        body="This account does not have access to the developer area."
+        onSignOut={signOut}
+      />
+    );
+  }
 
   return (
     <main className="admin-shell">
       <header className="admin-topbar">
         <div>
           <div className="eyebrow">Circle Jerks admin</div>
-          <h1>Operations dashboard</h1>
-          <p>Submissions are recorded when copied from the complaint panel.</p>
+          <h1>{session.name ?? session.email}</h1>
+          <p>
+            Signed in as {session.email} · {session.role.replace("_", "-")}
+          </p>
         </div>
         <div className="admin-actions">
-          <button onClick={load} disabled={loading}><RefreshCw size={17} /> Refresh</button>
-          <button onClick={logout}><LogOut size={17} /> Sign out</button>
+          {tab === "dashboard" && (
+            <button onClick={() => void loadDashboard()} disabled={dashboardLoading}>
+              <RefreshCw size={17} /> Refresh
+            </button>
+          )}
+          <button onClick={signOut}>
+            <LogOut size={17} /> Sign out
+          </button>
         </div>
       </header>
 
-      {status && <div className="admin-banner">{status}</div>}
+      <nav className="segmented">
+        {tabs.map((t) => (
+          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
+            {TAB_LABELS[t]}
+            {t === "users" && !!pendingCount && <span className="admin-badge">{pendingCount}</span>}
+          </button>
+        ))}
+      </nav>
 
-      <section className="admin-stats">
-        <StatCard icon={ClipboardList} label="Submissions" value={summary?.submissions ?? 0} />
-        <StatCard icon={Plane} label="Aircraft reports" value={summary?.aircraft_reports ?? 0} />
-        <StatCard icon={Users} label="Submitters" value={summary?.submitters ?? 0} />
-        <StatCard icon={Radio} label="Current users" value={summary?.current_users ?? 0} />
-        <StatCard icon={MapPin} label="Airports" value={summary?.airports ?? 0} />
-        <StatCard icon={Network} label="Distinct aircraft" value={summary?.distinct_aircraft ?? 0} />
-      </section>
+      {tab === "dashboard" && (
+        <>
+          {dashboardStatus && <div className="admin-banner">{dashboardStatus}</div>}
 
-      <section className="admin-grid two">
-        <div className="admin-panel">
-          <div className="admin-section-title">Current users</div>
-          <div className="admin-table compact">
-            <div className="admin-row header"><span>User</span><span>IP</span><span>Airport</span><span>Location</span><span>Last seen</span><span>Submissions</span></div>
-            {dashboard?.current_users.length === 0 && <div className="admin-empty">No active users in the current window.</div>}
-            {dashboard?.current_users.map((row) => (
-              <div className="admin-row" key={row.visitor_id}>
-                <span>{shortId(row.visitor_id)}</span>
-                <span>{row.ip_address ?? "-"}</span>
-                <span>{row.airport_icao ?? "-"}<small>{row.airport_city ?? ""}</small></span>
-                <span>{locationLabel(row.user_lat, row.user_lon)}</span>
-                <span>{formatDateTime(row.last_seen)}</span>
-                <span>{row.submission_count}</span>
+          <section className="admin-stats">
+            <StatCard icon={ClipboardList} label="Submissions" value={summary?.submissions ?? 0} />
+            <StatCard icon={Plane} label="Aircraft reports" value={summary?.aircraft_reports ?? 0} />
+            <StatCard icon={Users} label="Submitters" value={summary?.submitters ?? 0} />
+            <StatCard icon={Radio} label="Current users" value={summary?.current_users ?? 0} />
+            <StatCard icon={MapPin} label="Airports" value={summary?.airports ?? 0} />
+            <StatCard icon={Network} label="Distinct aircraft" value={summary?.distinct_aircraft ?? 0} />
+          </section>
+
+          <section className="admin-grid two">
+            <div className="admin-panel">
+              <div className="admin-section-title">Current users</div>
+              <div className="admin-table compact">
+                <div className="admin-row header"><span>User</span><span>IP</span><span>Airport</span><span>Location</span><span>Last seen</span><span>Submissions</span></div>
+                {dashboard?.current_users.length === 0 && <div className="admin-empty">No active users in the current window.</div>}
+                {dashboard?.current_users.map((row) => (
+                  <div className="admin-row" key={row.visitor_id}>
+                    <span>{shortId(row.visitor_id)}</span>
+                    <span>{row.ip_address ?? "-"}</span>
+                    <span>{row.airport_icao ?? "-"}<small>{row.airport_city ?? ""}</small></span>
+                    <span>{locationLabel(row.user_lat, row.user_lon)}</span>
+                    <span>{formatDateTime(row.last_seen)}</span>
+                    <span>{row.submission_count}</span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="admin-panel">
-          <div className="admin-section-title">IP submission history</div>
-          <div className="admin-table ip-table">
-            <div className="admin-row header"><span>IP address</span><span>Submissions</span><span>Visitors</span><span>Active</span><span>Last</span></div>
-            {dashboard?.ip_history.length === 0 && <div className="admin-empty">No copied submissions yet.</div>}
-            {dashboard?.ip_history.map((row) => (
-              <div className="admin-row" key={row.ip_address}>
-                <span>{row.ip_address}</span>
-                <span>{row.submissions}</span>
-                <span>{row.visitors}</span>
-                <span>{row.active_visitors}</span>
-                <span>{formatDateTime(row.last_submission_at)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section className="admin-panel">
-        <div className="admin-section-title">Recent submissions</div>
-        <div className="admin-submissions">
-          {recentSubmissions.length === 0 && <div className="admin-empty">No copied complaint text has been recorded.</div>}
-          {recentSubmissions.map((row) => (
-            <article className="submission-card" key={row.id}>
-              <div className="submission-meta">
-                <strong>{formatDateTime(row.created_at)}</strong>
-                <span>{row.airport_icao ?? "-"} {row.airport_city ? `· ${row.airport_city}` : ""}</span>
-                <span>{row.mode ?? "-"} · {row.window_code ?? "-"}</span>
-                <span>{row.ip_address ?? "-"}</span>
-                <span>{locationLabel(row.user_lat, row.user_lon)}</span>
-              </div>
-              <div className="submission-aircraft">
-                {row.aircraft.map(aircraftLabel).join(", ") || "No aircraft captured"}
-              </div>
-              <p>{row.text}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="admin-grid two">
-        <div className="admin-panel">
-          <div className="admin-section-title">Aircraft report counts</div>
-          <div className="admin-table aircraft-table">
-            <div className="admin-row header"><span>Aircraft GUID</span><span>Callsign</span><span>Tail</span><span>Reports</span><span>Last</span></div>
-            {dashboard?.aircraft_reports.length === 0 && <div className="admin-empty">No aircraft have been reported yet.</div>}
-            {dashboard?.aircraft_reports.map((row) => (
-              <div className="admin-row" key={row.icao24}>
-                <span>{row.icao24}</span>
-                <span>{row.callsign ?? "-"}</span>
-                <span>{row.registration ?? "-"}</span>
-                <span>{row.report_count}</span>
-                <span>{formatDateTime(row.last_reported_at)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="admin-panel">
-          <div className="admin-section-title">Submitter locations</div>
-          <div className="admin-table location-table">
-            <div className="admin-row header"><span>User</span><span>IP</span><span>Airport</span><span>Location</span><span>Submissions</span></div>
-            {dashboard?.locations.length === 0 && <div className="admin-empty">No submitter locations have been recorded.</div>}
-            {dashboard?.locations.map((row) => {
-              const url = mapUrl(row.user_lat, row.user_lon);
-              return (
-                <div className="admin-row" key={row.visitor_id}>
-                  <span>{shortId(row.visitor_id)}</span>
-                  <span>{row.ip_address ?? "-"}</span>
-                  <span>{row.airport_icao ?? "-"}<small>{row.airport_city ?? ""}</small></span>
-                  <span>
-                    {url ? <a href={url} target="_blank" rel="noreferrer">{locationLabel(row.user_lat, row.user_lon)}</a> : "-"}
-                  </span>
-                  <span>{row.submission_count}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </section>
-
-      <section className="admin-panel">
-        <div className="admin-section-title">Airport submissions</div>
-        <div className="admin-table airport-table">
-          <div className="admin-row header"><span>Airport</span><span>Name</span><span>City</span><span>Submissions</span><span>Submitters</span><span>Last</span></div>
-          {dashboard?.airports.length === 0 && <div className="admin-empty">No airport submission activity yet.</div>}
-          {dashboard?.airports.map((row) => (
-            <div className="admin-row" key={row.airport_icao}>
-              <span>{row.airport_icao}</span>
-              <span>{row.name ?? "-"}</span>
-              <span>{row.city ?? "-"}</span>
-              <span>{row.submissions}</span>
-              <span>{row.submitters}</span>
-              <span>{formatDateTime(row.last_submission_at)}</span>
             </div>
-          ))}
-        </div>
-      </section>
+
+            <div className="admin-panel">
+              <div className="admin-section-title">IP submission history</div>
+              <div className="admin-table ip-table">
+                <div className="admin-row header"><span>IP address</span><span>Submissions</span><span>Visitors</span><span>Active</span><span>Last</span></div>
+                {dashboard?.ip_history.length === 0 && <div className="admin-empty">No copied submissions yet.</div>}
+                {dashboard?.ip_history.map((row) => (
+                  <div className="admin-row" key={row.ip_address}>
+                    <span>{row.ip_address}</span>
+                    <span>{row.submissions}</span>
+                    <span>{row.visitors}</span>
+                    <span>{row.active_visitors}</span>
+                    <span>{formatDateTime(row.last_submission_at)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="admin-panel">
+            <div className="admin-section-title">Recent submissions</div>
+            <div className="admin-submissions">
+              {recentSubmissions.length === 0 && <div className="admin-empty">No copied complaint text has been recorded.</div>}
+              {recentSubmissions.map((row) => (
+                <article className="submission-card" key={row.id}>
+                  <div className="submission-meta">
+                    <strong>{formatDateTime(row.created_at)}</strong>
+                    <span>{row.airport_icao ?? "-"} {row.airport_city ? `· ${row.airport_city}` : ""}</span>
+                    <span>{row.mode ?? "-"} · {row.window_code ?? "-"}</span>
+                    <span>{row.ip_address ?? "-"}</span>
+                    <span>{locationLabel(row.user_lat, row.user_lon)}</span>
+                  </div>
+                  <div className="submission-aircraft">
+                    {row.aircraft.map(aircraftLabel).join(", ") || "No aircraft captured"}
+                  </div>
+                  <p>{row.text}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="admin-grid two">
+            <div className="admin-panel">
+              <div className="admin-section-title">Aircraft report counts</div>
+              <div className="admin-table aircraft-table">
+                <div className="admin-row header"><span>Aircraft GUID</span><span>Callsign</span><span>Tail</span><span>Reports</span><span>Last</span></div>
+                {dashboard?.aircraft_reports.length === 0 && <div className="admin-empty">No aircraft have been reported yet.</div>}
+                {dashboard?.aircraft_reports.map((row) => (
+                  <div className="admin-row" key={row.icao24}>
+                    <span>{row.icao24}</span>
+                    <span>{row.callsign ?? "-"}</span>
+                    <span>{row.registration ?? "-"}</span>
+                    <span>{row.report_count}</span>
+                    <span>{formatDateTime(row.last_reported_at)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="admin-panel">
+              <div className="admin-section-title">Submitter locations</div>
+              <div className="admin-table location-table">
+                <div className="admin-row header"><span>User</span><span>IP</span><span>Airport</span><span>Location</span><span>Submissions</span></div>
+                {dashboard?.locations.length === 0 && <div className="admin-empty">No submitter locations have been recorded.</div>}
+                {dashboard?.locations.map((row) => {
+                  const url = mapUrl(row.user_lat, row.user_lon);
+                  return (
+                    <div className="admin-row" key={row.visitor_id}>
+                      <span>{shortId(row.visitor_id)}</span>
+                      <span>{row.ip_address ?? "-"}</span>
+                      <span>{row.airport_icao ?? "-"}<small>{row.airport_city ?? ""}</small></span>
+                      <span>
+                        {url ? <a href={url} target="_blank" rel="noreferrer">{locationLabel(row.user_lat, row.user_lon)}</a> : "-"}
+                      </span>
+                      <span>{row.submission_count}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          <section className="admin-panel">
+            <div className="admin-section-title">Airport submissions</div>
+            <div className="admin-table airport-table">
+              <div className="admin-row header"><span>Airport</span><span>Name</span><span>City</span><span>Submissions</span><span>Submitters</span><span>Last</span></div>
+              {dashboard?.airports.length === 0 && <div className="admin-empty">No airport submission activity yet.</div>}
+              {dashboard?.airports.map((row) => (
+                <div className="admin-row" key={row.airport_icao}>
+                  <span>{row.airport_icao}</span>
+                  <span>{row.name ?? "-"}</span>
+                  <span>{row.city ?? "-"}</span>
+                  <span>{row.submissions}</span>
+                  <span>{row.submitters}</span>
+                  <span>{formatDateTime(row.last_submission_at)}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        </>
+      )}
+
+      {tab === "users" && <PendingUsersPanel />}
+      {tab === "keys" && <ApiKeysPanel session={session} />}
+      {tab === "docs" && <ApiDocsPanel />}
     </main>
   );
 }

@@ -1,0 +1,1620 @@
+{
+  "components": {
+    "headers": {
+      "RateLimitLimit": {
+        "description": "Requests permitted per minute for this key.",
+        "schema": {
+          "example": 120,
+          "type": "integer"
+        }
+      },
+      "RateLimitRemaining": {
+        "description": "Requests remaining in the current minute.",
+        "schema": {
+          "example": 119,
+          "type": "integer"
+        }
+      },
+      "RetryAfter": {
+        "description": "Seconds until the rate-limit window resets.",
+        "schema": {
+          "example": 60,
+          "type": "integer"
+        }
+      }
+    },
+    "parameters": {
+      "IcaoPath": {
+        "description": "ICAO code, case-insensitive; normalized to uppercase in the response.",
+        "in": "path",
+        "name": "icao",
+        "required": true,
+        "schema": {
+          "example": "KBJC",
+          "type": "string"
+        }
+      },
+      "Window": {
+        "description": "Lookback window. `all` starts at the epoch.",
+        "in": "query",
+        "name": "window",
+        "schema": {
+          "default": "7d",
+          "enum": [
+            "1d",
+            "7d",
+            "30d",
+            "all"
+          ],
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "Forbidden": {
+        "content": {
+          "application/json": {
+            "examples": {
+              "airport": {
+                "value": {
+                  "error": {
+                    "code": "forbidden_airport",
+                    "message": "key is not scoped to KBJC"
+                  }
+                }
+              },
+              "scope": {
+                "value": {
+                  "error": {
+                    "code": "forbidden_scope",
+                    "message": "key lacks scope tracks:read"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Either the key lacks the required scope (`forbidden_scope`) or it is\nrestricted away from this airport (`forbidden_airport`).\n"
+      },
+      "InvalidRequest": {
+        "content": {
+          "application/json": {
+            "example": {
+              "error": {
+                "code": "invalid_request",
+                "message": "requested range exceeds the 2678400 second maximum; page with the cursor instead"
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "A parameter, cursor, or time range was rejected."
+      },
+      "NotFound": {
+        "content": {
+          "application/json": {
+            "example": {
+              "error": {
+                "code": "not_found",
+                "message": "unknown airport ZZZZ"
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Unknown airport, or an unknown ledger resource."
+      },
+      "RateLimited": {
+        "content": {
+          "application/json": {
+            "example": {
+              "error": {
+                "code": "rate_limited",
+                "message": "rate limit of 120 requests per minute exceeded"
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Over 120 requests per minute for this key.",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        }
+      },
+      "Unauthorized": {
+        "content": {
+          "application/json": {
+            "example": {
+              "error": {
+                "code": "unauthorized",
+                "message": "invalid or missing API key"
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Missing, malformed, unknown, or revoked key. An unknown key and a wrong\nsecret are deliberately indistinguishable.\n"
+      },
+      "UpstreamUnavailable": {
+        "content": {
+          "application/json": {
+            "example": {
+              "error": {
+                "code": "upstream_unavailable",
+                "message": "the ledger service is not reachable right now"
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "The ledger sidecar is unreachable or returned a server error."
+      }
+    },
+    "schemas": {
+      "AirportStats": {
+        "additionalProperties": true,
+        "properties": {
+          "airport_icao": {
+            "type": "string"
+          },
+          "counters": {
+            "properties": {
+              "circles": {
+                "type": "integer"
+              },
+              "landings": {
+                "type": "integer"
+              },
+              "low_approaches": {
+                "type": "integer"
+              },
+              "passes": {
+                "type": "integer"
+              },
+              "runway_changes": {
+                "type": "integer"
+              },
+              "touch_and_gos": {
+                "type": "integer"
+              },
+              "unique_aircraft": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "ops_over_time": {
+            "items": {
+              "properties": {
+                "bucket": {
+                  "type": "integer"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "runway_usage": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "window": {
+            "$ref": "#/components/schemas/Window"
+          }
+        },
+        "required": [
+          "airport_icao",
+          "window"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "description": "Stable machine-readable code. Branch on this.",
+                "enum": [
+                  "unauthorized",
+                  "invalid_request",
+                  "forbidden_scope",
+                  "forbidden_airport",
+                  "not_found",
+                  "rate_limited",
+                  "upstream_unavailable"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "description": "Human-readable detail. Wording may change; do not parse.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "Meta": {
+        "properties": {
+          "airports": {
+            "description": "ICAO codes this key is restricted to, or null for unrestricted.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "limits": {
+            "properties": {
+              "max_page_size": {
+                "type": "integer"
+              },
+              "max_track_span_seconds": {
+                "type": "integer"
+              },
+              "requests_per_minute": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "name": {
+            "description": "The label the administrator gave this key.",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "enum": [
+                "ops:read",
+                "tracks:read",
+                "aggregates:read",
+                "ledger:read"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "version": {
+            "example": "v1",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "name",
+          "scopes",
+          "airports",
+          "limits"
+        ],
+        "type": "object"
+      },
+      "Operation": {
+        "description": "One detected operation. Field set is frozen; new database columns do not appear here.",
+        "properties": {
+          "airport_icao": {
+            "type": "string"
+          },
+          "callsign": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deviation_mean_nm": {
+            "description": "Mean lateral deviation from the published pattern.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "deviation_peak_nm": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "emitter_category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "flight_school": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "icao24": {
+            "description": "24-bit ICAO address",
+            "lowercase hex.": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "also half of the cursor.": null,
+            "description": "Stable identifier",
+            "type": "string"
+          },
+          "min_altitude_ft_agl": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operator": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin_airport_icao": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pct_off_pattern": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "registration": {
+            "description": "Tail number",
+            "type": [
+              "string",
+              "null"
+            ],
+            "when resolvable.": null
+          },
+          "runway_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "description": "Unix seconds.",
+            "type": "integer"
+          },
+          "turn_direction": {
+            "enum": [
+              "left",
+              "right",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "enum": [
+              "touch_and_go",
+              "circle",
+              "low_approach",
+              "landing",
+              "pass_over_user"
+            ],
+            "type": "string"
+          },
+          "wind_from_deg": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wind_speed_kt": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "airport_icao",
+          "type",
+          "timestamp"
+        ],
+        "type": "object"
+      },
+      "Pattern": {
+        "properties": {
+          "airport_icao": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "geometry": {
+            "description": "Pattern polyline.",
+            "properties": {
+              "closed": {
+                "type": "boolean"
+              },
+              "points": {
+                "items": {
+                  "properties": {
+                    "lat": {
+                      "type": "number"
+                    },
+                    "lon": {
+                      "type": "number"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "locked": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runway_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Runway": {
+        "properties": {
+          "heading_deg": {
+            "type": "number"
+          },
+          "icao": {
+            "type": "string"
+          },
+          "lat_threshold": {
+            "type": "number"
+          },
+          "length_ft": {
+            "type": "integer"
+          },
+          "lon_threshold": {
+            "type": "number"
+          },
+          "runway_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TrackSample": {
+        "description": "One raw position sample. Field set is frozen.",
+        "properties": {
+          "altitude_ft": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "baro_altitude_ft": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "callsign": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "emitter_category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "geo_altitude_ft": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "heading_deg": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "icao24": {
+            "type": "string"
+          },
+          "lat": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "lon": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "Which upstream feed supplied the sample.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "description": "Unix seconds.",
+            "type": "integer"
+          },
+          "vertical_rate_fpm": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "icao24",
+          "timestamp"
+        ],
+        "type": "object"
+      },
+      "Window": {
+        "properties": {
+          "bucket_seconds": {
+            "type": "integer"
+          },
+          "code": {
+            "enum": [
+              "1d",
+              "7d",
+              "30d",
+              "all"
+            ],
+            "type": "string"
+          },
+          "end_ts": {
+            "type": "integer"
+          },
+          "start_ts": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "start_ts",
+          "end_ts"
+        ],
+        "type": "object"
+      },
+      "WorstOffenders": {
+        "properties": {
+          "airport_icao": {
+            "description": "The airport you requested.",
+            "type": "string"
+          },
+          "is_fallback": {
+            "description": "True when the requested airport had no scored aircraft and a neighbour was substituted.",
+            "type": "boolean"
+          },
+          "offenders": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "resolved_icao": {
+            "description": "The airport the offenders actually come from. Differs when is_fallback is true.",
+            "type": "string"
+          },
+          "resolved_label": {
+            "type": "string"
+          },
+          "source_icao": {
+            "description": "Same as airport_icao.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "airport_icao",
+          "source_icao",
+          "resolved_icao",
+          "is_fallback",
+          "offenders"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "apiKeyHeader": {
+        "description": "Alternative to the bearer header. Identical semantics.",
+        "in": "header",
+        "name": "X-API-Key",
+        "type": "apiKey"
+      },
+      "bearerAuth": {
+        "description": "`Authorization: Bearer cj_live_\u2026`",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "contact": {
+      "name": "Circle Jerks",
+      "url": "https://circlejerks.live"
+    },
+    "description": "A read-only HTTP API over four data families collected around general-aviation\nairports: **classified operations** (touch-and-gos, circles, low approaches,\nlandings, passes), **raw ADS-B position samples**, **precomputed aggregates**\n(stats, worst offenders, trends, VNAP compliance, runways, patterns, flow), and\nthe **KLMO fees ledger**.\n\nEvery endpoint is read-only. Nothing here mutates state.\n\n## Authentication\n\nEvery request needs an API key, issued by an administrator. Present it either way:\n\n```\nAuthorization: Bearer cj_live_0123456789abcdef_<secret>\nX-API-Key: cj_live_0123456789abcdef_<secret>\n```\n\nKeys look like `cj_<env>_<id16>_<secret43>`. The `env` segment is `live` in\nproduction. Only the id half is stored in recoverable form \u2014 the secret is\nhashed, so a lost key cannot be recovered and must be reissued.\n\nCall `GET /v1/meta` to see exactly what your own key can do. It reports your\nscopes, your airport restriction, and the current limits, which makes a 403\ndiagnosable without contacting us.\n\n## Scopes\n\nA key carries any combination of four scopes. Requesting an endpoint outside\nyour scopes returns `403 forbidden_scope`.\n\n| Scope | Grants |\n|---|---|\n| `ops:read` | `/v1/operations` |\n| `tracks:read` | `/v1/tracks` |\n| `aggregates:read` | the seven `/v1/airports/{icao}/\u2026` endpoints |\n| `ledger:read` | `/v1/ledger/\u2026` |\n\n## Airport restriction\n\nA key may additionally be restricted to specific airports. `GET /v1/meta`\nreports `\"airports\": null` for an unrestricted key, or a list of ICAO codes.\nRequesting data for an airport outside that list returns `403\nforbidden_airport` \u2014 and it returns the same 403 whether or not the airport\nexists, so the restriction cannot be used to enumerate our database.\n\n**Restricted keys must scope `/v1/tracks` by airport.** Raw track samples are\nkeyed by aircraft, not by airport, so an `icao24`-only query has no airport to\ncheck. If your key is restricted, pass `airport=` (optionally alongside\n`icao24=` to follow one aircraft within that airport); an `icao24`-only request\nreturns `403 forbidden_airport`. Unrestricted keys may query by `icao24` alone.\n\nNote that airport scoping on tracks is **geographic**: samples are selected by a\nbounding box around the field, so aircraft operating at a neighbouring airport\nwithin that radius may appear. This is inherent to a positional query.\n\n## Pagination\n\n`/v1/operations` and `/v1/tracks` are keyset-paginated and return:\n\n```json\n{ \"data\": [ \u2026 ], \"next_cursor\": \"MTc4NDY2NDExNjpvcC0wMDE\" }\n```\n\nPass `next_cursor` back as `cursor` to get the following page. Keep every other\nparameter identical between pages. When `next_cursor` is `null` you have reached\nthe end. A cursor is opaque \u2014 do not parse or construct one.\n\nA cursor is returned whenever a page came back full, so the last page of an\nexact multiple of `limit` will hand you a cursor that yields an empty page. That\nis normal; stop when `data` is empty or `next_cursor` is `null`.\n\n`limit` defaults to 500 and is capped at 5000.\n\n## Time parameters\n\n`since` and `until` accept either a Unix timestamp in seconds (`1784664115`) or\nan ISO 8601 datetime (`2026-07-21T15:00:00Z`). A datetime without a timezone is\nread as UTC. Timestamps are always **returned** as Unix seconds.\n\n`/v1/operations` defaults to the last 7 days if you omit both.\n`/v1/tracks` requires both, and rejects a span longer than 31 days \u2014 page\nthrough a longer range with the cursor.\n\n## Rate limits\n\n120 requests per minute per key, as a fixed window. Every response carries\n`X-RateLimit-Limit` and `X-RateLimit-Remaining`; exceeding the limit returns\n`429 rate_limited` with `Retry-After: 60`.\n\n## Errors\n\nEvery error in this namespace uses one envelope:\n\n```json\n{ \"error\": { \"code\": \"forbidden_scope\", \"message\": \"key lacks scope tracks:read\" } }\n```\n\nBranch on `code`, not on `message` \u2014 messages may be reworded.\n\n| Code | Status | Meaning |\n|---|---|---|\n| `unauthorized` | 401 | Missing, malformed, unknown, or revoked key |\n| `invalid_request` | 400 | Bad parameter, bad cursor, or a span over the cap |\n| `forbidden_scope` | 403 | Valid key without the required scope |\n| `forbidden_airport` | 403 | Valid key restricted away from this airport |\n| `not_found` | 404 | Unknown airport or resource |\n| `rate_limited` | 429 | Over 120 requests per minute |\n| `upstream_unavailable` | 503 | The ledger sidecar is unreachable or erroring |\n",
+    "summary": "Read-only access to circling-aircraft operations, raw ADS-B tracks, aggregates, and the KLMO fees ledger.",
+    "title": "Circle Jerks Public API",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/airports/{icao}/flow": {
+      "get": {
+        "description": "The runway currently in use and the last twenty runway changes. `active` is\nnull when no flow has been established. Requires `aggregates:read`.\n",
+        "operationId": "getFlow",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "active": null,
+                  "airport_icao": "KBJC",
+                  "recent_changes": []
+                },
+                "schema": {
+                  "properties": {
+                    "active": {
+                      "additionalProperties": true,
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "airport_icao": {
+                      "type": "string"
+                    },
+                    "recent_changes": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "airport_icao",
+                    "active",
+                    "recent_changes"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Current flow and recent changes."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Active runway and recent changes",
+        "tags": [
+          "aggregates"
+        ]
+      }
+    },
+    "/v1/airports/{icao}/operations-trends": {
+      "get": {
+        "description": "Monthly operation totals and derived trend series. Requires `aggregates:read`.",
+        "operationId": "getOperationsTrends",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "airport_icao": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "airport_icao"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Trend series for the last twelve months."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Twelve-month operation trends",
+        "tags": [
+          "aggregates"
+        ]
+      }
+    },
+    "/v1/airports/{icao}/patterns": {
+      "get": {
+        "description": "The current published traffic pattern geometry per runway, as drawn in the\npattern editor. Requires `aggregates:read`.\n",
+        "operationId": "getPatterns",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "airport_icao": {
+                      "type": "string"
+                    },
+                    "patterns": {
+                      "items": {
+                        "$ref": "#/components/schemas/Pattern"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "airport_icao",
+                    "patterns"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Current pattern per runway."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Current traffic patterns",
+        "tags": [
+          "aggregates"
+        ]
+      }
+    },
+    "/v1/airports/{icao}/runways": {
+      "get": {
+        "description": "Threshold coordinates, magnetic heading, and length per runway. Requires `aggregates:read`.",
+        "operationId": "getRunways",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "airport_icao": "KBJC",
+                  "runways": [
+                    {
+                      "heading_deg": 120.0,
+                      "icao": "KBJC",
+                      "lat_threshold": 39.9215,
+                      "length_ft": 9000,
+                      "lon_threshold": -105.1321,
+                      "runway_id": "12L"
+                    }
+                  ]
+                },
+                "schema": {
+                  "properties": {
+                    "airport_icao": {
+                      "type": "string"
+                    },
+                    "runways": {
+                      "items": {
+                        "$ref": "#/components/schemas/Runway"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "airport_icao",
+                    "runways"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Runways for the airport."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Runway geometry",
+        "tags": [
+          "aggregates"
+        ]
+      }
+    },
+    "/v1/airports/{icao}/stats": {
+      "get": {
+        "description": "Counters, an operations-over-time series, stop classification, wind\nbreakdown, deviation summary, runway usage, and recent runway changes for\none airport. Requires `aggregates:read`.\n",
+        "operationId": "getAirportStats",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          },
+          {
+            "$ref": "#/components/parameters/Window"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "airport_icao": "KBJC",
+                  "counters": {
+                    "circles": 0,
+                    "landings": 0,
+                    "low_approaches": 0,
+                    "passes": 0,
+                    "runway_changes": 0,
+                    "touch_and_gos": 3,
+                    "unique_aircraft": 1
+                  },
+                  "ops_over_time": [
+                    {
+                      "bucket": 1784592000,
+                      "count": 3
+                    }
+                  ],
+                  "runway_usage": [
+                    {
+                      "crosswind": 0,
+                      "downwind": 0,
+                      "no_wind_data": 3,
+                      "runway_id": "11",
+                      "total": 3,
+                      "upwind": 0
+                    }
+                  ],
+                  "window": {
+                    "bucket_seconds": 86400,
+                    "code": "7d",
+                    "end_ts": 1784667715,
+                    "start_ts": 1784062915
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AirportStats"
+                }
+              }
+            },
+            "description": "Aggregated statistics for the window."
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Operation counts, buckets, and derived breakdowns",
+        "tags": [
+          "aggregates"
+        ]
+      }
+    },
+    "/v1/airports/{icao}/vnap-compliance": {
+      "get": {
+        "description": "Voluntary Noise Abatement Procedure compliance scored per aircraft over the\nwindow. Requires `aggregates:read`.\n",
+        "operationId": "getVnapCompliance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          },
+          {
+            "$ref": "#/components/parameters/Window"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "airport_icao": {
+                      "type": "string"
+                    },
+                    "window": {
+                      "$ref": "#/components/schemas/Window"
+                    }
+                  },
+                  "required": [
+                    "airport_icao",
+                    "window"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Compliance scoring for the window."
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Per-aircraft VNAP compliance",
+        "tags": [
+          "aggregates"
+        ]
+      }
+    },
+    "/v1/airports/{icao}/worst-offenders": {
+      "get": {
+        "description": "Aircraft ranked by circling behaviour and report volume. Requires\n`aggregates:read`.\n\nWhen the requested airport has no scored aircraft, the underlying view falls\nback to the nearest neighbouring airport and sets `is_fallback: true` with\n`resolved_icao` naming the substitute \u2014 always check those two fields before\nattributing the result. **If your key is restricted, a fallback to an\nairport outside your scope is suppressed**: you receive an empty list with\n`is_fallback: false`, never another field's data.\n",
+        "operationId": "getWorstOffenders",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          },
+          {
+            "description": "Number of aircraft to return. Clamped to 10.",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 5,
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "airport_icao": "KBJC",
+                  "is_fallback": true,
+                  "offenders": [],
+                  "resolved_icao": "KBDU",
+                  "resolved_label": "Boulder, CO",
+                  "source_icao": "KBJC"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/WorstOffenders"
+                }
+              }
+            },
+            "description": "Ranked aircraft, possibly from a fallback airport."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Most-reported aircraft",
+        "tags": [
+          "aggregates"
+        ]
+      }
+    },
+    "/v1/ledger/airports/{icao}/{resource}": {
+      "get": {
+        "description": "Proxied to the ledger sidecar, which computes runway-use fees from lap and\ndwell analysis. Requires `ledger:read`.\n\n`resource` is an allowlist of exactly two values:\n\n- `ledger` \u2014 runway uses, the daily series, the operator ledger, and the\n  methodology block that ships with the numbers. Accepts `days` (1\u2013365,\n  default 30).\n- `aircraft-fees` \u2014 per-aircraft runway-use totals.\n\nAny other value returns `404 not_found`. Query parameters beginning with `_`\nare stripped before forwarding.\n\nIf the sidecar is unreachable you get `503 upstream_unavailable`. If it\nrejects your parameters you get `400 invalid_request` \u2014 a 503 here always\nmeans our problem, never yours.\n",
+        "operationId": "getLedger",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IcaoPath"
+          },
+          {
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ledger",
+                "aircraft-fees"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lookback in days. Applies to `ledger` only.",
+            "in": "query",
+            "name": "days",
+            "schema": {
+              "default": 30,
+              "maximum": 365,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Ledger payload, passed through from the sidecar."
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/UpstreamUnavailable"
+          }
+        },
+        "summary": "KLMO fees ledger",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/meta": {
+      "get": {
+        "description": "Echoes your key's own scopes, airport restriction, and the current limits.\nRequires only a valid key \u2014 no particular scope. Use it to diagnose a 403\nwithout contacting us.\n",
+        "operationId": "getMeta",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "airports": null,
+                  "limits": {
+                    "max_page_size": 5000,
+                    "max_track_span_seconds": 2678400,
+                    "requests_per_minute": 120
+                  },
+                  "name": "partner-demo",
+                  "scopes": [
+                    "aggregates:read",
+                    "ledger:read",
+                    "ops:read",
+                    "tracks:read"
+                  ],
+                  "version": "v1"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Meta"
+                }
+              }
+            },
+            "description": "The calling key's capabilities.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Describe the calling key",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/v1/operations": {
+      "get": {
+        "description": "Each row is one detected operation \u2014 a touch-and-go, circle, low approach,\nlanding, or pass \u2014 with the runway, pattern deviation, wind at the time, and\nany resolved operator or flight school.\n\nRequires the `ops:read` scope. Keyset-paginated, ordered by\n`(timestamp, id)` ascending.\n",
+        "operationId": "listOperations",
+        "parameters": [
+          {
+            "description": "ICAO code, case-insensitive.",
+            "in": "query",
+            "name": "airport",
+            "required": true,
+            "schema": {
+              "example": "KBJC",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Start of range, inclusive. Defaults to 7 days before `until`.",
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "example": "2026-07-14T00:00:00Z",
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of range, inclusive. Defaults to now.",
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "example": "1784667715",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Restrict to one operation type.",
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "enum": [
+                "touch_and_go",
+                "circle",
+                "low_approach",
+                "landing",
+                "pass_over_user"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Restrict to one aircraft by its 24-bit ICAO address.",
+            "in": "query",
+            "name": "icao24",
+            "schema": {
+              "example": "a1b2c3",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Restrict to one runway identifier.",
+            "in": "query",
+            "name": "runway",
+            "schema": {
+              "example": "11",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's `next_cursor`.",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows per page. Clamped to 5000.",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 500,
+              "maximum": 5000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "data": [
+                    {
+                      "airport_icao": "KBJC",
+                      "callsign": "N333RX",
+                      "deviation_mean_nm": null,
+                      "deviation_peak_nm": null,
+                      "emitter_category": null,
+                      "flight_school": null,
+                      "icao24": "a1b2c3",
+                      "id": "op-000",
+                      "min_altitude_ft_agl": 900,
+                      "operator": null,
+                      "origin_airport_icao": null,
+                      "origin_label": null,
+                      "pct_off_pattern": null,
+                      "registration": "N333RX",
+                      "runway_id": "11",
+                      "timestamp": 1784664115,
+                      "turn_direction": "right",
+                      "type": "touch_and_go",
+                      "wind_from_deg": null,
+                      "wind_speed_kt": null
+                    }
+                  ],
+                  "next_cursor": "MTc4NDY2NDExNjpvcC0wMDE"
+                },
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "items": {
+                        "$ref": "#/components/schemas/Operation"
+                      },
+                      "type": "array"
+                    },
+                    "next_cursor": {
+                      "description": "Pass back as `cursor`. Null at the end of the range.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "One page of operations.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Classified operations for an airport",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/v1/tracks": {
+      "get": {
+        "description": "Per-aircraft position samples as recorded, without smoothing or\ninterpolation. This is the heaviest endpoint in the API.\n\nRequires the `tracks:read` scope. Both `since` and `until` are required, and\nthe span may not exceed 31 days \u2014 page through longer ranges with the\ncursor. Supply at least one of `icao24` or `airport`.\n\n**If your key is restricted to specific airports you must pass `airport`.**\nAn `icao24`-only request from a restricted key returns `403\nforbidden_airport`. Combine `airport` and `icao24` to follow one aircraft\nwithin one field.\n\nSelecting by `airport` uses a bounding box around the field, so aircraft\noperating at a nearby airport inside that radius can appear.\n\nOrdered by `(timestamp, icao24)` ascending; the cursor encodes that pair.\n",
+        "operationId": "listTracks",
+        "parameters": [
+          {
+            "description": "Start of range, inclusive.",
+            "in": "query",
+            "name": "since",
+            "required": true,
+            "schema": {
+              "example": "2026-07-21T00:00:00Z",
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of range, inclusive. At most 31 days after `since`.",
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "example": "2026-07-21T06:00:00Z",
+              "type": "string"
+            }
+          },
+          {
+            "description": "One aircraft by 24-bit ICAO address. Required unless `airport` is given.",
+            "in": "query",
+            "name": "icao24",
+            "schema": {
+              "example": "a1b2c3",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Samples within ~8 nm of this airport. Required for airport-restricted keys.",
+            "in": "query",
+            "name": "airport",
+            "schema": {
+              "example": "KBJC",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 500,
+              "maximum": 5000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "data": [
+                    {
+                      "altitude_ft": 6500.0,
+                      "baro_altitude_ft": 6480.0,
+                      "callsign": "N333RX",
+                      "emitter_category": null,
+                      "geo_altitude_ft": 6520.0,
+                      "heading_deg": 110.0,
+                      "icao24": "a1b2c3",
+                      "lat": 39.9088,
+                      "lon": -105.1172,
+                      "source": "adsb_lol",
+                      "timestamp": 1784664115,
+                      "vertical_rate_fpm": -64.0
+                    }
+                  ],
+                  "next_cursor": "MTc4NDY2NDExNjphMWIyYzM"
+                },
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "items": {
+                        "$ref": "#/components/schemas/TrackSample"
+                      },
+                      "type": "array"
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "One page of position samples.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "Raw ADS-B position samples",
+        "tags": [
+          "tracks"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {
+      "apiKeyHeader": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "Production.",
+      "url": "https://circlejerks.live/api"
+    },
+    {
+      "description": "Local development (Vite proxies to the backend on :8000).",
+      "url": "http://localhost:5173/api"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Describe the calling key.",
+      "name": "meta"
+    },
+    {
+      "description": "Classified aircraft operations.",
+      "name": "operations"
+    },
+    {
+      "description": "Raw ADS-B position samples.",
+      "name": "tracks"
+    },
+    {
+      "description": "Precomputed per-airport views.",
+      "name": "aggregates"
+    },
+    {
+      "description": "KLMO fees ledger, proxied from a sidecar service.",
+      "name": "ledger"
+    }
+  ]
+}

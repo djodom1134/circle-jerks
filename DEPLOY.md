@@ -150,6 +150,98 @@ route `@app.get("/foo")` is reached from the browser as `/api/foo` and from the
 api container directly as `/foo`. `/healthz` is the one exception — Caddy
 forwards it without the `/api` prefix.
 
+## Deploy order constraints
+
+Two ordering constraints apply to this app. They are independent but compose
+— do both, in either order relative to each other, but each before the thing
+it protects.
+
+### 1. Caddy before the app (partner API keys)
+
+The Caddyfile's `format filter` log blocks (`Caddyfile:18-24` and `:94-100`)
+strip `Cookie`, `Authorization`, and `X-Api-Key` from the access log. Partners
+using the documented `X-Api-Key` header write their live API key straight
+into `/data/access.log`, retained 720h (`roll_keep_for 720h`). Deploy Caddy
+**before** the app (or atomically), so that filter is already live before any
+partner key can be issued. Rolling Caddy back to an older config after a key
+is issued re-opens the leak — a Caddy-only deploy is always safe; an app-only
+deploy that leaves an older Caddyfile in place is not.
+
+### 2. Environment variables before the app (Google SSO)
+
+Environment variables must land **before** the app restarts. If the app comes
+up without `GOOGLE_OAUTH_CLIENT_ID`, `/admin/auth/methods` reports Google as
+unavailable and the login screen renders with no Google button — a silent
+failure that looks like a frontend bug, not a missing env var.
+
+## Google SSO one-time setup
+
+Done once in Google Cloud Console for the OAuth client, and once in this
+app's environment:
+
+1. Create an OAuth client, type **Web application**.
+2. Authorized redirect URI: `https://circlejerks.live/api/admin/auth/google/callback`
+   — note Caddy strips `/api` before the app sees it (`handle_path /api/*`),
+   so the backend route itself is `/admin/auth/google/callback`.
+3. Configure the consent screen and either publish it or add each intended
+   user as a test user — an unpublished app only lets listed test users
+   complete the OAuth flow.
+4. Set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and
+   `GOOGLE_OAUTH_REDIRECT_URI` (see `.env.example`) before the app starts.
+
+The first sign-in for an address listed in `ADMIN_SUPERUSERS` is auto-approved
+as `super_admin` — on **every** login, not just the first row insert, so a
+UI misclick can never lock the operator out, and the pin survives a database
+wipe. Everyone else lands in the pending queue at `/admin` → Access requests
+until a super-admin approves them.
+
+**`ADMIN_SUPERUSERS` semantics, two gotchas:**
+
+- **Removing an address does not demote the existing row.** The pin is
+  applied on every login (`apply_superuser_pin` in `backend/app/main.py`),
+  not on removal — there is no corresponding "un-pin" action. A row that was
+  pinned stays `role=super_admin` until someone edits it via `/admin/users`,
+  which becomes *possible* only once the address is off the list: while an
+  address is listed, `guard_modification` refuses to let anyone change that
+  row at all; the moment it's removed, that protection is gone too, and the
+  row is just an ordinary (if currently super_admin) account waiting for
+  someone to notice and downgrade it.
+- **Whoever controls that verified Google address auto-becomes super_admin,
+  every time, no approval step.** This is by design for a personal account
+  you control — but it is a real hazard on a corporate Google Workspace
+  domain that recycles addresses (e.g. a departed employee's mailbox
+  reassigned to someone new): the next person to sign in with that address
+  is instantly a super_admin with full user-management and unrestricted key
+  minting. Keep `ADMIN_SUPERUSERS` scoped to addresses whose ownership you
+  control for the life of the deployment, and prune it promptly when that
+  stops being true.
+
+## Production `app_secret` guard
+
+`CIRCLEJERK_APP_SECRET` signs the admin session cookie and the OAuth state
+cookie. Since this feature added real user rows and roles behind that cookie,
+an unconfigured value is a full session-forgery hole: anyone who reads this
+open-source default can mint a valid session for any user id.
+
+The app now **refuses to start** when `CIRCLEJERK_ENVIRONMENT=production` and
+`CIRCLEJERK_APP_SECRET` is left at its development default (see
+`Settings._require_app_secret_override_in_production` in
+`backend/app/settings.py`). Generate a real value before the first production
+deploy after this feature:
+
+```bash
+openssl rand -hex 32
+```
+
+**Pre-deploy check:** confirm `CIRCLEJERK_APP_SECRET` (`APP_SECRET` in the
+droplet's `.env`) is actually set to a real value before every deploy that
+restarts the api container — the guard above means an unset or default value
+makes the container refuse to start, which 502s **everything** under `/api`,
+not just the admin/auth routes.
+
+`local` and `test` environments are unaffected — only a `production` deploy
+with the default secret fails to start.
+
 ## When to use `scripts/deploy_droplet.sh` instead
 
 The slim deploy above just rebuilds containers. Use the full script when you've

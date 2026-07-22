@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import secrets
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -23,10 +24,13 @@ logging.basicConfig(
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel, Field, StringConstraints
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import db, patterns, track_history, pattern_circuits, vnap
+from . import admin_users, api_keys, db, google_oauth, patterns, public_api, track_history, pattern_circuits, vnap
 from .db import db_session
 from .detectors import pass_geometry_key
 from .domain import ScanParams, monitor_hash
@@ -38,6 +42,8 @@ from .settings import Settings, get_settings
 from .store import Store, make_store
 from .tone import PRESETS, sliders_from_request
 from .windows import validate_window
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -59,6 +65,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# The public /v1 namespace has its own error envelope, and it must be total:
+# a bad query parameter or an unknown /v1 path has to look like every other
+# /v1 error. Only public_api raises ApiError; the validation and HTTP handlers
+# are app-wide but discriminate on the request path and delegate to FastAPI's
+# defaults elsewhere, so internal routes keep their {"detail": ...} shape.
+app.add_exception_handler(public_api.ApiError, public_api.api_error_handler)
+app.add_exception_handler(
+    RequestValidationError, public_api.validation_error_handler
+)
+app.add_exception_handler(
+    StarletteHTTPException, public_api.http_exception_handler
+)
+app.include_router(public_api.router)
 
 
 class MessagePreferencesRequest(BaseModel):
@@ -132,6 +152,28 @@ class PatternRevertRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=400)
+
+
+class ApiKeyCreateRequest(BaseModel):
+    # Stripped before min_length runs: without this a whitespace-only name
+    # satisfies min_length=1 and is then stored as the empty string, leaving a
+    # key that is unidentifiable in the admin list.
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    scopes: list[str]
+    airports: list[str] | None = None
+
+
+class UserAccessRequest(BaseModel):
+    role: str
+    scopes: list[str] = []
+    # No default of `None`, deliberately: `api_keys.serialize_airports` treats
+    # `None` (and `[]`) as "every airport" one layer down, which would make an
+    # omitted field the most dangerous possible default for a partner grant.
+    # `_normalize_access` requires this to be stated explicitly for role
+    # "partner" — a list of ICAO codes, or the single-element sentinel
+    # `["*"]` to grant every airport on purpose. admin/super_admin ignore
+    # this field entirely (see `_normalize_access`).
+    airports: list[str] | None = None
 
 
 VALID_OWNER_TYPES = frozenset({
@@ -265,9 +307,9 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def sign_admin_token(settings: Settings) -> str:
+def sign_admin_token(settings: Settings, user_id: str) -> str:
     payload = {
-        "sub": settings.admin_username,
+        "uid": user_id,
         "exp": int(time.time()) + settings.admin_session_seconds,
         "nonce": secrets.token_urlsafe(12),
     }
@@ -279,34 +321,102 @@ def sign_admin_token(settings: Settings) -> str:
 def decode_admin_token(settings: Settings, token: str) -> dict | None:
     try:
         body, signature = token.split(".", 1)
-    except ValueError:
-        return None
-    expected = hmac.new(settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).hexdigest()
-    if not secrets.compare_digest(signature, expected):
+        expected = hmac.new(
+            settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        if not secrets.compare_digest(signature, expected):
+            return None
+    except (ValueError, UnicodeEncodeError, TypeError):
+        # A non-ASCII session cookie (a stale/corrupted value, or a probe)
+        # makes str.encode("ascii") or compare_digest raise instead of just
+        # failing the check. Treat that the same as any other bad cookie.
         return None
     try:
         payload = json.loads(_b64decode(body))
     except (json.JSONDecodeError, ValueError):
         return None
-    if payload.get("sub") != settings.admin_username:
+    if not payload.get("uid"):
         return None
     if int(payload.get("exp", 0)) < int(time.time()):
         return None
     return payload
 
 
-def require_admin(
+def superuser_emails(settings: Settings) -> frozenset[str]:
+    return admin_users.parse_superusers(settings.admin_superusers)
+
+
+def apply_superuser_pin(conn, row: dict, settings: Settings) -> dict:
+    """Force ADMIN_SUPERUSERS accounts to approved super_admin, every login.
+
+    Applied on every resolution rather than only at creation, so a UI misclick
+    cannot lock the operator out of their own deployment.
+    """
+    if row["email"].lower() not in superuser_emails(settings):
+        return row
+    if row["role"] == "super_admin" and row["status"] == "approved":
+        return row
+    db.set_admin_user_access(
+        conn,
+        row["id"],
+        role="super_admin",
+        status="approved",
+        granted_scopes=None,
+        granted_airports=None,
+        decided_by=row["id"],
+        now=int(time.time()),
+    )
+    return db.get_admin_user(conn, row["id"])
+
+
+def current_user(
     settings: Annotated[Settings, Depends(settings_dep)],
     admin_session: Annotated[str | None, Cookie(alias=ADMIN_COOKIE_NAME)] = None,
-) -> dict:
-    if not admin_auth_configured(settings):
-        raise HTTPException(status_code=503, detail="admin credentials are not configured")
+) -> admin_users.AdminUser:
+    """Authenticate the cookie and load the row it names.
+
+    The row is read on EVERY request. That is what makes suspension take
+    effect immediately instead of whenever a 12-hour cookie happens to expire.
+    """
     if not admin_session:
         raise HTTPException(status_code=401, detail="admin login required")
     payload = decode_admin_token(settings, admin_session)
     if not payload:
         raise HTTPException(status_code=401, detail="admin login required")
-    return payload
+    with db_session(settings.database_path) as conn:
+        row = db.get_admin_user(conn, payload["uid"])
+        if row:
+            row = apply_superuser_pin(conn, row, settings)
+    if not row:
+        raise HTTPException(status_code=401, detail="admin login required")
+    return admin_users.from_row(row)
+
+
+def require_user(
+    user: Annotated[admin_users.AdminUser, Depends(current_user)],
+) -> admin_users.AdminUser:
+    if not user.is_approved:
+        # The caller's own status, and nothing else — enough for the SPA to
+        # render the right screen, no information about anyone else.
+        raise HTTPException(status_code=403, detail={"status": user.status})
+    return user
+
+
+def require_admin(
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
+) -> admin_users.AdminUser:
+    """Name retained deliberately: every existing /admin/* route depends on it."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail={"status": user.status, "role": user.role})
+    return user
+
+
+def require_super_admin(
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
+) -> admin_users.AdminUser:
+    if not user.is_super_admin:
+        raise HTTPException(status_code=403, detail={"status": user.status, "role": user.role})
+    return user
 
 
 @app.get("/healthz")
@@ -663,17 +773,41 @@ async def admin_login(
     response: Response,
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
+    """Break-glass login. Google is the normal path.
+
+    Upserts a REAL row rather than minting a synthetic identity, so key
+    ownership, created_by, and decided_by all have one identity model with no
+    special case threaded through them.
+    """
     if not admin_auth_configured(settings):
         raise HTTPException(status_code=503, detail="admin credentials are not configured")
     if payload.username != settings.admin_username or not verify_admin_password(settings, payload.password):
         raise HTTPException(status_code=401, detail="invalid admin credentials")
+
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row = db.get_admin_user(conn, admin_users.LOCAL_ADMIN_ID)
+        if not row:
+            row = db.upsert_admin_user(
+                conn,
+                id=admin_users.LOCAL_ADMIN_ID,
+                email=admin_users.LOCAL_ADMIN_EMAIL,
+                google_sub=None,
+                name=settings.admin_username,
+                picture=None,
+                role="super_admin",
+                status="approved",
+                now=now,
+            )
+        db.touch_admin_user_login(conn, row["id"], now)
+
     response.set_cookie(
         ADMIN_COOKIE_NAME,
-        sign_admin_token(settings),
+        sign_admin_token(settings, row["id"]),
         max_age=settings.admin_session_seconds,
         httponly=True,
         secure=settings.environment == "production",
-        samesite="strict",
+        samesite="lax",
         path="/",
     )
     return {"ok": True, "username": settings.admin_username}
@@ -687,10 +821,246 @@ async def admin_logout(response: Response):
 
 @app.get("/admin/session")
 async def admin_session(
-    _: Annotated[dict, Depends(require_admin)],
-    settings: Annotated[Settings, Depends(settings_dep)],
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
 ):
-    return {"ok": True, "username": settings.admin_username}
+    return {
+        "ok": True,
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "username": user.name or user.email,
+        "role": user.role,
+        "status": user.status,
+        "scopes": sorted(user.grant.scopes),
+        "airports": sorted(user.grant.airports) if user.grant.airports is not None else None,
+    }
+
+
+def google_configured(settings: Settings) -> bool:
+    return bool(
+        settings.google_oauth_client_id
+        and settings.google_oauth_client_secret
+        and settings.google_oauth_redirect_uri
+    )
+
+
+async def exchange_google_code(settings: Settings, code: str, verifier: str) -> dict:
+    """The one network call in this flow. Separated so tests can replace it."""
+    async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        resp = await client.post(
+            google_oauth.TOKEN_ENDPOINT,
+            data={
+                "code": code,
+                "client_id": settings.google_oauth_client_id,
+                "client_secret": settings.google_oauth_client_secret,
+                "redirect_uri": settings.google_oauth_redirect_uri,
+                "grant_type": "authorization_code",
+                "code_verifier": verifier,
+            },
+        )
+    resp.raise_for_status()
+    return resp.json()
+
+
+@app.get("/admin/auth/methods")
+async def admin_auth_methods(settings: Annotated[Settings, Depends(settings_dep)]):
+    """Unauthenticated: the login screen needs it before anyone is signed in."""
+    return {
+        "google": google_configured(settings),
+        "password": admin_auth_configured(settings),
+    }
+
+
+# D6: the URL a partner started sign-in from, carried through the flow so
+# Google's redirect lands them back where they were (/developers) instead of
+# always /admin. Validated against this exact allowlist — never trusted
+# as-is — because it is round-tripped through a state cookie the caller
+# ultimately influences (the `next` query param) and laundered through
+# Google's redirect; an unvalidated value here would be an open redirect.
+ADMIN_OAUTH_REDIRECT_TARGETS = frozenset({"/admin", "/developers"})
+ADMIN_OAUTH_DEFAULT_REDIRECT = "/admin"
+
+
+def _validate_oauth_redirect_target(candidate: str | None) -> str:
+    return candidate if candidate in ADMIN_OAUTH_REDIRECT_TARGETS else ADMIN_OAUTH_DEFAULT_REDIRECT
+
+
+@app.get("/admin/auth/google/start")
+async def admin_google_start(
+    settings: Annotated[Settings, Depends(settings_dep)],
+    next: str | None = None,
+):
+    if not google_configured(settings):
+        raise HTTPException(status_code=503, detail="google sign-in is not configured")
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = google_oauth.make_pkce()
+    payload = json.dumps(
+        {
+            "state": state,
+            "verifier": verifier,
+            "next": _validate_oauth_redirect_target(next),
+            "exp": int(time.time()) + google_oauth.STATE_TTL_SECONDS,
+        },
+        separators=(",", ":"),
+    )
+    body = _b64encode(payload.encode("utf-8"))
+    signature = hmac.new(
+        settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    url = google_oauth.build_authorize_url(
+        settings.google_oauth_client_id,
+        settings.google_oauth_redirect_uri,
+        state,
+        challenge,
+    )
+    redirect = RedirectResponse(url, status_code=307)
+    redirect.set_cookie(
+        google_oauth.OAUTH_STATE_COOKIE,
+        f"{body}.{signature}",
+        max_age=google_oauth.STATE_TTL_SECONDS,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="lax",
+        path="/",
+    )
+    return redirect
+
+
+def _read_state_cookie(settings: Settings, raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        body, signature = raw.split(".", 1)
+        expected = hmac.new(
+            settings.app_secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        if not secrets.compare_digest(signature, expected):
+            return None
+    except (ValueError, UnicodeEncodeError, TypeError):
+        # A non-ASCII body (a hand-crafted cookie) makes str.encode("ascii")
+        # or compare_digest raise instead of just failing the check. Treat
+        # that the same as any other malformed cookie: no match.
+        return None
+    try:
+        payload = json.loads(_b64decode(body))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    return payload
+
+
+def _oauth_failure(status_code: int, detail: str) -> JSONResponse:
+    """A terminal failure response for admin_google_callback that also
+    clears the state cookie.
+
+    HTTPException cannot carry a Set-Cookie header, so the callback's
+    failure paths return this instead of raising. Body and status match
+    exactly what FastAPI's default HTTPException handler would have
+    produced (`{"detail": ...}` at the same status) — this route is not
+    under the /v1 envelope, so nothing else intercepts it — but the signed
+    {state, verifier} cookie is deleted here too. Without this, only the
+    success path deleted it, and the comment there ("consumed so the code
+    cannot be replayed") was true of the code but not of the cookie itself,
+    which is only a state/verifier pair, and lived out its TTL after any
+    failure.
+    """
+    response = JSONResponse(status_code=status_code, content={"detail": detail})
+    response.delete_cookie(google_oauth.OAUTH_STATE_COOKIE, path="/")
+    return response
+
+
+@app.get("/admin/auth/google/callback")
+async def admin_google_callback(
+    request: Request,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    code: str | None = None,
+    state: str | None = None,
+):
+    if not google_configured(settings):
+        raise HTTPException(status_code=503, detail="google sign-in is not configured")
+
+    stored = _read_state_cookie(settings, request.cookies.get(google_oauth.OAUTH_STATE_COOKIE))
+    try:
+        state_ok = bool(stored) and bool(state) and secrets.compare_digest(
+            stored.get("state", ""), state
+        )
+    except TypeError:
+        # compare_digest raises on a non-ASCII `state` query parameter
+        # instead of just returning False. Treat that the same as any other
+        # mismatch: fail closed, not with a 500.
+        state_ok = False
+    if not state_ok:
+        # One message for every failure mode here: which check failed is not
+        # information a caller needs.
+        return _oauth_failure(400, "sign-in could not be completed")
+    if not code:
+        return _oauth_failure(400, "sign-in could not be completed")
+
+    try:
+        tokens = await exchange_google_code(settings, code, stored["verifier"])
+    except Exception as exc:  # noqa: BLE001 - upstream failure, logged not surfaced
+        logger.warning("google token exchange failed: %s", exc)
+        return _oauth_failure(502, "google sign-in is unavailable")
+
+    try:
+        claims = google_oauth.decode_id_token(tokens.get("id_token", ""))
+        google_oauth.validate_claims(claims, settings.google_oauth_client_id, int(time.time()))
+    except google_oauth.EmailNotVerified as exc:
+        logger.warning("google id_token rejected: %s", exc)
+        return _oauth_failure(403, "a verified Google account is required")
+    except google_oauth.IdTokenError as exc:
+        # The specific reason (bad aud/iss/exp, missing sub/email, ...) is
+        # logged, never surfaced: an unauthenticated caller learning which
+        # claim check failed is a fingerprinting/probing primitive.
+        logger.warning("google id_token rejected: %s", exc)
+        return _oauth_failure(400, "sign-in could not be completed")
+
+    now = int(time.time())
+    try:
+        with db_session(settings.database_path) as conn:
+            row = db.upsert_admin_user(
+                conn,
+                id=secrets.token_hex(16),
+                email=claims["email"],
+                google_sub=claims["sub"],
+                name=claims.get("name"),
+                picture=claims.get("picture"),
+                role="partner",
+                status="pending",
+                now=now,
+            )
+            row = apply_superuser_pin(conn, row, settings)
+            db.touch_admin_user_login(conn, row["id"], now)
+    except sqlite3.IntegrityError as exc:
+        # Two admin_users rows exist, and this Google account just changed
+        # its primary address to the other row's. upsert_admin_user's
+        # UPDATE ... SET email = ? then collides with the UNIQUE constraint
+        # on email. Not an escalation — the row being updated is always
+        # keyed by the caller's own google_sub — but it must not escape as a
+        # raw 500 on the auth path. Log the detail, surface the same generic
+        # failure every other rejected sign-in gets.
+        logger.warning("admin user upsert failed: %s", exc)
+        return _oauth_failure(400, "sign-in could not be completed")
+
+    redirect_to = _validate_oauth_redirect_target(
+        stored.get("next") if isinstance(stored, dict) else None
+    )
+    redirect = RedirectResponse(redirect_to, status_code=307)
+    redirect.set_cookie(
+        ADMIN_COOKIE_NAME,
+        sign_admin_token(settings, row["id"]),
+        max_age=settings.admin_session_seconds,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="lax",
+        path="/",
+    )
+    # Consume the state so the same authorization code cannot be replayed.
+    redirect.delete_cookie(google_oauth.OAUTH_STATE_COOKIE, path="/")
+    return redirect
 
 
 @app.get("/admin/dashboard")
@@ -725,6 +1095,308 @@ async def admin_live_sources(
         },
         "sources": snapshot if isinstance(snapshot, dict) else {},
     }
+
+
+def _api_key_record(row: dict, settings: Settings, *, viewer_id: str) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "prefix": api_keys.display_prefix(row["id"], settings.environment),
+        "scopes": sorted(api_keys.parse_scopes(row["scopes"])),
+        "airports": (
+            sorted(api_keys.parse_airports(row["airports"]))
+            if row["airports"] else None
+        ),
+        "created_at": row["created_at"],
+        "created_by": row["created_by"],
+        "owner_user_id": row["owner_user_id"],
+        "owned": viewer_id is not None and row["owner_user_id"] == viewer_id,
+        "last_used_at": row["last_used_at"],
+        "revoked_at": row["revoked_at"],
+    }
+
+
+@app.get("/admin/api-keys")
+async def admin_list_api_keys(
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Admins see every key including legacy unowned ones; partners see theirs."""
+    with db_session(settings.database_path) as conn:
+        rows = db.list_api_keys(conn) if user.is_admin else db.list_api_keys(conn, owner_user_id=user.id)
+    return {"keys": [_api_key_record(row, settings, viewer_id=user.id) for row in rows]}
+
+
+@app.post("/admin/api-keys")
+async def admin_create_api_key(
+    payload: ApiKeyCreateRequest,
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Returns the full key exactly once. It is unrecoverable afterwards."""
+    try:
+        api_keys.enforce_grant(payload.scopes, payload.airports, user.grant)
+        scopes = api_keys.serialize_scopes(payload.scopes)
+    except ValueError as exc:
+        # GrantViolation subclasses ValueError, so both the unknown-scope and
+        # the exceeds-grant cases land here as a 400.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    airports = api_keys.serialize_airports(payload.airports)
+    full_key, key_id, secret_hash = api_keys.generate_key(settings.environment)
+    now = int(time.time())
+
+    with db_session(settings.database_path) as conn:
+        db.create_api_key(
+            conn,
+            key_id=key_id,
+            secret_hash=secret_hash,
+            name=payload.name.strip(),
+            scopes=scopes,
+            airports=airports,
+            created_at=now,
+            created_by=user.email,
+            owner_user_id=user.id,
+        )
+        row = db.get_api_key(conn, key_id)
+
+    record = _api_key_record(row, settings, viewer_id=user.id)
+    return {"key": full_key, "record": record}
+
+
+@app.post("/admin/api-keys/{key_id}/revoke")
+async def admin_revoke_api_key(
+    key_id: str,
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    with db_session(settings.database_path) as conn:
+        row = db.get_api_key(conn, key_id)
+        # 404 for both "does not exist" and "not yours": a 403 would confirm
+        # the id is real, making key ids enumerable.
+        if not row or (not user.is_admin and row["owner_user_id"] != user.id):
+            raise HTTPException(status_code=404, detail="key not found")
+        changed = db.revoke_api_key(conn, key_id, int(time.time()))
+    return {"ok": True, "revoked": changed}
+
+
+def _user_record(row: dict) -> dict:
+    """Explicit field list, not {**row}. The row carries google_sub and
+    decided_by, which the admin UI has no use for."""
+    user = admin_users.from_row(row)
+    grant = user.grant
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "picture": row["picture"],
+        "role": row["role"],
+        "status": row["status"],
+        "scopes": sorted(grant.scopes),
+        "airports": sorted(grant.airports) if grant.airports is not None else None,
+        "requested_at": row["requested_at"],
+        "decided_at": row["decided_at"],
+        "last_login_at": row["last_login_at"],
+    }
+
+
+# The explicit "every airport" opt-in for a partner grant. Anything that maps
+# to a stored NULL `granted_airports` has to come from the caller choosing
+# this on purpose — never from omitting the field or sending an empty list,
+# both of which `api_keys.serialize_airports` would otherwise read as "every
+# airport" one layer down.
+UNRESTRICTED_AIRPORTS_SENTINEL = "*"
+
+
+def _normalize_access(payload: UserAccessRequest) -> tuple[str, str | None, str | None]:
+    """Return (role, granted_scopes, granted_airports) for storage.
+
+    admin and super_admin store NULL grants: those roles are unrestricted by
+    definition and a stored narrower value would never be enforced.
+
+    For role "partner", `airports` must be stated explicitly: a list of ICAO
+    codes, or the single-element sentinel `["*"]` to grant every airport. This
+    is the server-side half of the feature's whole thesis ("the UI clamps,
+    the server enforces") — the admin UI's `resolveAirportsSelection` already
+    refuses to submit an implicit "all airports", but until this check
+    existed the server itself accepted `airports: null` (or an omitted field)
+    for a partner and stored an unrestricted NULL grant, making the UI the
+    only thing standing between a partner and every airport on the site.
+    """
+    if payload.role not in admin_users.ROLES:
+        raise HTTPException(status_code=400, detail=f"unknown role: {payload.role}")
+    if payload.role != "partner":
+        return payload.role, None, None
+    try:
+        scopes = api_keys.serialize_scopes(payload.scopes) if payload.scopes else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Normalize (strip + uppercase, drop blanks) *before* the emptiness
+    # check. A one-element list of whitespace (`[""]`, `["  "]`, `["\t"]`,
+    # `["", ""]`) is truthy, so gating on `if not payload.airports:` alone
+    # lets it through; `serialize_airports` would then strip it down to
+    # nothing and store an unrestricted NULL grant. Normalizing first means
+    # any input that has no real ICAO content in it — however it's spelled —
+    # hits the same explicit-opt-in requirement as an omitted field.
+    cleaned = [icao.strip().upper() for icao in (payload.airports or []) if icao.strip()]
+    if not cleaned:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                'a partner grant must set "airports" explicitly: a list of '
+                'ICAO codes this partner may mint keys for, or ["*"] to '
+                "grant every airport"
+            ),
+        )
+    if cleaned == [UNRESTRICTED_AIRPORTS_SENTINEL]:
+        airports = None
+    elif UNRESTRICTED_AIRPORTS_SENTINEL in cleaned:
+        raise HTTPException(
+            status_code=400,
+            detail=f'"{UNRESTRICTED_AIRPORTS_SENTINEL}" must be the only entry when granting every airport',
+        )
+    else:
+        airports = api_keys.serialize_airports(cleaned)
+    return payload.role, scopes, airports
+
+
+def _load_target(conn, user_id: str, actor: admin_users.AdminUser, settings: Settings) -> dict:
+    row = db.get_admin_user(conn, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="user not found")
+    target = admin_users.from_row(row)
+    # This SELECT runs in autocommit; the write transaction doesn't open
+    # until the caller's first UPDATE, so there is a TOCTOU window between
+    # this guard check and the write. It is harmless here: the guard's
+    # inputs are the path user_id, the actor's own id, and env-derived
+    # ADMIN_SUPERUSERS, and none of these routes can mutate any of those
+    # between the read and the write within one request. Do not "fix" this
+    # by restructuring the transaction to close the window.
+    try:
+        admin_users.guard_modification(actor, target, superuser_emails(settings))
+    except admin_users.GuardViolation as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return row
+
+
+@app.get("/admin/users")
+async def admin_list_users(
+    _: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    status: str | None = None,
+):
+    if status and status not in admin_users.STATUSES:
+        raise HTTPException(status_code=400, detail=f"unknown status: {status}")
+    with db_session(settings.database_path) as conn:
+        rows = db.list_admin_users(conn, status=status)
+    return {"users": [_user_record(row) for row in rows]}
+
+
+@app.post("/admin/users/{user_id}/approve")
+async def admin_approve_user(
+    user_id: str,
+    payload: UserAccessRequest,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Approve (or re-approve) a user's role and grant.
+
+    Re-approving an already-approved user is a grant edit like PATCH, not a
+    fresh admission, so it must cascade the same way: narrowing revokes the
+    keys that now exceed the grant, in the same transaction; widening revokes
+    nothing.
+
+    For role "partner", `airports` is required and must be either a list of
+    ICAO codes or the single-element sentinel `["*"]` for every airport — see
+    `_normalize_access`. Omitting it, or sending `[]`, is a 400.
+    """
+    role, scopes, airports = _normalize_access(payload)
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=role, status="approved", granted_scopes=scopes,
+            granted_airports=airports, decided_by=actor.id, now=now,
+        )
+        updated = db.get_admin_user(conn, user_id)
+        revoked = db.revoke_keys_outside_grant(
+            conn, user_id, admin_users.from_row(updated).grant, now
+        )
+    return {"user": _user_record(updated), "revoked_keys": revoked}
+
+
+@app.post("/admin/users/{user_id}/reject")
+async def admin_reject_user(
+    user_id: str,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row = _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=row["role"], status="rejected", granted_scopes=None,
+            granted_airports=None, decided_by=actor.id, now=now,
+        )
+        revoked = db.revoke_keys_for_owner(conn, user_id, now)
+        row = db.get_admin_user(conn, user_id)
+    return {"user": _user_record(row), "revoked_keys": revoked}
+
+
+@app.post("/admin/users/{user_id}/suspend")
+async def admin_suspend_user(
+    user_id: str,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Suspension revokes their keys in the same transaction.
+
+    Suspending someone while their keys keep working is the obvious foot-gun;
+    the cascade removes it.
+    """
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row = _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=row["role"], status="suspended",
+            granted_scopes=row["granted_scopes"], granted_airports=row["granted_airports"],
+            decided_by=actor.id, now=now,
+        )
+        revoked = db.revoke_keys_for_owner(conn, user_id, now)
+        row = db.get_admin_user(conn, user_id)
+    return {"user": _user_record(row), "revoked_keys": revoked}
+
+
+@app.patch("/admin/users/{user_id}")
+async def admin_update_user(
+    user_id: str,
+    payload: UserAccessRequest,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Edit role and grant. Narrowing revokes the keys that no longer fit.
+
+    Already-minted keys carry their own scopes, so widening changes nothing
+    retroactively and narrowing must be enforced explicitly.
+
+    For role "partner", `airports` is required and must be either a list of
+    ICAO codes or the single-element sentinel `["*"]` for every airport — see
+    `_normalize_access`. Omitting it, or sending `[]`, is a 400.
+    """
+    role, scopes, airports = _normalize_access(payload)
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row = _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=role, status=row["status"], granted_scopes=scopes,
+            granted_airports=airports, decided_by=actor.id, now=now,
+        )
+        updated = db.get_admin_user(conn, user_id)
+        revoked = db.revoke_keys_outside_grant(
+            conn, user_id, admin_users.from_row(updated).grant, now
+        )
+    return {"user": _user_record(updated), "revoked_keys": revoked}
 
 
 @app.get("/config")

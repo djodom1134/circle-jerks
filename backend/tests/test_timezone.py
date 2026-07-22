@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from app import db
 
 
@@ -34,6 +38,39 @@ def test_migrate_adds_columns_to_legacy_db(tmp_path):
     assert "emitter_category" in _cols(conn, "operations")
     assert "emitter_category" in _cols(conn, "track_archive")
     assert "timezone" in _cols(conn, "airports")
+
+
+# ─── Concurrent-migration guard (final-review FIX 7) ─────────────────────────
+#
+# uvicorn --workers 3 plus a separate worker container mean four or more
+# processes call init_db -> _migrate on first boot. Each guards the ALTER
+# with a PRAGMA table_info read taken before sqlite's write lock, not under
+# it, so a loser can still hit "duplicate column name" on its own ALTER even
+# though its own read said the column was missing. These tests exercise
+# `_add_column_if_missing` directly against that race, since reproducing it
+# through `_migrate` itself would require genuine concurrent connections.
+
+def test_add_column_if_missing_swallows_a_duplicate_column_race(tmp_path):
+    path = str(tmp_path / "race.sqlite3")
+    conn = db.connect(path)
+    # Simulate what a losing process sees: a sibling's ALTER already landed
+    # between this process's own PRAGMA table_info read and its own ALTER.
+    conn.executescript("CREATE TABLE api_keys (id TEXT PRIMARY KEY, owner_user_id TEXT);")
+    conn.commit()
+
+    db._add_column_if_missing(conn, "api_keys", "owner_user_id", "TEXT")  # must not raise
+
+    assert "owner_user_id" in _cols(conn, "api_keys")
+
+
+def test_add_column_if_missing_still_raises_on_a_real_operational_error(tmp_path):
+    path = str(tmp_path / "race2.sqlite3")
+    conn = db.connect(path)
+    conn.executescript("CREATE TABLE api_keys (id TEXT PRIMARY KEY);")
+    conn.commit()
+
+    with pytest.raises(sqlite3.OperationalError):
+        db._add_column_if_missing(conn, "no_such_table", "col", "TEXT")
 
 
 from app.db import local_hour, local_day_key, local_month_key
