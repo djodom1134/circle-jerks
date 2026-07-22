@@ -158,6 +158,31 @@ def test_stopped_percent_becomes_a_fraction():
     assert not hasattr(out.stop_classification.all, "stopped_pct")
 
 
+def test_stopped_fraction_is_none_when_traffic_is_empty():
+    # Empty-traffic edge case: when an airport/window has zero operations
+    # (total == 0), db.py's _stop_bucket sets stopped_pct to None rather
+    # than dividing by zero. The builder's _stop_breakdown must guard this
+    # and return None for fraction_stopped, not 0.0 (which would falsely claim
+    # "0% stopped"). This is load-bearing: a regressed guard returning 0.0
+    # would still pass a test that doesn't inspect the field.
+    stats = {
+        "counters": {"circles": 0, "touch_and_gos": 0, "low_approaches": 0,
+                     "landings": 0, "passes": 0, "unique_aircraft": 0,
+                     "runway_changes": 0},
+        "ops_over_time": [],
+        "runway_usage": [],
+        "stop_classification": {
+            "all": {"total": 0, "stopped": 0, "did_not_stop": 0, "stopped_pct": None},
+            "pattern": {"total": 0, "stopped": 0, "did_not_stop": 0, "stopped_pct": None},
+        },
+    }
+    out = v1_schemas.airport_stats_out("KLMO", {"code": "7d", "start_ts": 1, "end_ts": 2,
+                                                "bucket_seconds": 3600}, stats)
+    # Both buckets must produce None, not 0.0 or a crash
+    assert out.stop_classification.all.fraction_stopped is None
+    assert out.stop_classification.pattern.fraction_stopped is None
+
+
 def test_runways_drop_the_duplicated_internal_icao():
     rows = [{"icao": "KLMO", "runway_id": "29", "lat_threshold": 40.1,
              "lon_threshold": -105.1, "heading_deg": 290, "length_ft": 4800}]
