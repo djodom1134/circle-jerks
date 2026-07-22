@@ -165,6 +165,47 @@ def test_a_super_admin_can_revoke_a_legacy_unowned_key(tmp_path, monkeypatch):
         assert client.post("/admin/api-keys/cccccccccccccccc/revoke").json()["revoked"] is True
 
 
+def test_a_restricted_partners_minted_key_is_actually_restricted_at_v1(tmp_path, monkeypatch):
+    """The highest-value missing test from the final review.
+
+    Every other test in this file (and in test_api_keys.py) proves one half
+    in isolation: that admin_create_api_key enforces the grant, or that
+    ApiKeyContext.allows_airport rejects an out-of-grant airport. Nothing
+    crossed the boundary — mint a key through the real HTTP endpoint, then
+    present that exact key to /v1 and prove the restriction actually holds.
+
+    If a refactor ever dropped `airports=api_keys.serialize_airports(payload.airports)`
+    from admin_create_api_key, enforce_grant would still run and still pass
+    (the request only ever asks for KLMO), and this partner's key would
+    silently become unrestricted across every airport — invisible to every
+    other test, since none of them mint a key here and then use it there.
+    """
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        become_partner(scopes="ops:read", airports="KLMO")
+        created = client.post("/admin/api-keys", json={
+            "name": "scoped", "scopes": ["ops:read"], "airports": ["KLMO"],
+        })
+        assert created.status_code == 200
+        full_key = created.json()["key"]
+
+        inside = client.get(
+            "/v1/operations",
+            params={"airport": "KLMO"},
+            headers={"Authorization": f"Bearer {full_key}"},
+        )
+        assert inside.status_code == 200
+
+        outside = client.get(
+            "/v1/operations",
+            params={"airport": "KBJC"},
+            headers={"Authorization": f"Bearer {full_key}"},
+        )
+        assert outside.status_code == 403
+        assert outside.json()["error"]["code"] == "forbidden_airport"
+
+
 def test_a_pending_user_cannot_touch_keys_at_all(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
     with TestClient(app) as client:

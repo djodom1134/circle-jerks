@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi.testclient import TestClient
 
 from app import db, google_oauth
-from app.main import app, db_session
+from app.main import GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE, app, db_session
 from app.settings import get_settings
 
 CLIENT_ID = "client-123.apps.googleusercontent.com"
@@ -309,3 +309,134 @@ def test_callback_without_a_code_parameter_is_rejected(tmp_path, monkeypatch):
         )
         assert resp.status_code == 400
         assert resp.json() == {"detail": "sign-in could not be completed"}
+
+
+# ─── Rate limiting (final-review FIX 2) ──────────────────────────────────────
+#
+# The design doc claims twice that /start and /callback are rate-limited
+# (D4: "Mitigated by rate-limiting the start and callback endpoints"; "Both
+# endpoints are rate-limited (D4)"). Until this fix there was no limiter at
+# all. These tests make that claim true.
+
+def test_start_is_rate_limited_per_ip(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        for _ in range(GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE):
+            assert client.get("/admin/auth/google/start", follow_redirects=False).status_code == 307
+        resp = client.get("/admin/auth/google/start", follow_redirects=False)
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"]
+
+
+def test_callback_is_rate_limited_per_ip_with_a_clean_429_not_a_500(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        state = start(client)
+        # Each of these fails on the (irrelevant) wrong state, but that check
+        # runs after the rate limiter, so it still consumes the budget.
+        for _ in range(GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE):
+            client.get("/admin/auth/google/callback?code=abc&state=wrong", follow_redirects=False)
+        resp = client.get(
+            f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"]
+
+
+def test_start_and_callback_rate_limits_are_independent(tmp_path, monkeypatch):
+    """Exhausting /callback's budget must not cost /start anything — otherwise
+    a real operator's retries on one endpoint could lock them out of the
+    other."""
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        for _ in range(GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE):
+            client.get("/admin/auth/google/callback?code=abc&state=wrong", follow_redirects=False)
+        assert client.get(
+            "/admin/auth/google/callback?code=abc&state=wrong", follow_redirects=False
+        ).status_code == 429
+
+        # /start's own budget is untouched.
+        assert client.get("/admin/auth/google/start", follow_redirects=False).status_code == 307
+
+
+# ─── D6: /developers survives the round trip (final-review FIX 3) ───────────
+
+def test_the_origin_path_is_carried_through_to_the_redirect(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        resp = client.get("/admin/auth/google/start?next=/developers", follow_redirects=False)
+        state = parse_qs(urlparse(resp.headers["location"]).query)["state"][0]
+        callback = client.get(
+            f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert callback.status_code == 307
+        assert callback.headers["location"] == "/developers"
+
+
+def test_an_unrecognized_next_path_falls_back_to_admin(tmp_path, monkeypatch):
+    """The allowlist is exact-match, not a prefix or substring check: an
+    attacker-controlled path — laundered through Google's redirect — must
+    never reach the Location header verbatim."""
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        resp = client.get(
+            "/admin/auth/google/start?next=https://evil.example.com/",
+            follow_redirects=False,
+        )
+        state = parse_qs(urlparse(resp.headers["location"]).query)["state"][0]
+        callback = client.get(
+            f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert callback.status_code == 307
+        assert callback.headers["location"] == "/admin"
+
+
+def test_no_next_param_still_defaults_to_admin(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        state = start(client)
+        callback = client.get(
+            f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert callback.headers["location"] == "/admin"
+
+
+# ─── Email collision on upsert is a 400, not a 500 (final-review FIX 5) ─────
+
+def test_a_google_email_collision_on_upsert_is_a_400_not_a_500(tmp_path, monkeypatch):
+    """Two admin_users rows exist. This sign-in's Google account (google-sub-1,
+    already on file under an old address) has changed its primary email to
+    the address already owned by a different row (google-sub-2).
+    upsert_admin_user's `UPDATE admin_users SET email = ?` then collides with
+    the UNIQUE constraint on email — verified live by the reviewer as an
+    unhandled 500. Not an escalation: the row being updated is always keyed
+    by the caller's own google_sub. But it must not escape the auth path as a
+    raw 500.
+    """
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        with db_session(get_settings().database_path) as conn:
+            db.upsert_admin_user(
+                conn, id="row-a", email="old@example.com", google_sub="google-sub-1",
+                name="A", picture=None, role="partner", status="approved", now=1,
+            )
+            db.upsert_admin_user(
+                conn, id="row-b", email="dupe@example.com", google_sub="google-sub-2",
+                name="B", picture=None, role="partner", status="approved", now=1,
+            )
+        stub_exchange(monkeypatch, token=id_token(sub="google-sub-1", email="dupe@example.com"))
+        state = start(client)
+        resp = client.get(
+            f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "sign-in could not be completed"}
+        with db_session(get_settings().database_path) as conn:
+            # The failed write must not have left a partial change behind.
+            assert db.get_admin_user(conn, "row-a")["email"] == "old@example.com"
+            assert db.get_admin_user(conn, "row-b")["email"] == "dupe@example.com"

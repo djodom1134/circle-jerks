@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import secrets
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -165,6 +166,13 @@ class ApiKeyCreateRequest(BaseModel):
 class UserAccessRequest(BaseModel):
     role: str
     scopes: list[str] = []
+    # No default of `None`, deliberately: `api_keys.serialize_airports` treats
+    # `None` (and `[]`) as "every airport" one layer down, which would make an
+    # omitted field the most dangerous possible default for a partner grant.
+    # `_normalize_access` requires this to be stated explicitly for role
+    # "partner" — a list of ICAO codes, or the single-element sentinel
+    # `["*"]` to grant every airport on purpose. admin/super_admin ignore
+    # this field entirely (see `_normalize_access`).
     airports: list[str] | None = None
 
 
@@ -863,10 +871,55 @@ async def admin_auth_methods(settings: Annotated[Settings, Depends(settings_dep)
     }
 
 
+# D6: the URL a partner started sign-in from, carried through the flow so
+# Google's redirect lands them back where they were (/developers) instead of
+# always /admin. Validated against this exact allowlist — never trusted
+# as-is — because it is round-tripped through a state cookie the caller
+# ultimately influences (the `next` query param) and laundered through
+# Google's redirect; an unvalidated value here would be an open redirect.
+ADMIN_OAUTH_REDIRECT_TARGETS = frozenset({"/admin", "/developers"})
+ADMIN_OAUTH_DEFAULT_REDIRECT = "/admin"
+
+
+def _validate_oauth_redirect_target(candidate: str | None) -> str:
+    return candidate if candidate in ADMIN_OAUTH_REDIRECT_TARGETS else ADMIN_OAUTH_DEFAULT_REDIRECT
+
+
+# Per-client-IP limit on the two unauthenticated OAuth endpoints (D4 in the
+# design doc claims this exists; until now it did not). A real sign-in is one
+# GET to /start and one to /callback; a human retrying a typo'd account, a
+# cancelled consent screen, or several people behind one corporate NAT might
+# plausibly produce a double-digit burst. 20 requests per IP per endpoint per
+# minute comfortably covers that while still capping a scripted loop at a few
+# hundred pending rows an hour instead of thousands a minute — the concern the
+# design doc raises is a filled pending queue, not a instant one.
+GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS = 60
+GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE = 20
+
+
+async def _enforce_google_oauth_rate_limit(store: Store, request: Request, endpoint: str) -> None:
+    ip = client_ip(request) or "unknown"
+    now = int(time.time())
+    window = now // GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS
+    used = await store.incr_counter(
+        f"admin_oauth:{endpoint}:{ip}:{window}", GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS
+    )
+    if used > GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE:
+        raise HTTPException(
+            status_code=429,
+            detail="too many sign-in attempts; slow down",
+            headers={"Retry-After": str(GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS)},
+        )
+
+
 @app.get("/admin/auth/google/start")
 async def admin_google_start(
+    request: Request,
     settings: Annotated[Settings, Depends(settings_dep)],
+    store: Annotated[Store, Depends(store_dep)],
+    next: str | None = None,
 ):
+    await _enforce_google_oauth_rate_limit(store, request, "start")
     if not google_configured(settings):
         raise HTTPException(status_code=503, detail="google sign-in is not configured")
     state = secrets.token_urlsafe(24)
@@ -875,6 +928,7 @@ async def admin_google_start(
         {
             "state": state,
             "verifier": verifier,
+            "next": _validate_oauth_redirect_target(next),
             "exp": int(time.time()) + google_oauth.STATE_TTL_SECONDS,
         },
         separators=(",", ":"),
@@ -952,9 +1006,11 @@ def _oauth_failure(status_code: int, detail: str) -> JSONResponse:
 async def admin_google_callback(
     request: Request,
     settings: Annotated[Settings, Depends(settings_dep)],
+    store: Annotated[Store, Depends(store_dep)],
     code: str | None = None,
     state: str | None = None,
 ):
+    await _enforce_google_oauth_rate_limit(store, request, "callback")
     if not google_configured(settings):
         raise HTTPException(status_code=503, detail="google sign-in is not configured")
 
@@ -995,22 +1051,36 @@ async def admin_google_callback(
         return _oauth_failure(400, "sign-in could not be completed")
 
     now = int(time.time())
-    with db_session(settings.database_path) as conn:
-        row = db.upsert_admin_user(
-            conn,
-            id=secrets.token_hex(16),
-            email=claims["email"],
-            google_sub=claims["sub"],
-            name=claims.get("name"),
-            picture=claims.get("picture"),
-            role="partner",
-            status="pending",
-            now=now,
-        )
-        row = apply_superuser_pin(conn, row, settings)
-        db.touch_admin_user_login(conn, row["id"], now)
+    try:
+        with db_session(settings.database_path) as conn:
+            row = db.upsert_admin_user(
+                conn,
+                id=secrets.token_hex(16),
+                email=claims["email"],
+                google_sub=claims["sub"],
+                name=claims.get("name"),
+                picture=claims.get("picture"),
+                role="partner",
+                status="pending",
+                now=now,
+            )
+            row = apply_superuser_pin(conn, row, settings)
+            db.touch_admin_user_login(conn, row["id"], now)
+    except sqlite3.IntegrityError as exc:
+        # Two admin_users rows exist, and this Google account just changed
+        # its primary address to the other row's. upsert_admin_user's
+        # UPDATE ... SET email = ? then collides with the UNIQUE constraint
+        # on email. Not an escalation — the row being updated is always
+        # keyed by the caller's own google_sub — but it must not escape as a
+        # raw 500 on the auth path. Log the detail, surface the same generic
+        # failure every other rejected sign-in gets.
+        logger.warning("admin user upsert failed: %s", exc)
+        return _oauth_failure(400, "sign-in could not be completed")
 
-    redirect = RedirectResponse("/admin", status_code=307)
+    redirect_to = _validate_oauth_redirect_target(
+        stored.get("next") if isinstance(stored, dict) else None
+    )
+    redirect = RedirectResponse(redirect_to, status_code=307)
     redirect.set_cookie(
         ADMIN_COOKIE_NAME,
         sign_admin_token(settings, row["id"]),
@@ -1162,11 +1232,28 @@ def _user_record(row: dict) -> dict:
     }
 
 
+# The explicit "every airport" opt-in for a partner grant. Anything that maps
+# to a stored NULL `granted_airports` has to come from the caller choosing
+# this on purpose — never from omitting the field or sending an empty list,
+# both of which `api_keys.serialize_airports` would otherwise read as "every
+# airport" one layer down.
+UNRESTRICTED_AIRPORTS_SENTINEL = "*"
+
+
 def _normalize_access(payload: UserAccessRequest) -> tuple[str, str | None, str | None]:
     """Return (role, granted_scopes, granted_airports) for storage.
 
     admin and super_admin store NULL grants: those roles are unrestricted by
     definition and a stored narrower value would never be enforced.
+
+    For role "partner", `airports` must be stated explicitly: a list of ICAO
+    codes, or the single-element sentinel `["*"]` to grant every airport. This
+    is the server-side half of the feature's whole thesis ("the UI clamps,
+    the server enforces") — the admin UI's `resolveAirportsSelection` already
+    refuses to submit an implicit "all airports", but until this check
+    existed the server itself accepted `airports: null` (or an omitted field)
+    for a partner and stored an unrestricted NULL grant, making the UI the
+    only thing standing between a partner and every airport on the site.
     """
     if payload.role not in admin_users.ROLES:
         raise HTTPException(status_code=400, detail=f"unknown role: {payload.role}")
@@ -1176,7 +1263,29 @@ def _normalize_access(payload: UserAccessRequest) -> tuple[str, str | None, str 
         scopes = api_keys.serialize_scopes(payload.scopes) if payload.scopes else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return payload.role, scopes, api_keys.serialize_airports(payload.airports)
+
+    if not payload.airports:
+        # Covers both an omitted/null field and an explicit `[]` — the same
+        # hazard either way, since both would otherwise fall through to
+        # serialize_airports' "empty means all" behavior.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                'a partner grant must set "airports" explicitly: a list of '
+                'ICAO codes this partner may mint keys for, or ["*"] to '
+                "grant every airport"
+            ),
+        )
+    if payload.airports == [UNRESTRICTED_AIRPORTS_SENTINEL]:
+        airports = None
+    elif any(icao.strip() == UNRESTRICTED_AIRPORTS_SENTINEL for icao in payload.airports):
+        raise HTTPException(
+            status_code=400,
+            detail=f'"{UNRESTRICTED_AIRPORTS_SENTINEL}" must be the only entry when granting every airport',
+        )
+    else:
+        airports = api_keys.serialize_airports(payload.airports)
+    return payload.role, scopes, airports
 
 
 def _load_target(conn, user_id: str, actor: admin_users.AdminUser, settings: Settings) -> dict:
@@ -1224,6 +1333,10 @@ async def admin_approve_user(
     fresh admission, so it must cascade the same way: narrowing revokes the
     keys that now exceed the grant, in the same transaction; widening revokes
     nothing.
+
+    For role "partner", `airports` is required and must be either a list of
+    ICAO codes or the single-element sentinel `["*"]` for every airport — see
+    `_normalize_access`. Omitting it, or sending `[]`, is a 400.
     """
     role, scopes, airports = _normalize_access(payload)
     now = int(time.time())
@@ -1293,6 +1406,10 @@ async def admin_update_user(
 
     Already-minted keys carry their own scopes, so widening changes nothing
     retroactively and narrowing must be enforced explicitly.
+
+    For role "partner", `airports` is required and must be either a list of
+    ICAO codes or the single-element sentinel `["*"]` for every airport — see
+    `_normalize_access`. Omitting it, or sending `[]`, is a 400.
     """
     role, scopes, airports = _normalize_access(payload)
     now = int(time.time())

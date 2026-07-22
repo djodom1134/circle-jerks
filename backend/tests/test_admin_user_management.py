@@ -246,8 +246,11 @@ def test_widening_a_grant_revokes_nothing(tmp_path, monkeypatch):
         login(client)
         seed_partner(status="approved")
         make_key("u2", "aaaaaaaaaaaaaaaa", scopes="ops:read", airports="KLMO")
+        # Scopes widen; airports stay the same restricted grant. (Airports is
+        # no longer nullable for a partner grant — see the airports-explicit
+        # tests below — so this only exercises scope widening.)
         resp = client.patch("/admin/users/u2", json={
-            "role": "partner", "scopes": ["ops:read", "ledger:read"], "airports": None,
+            "role": "partner", "scopes": ["ops:read", "ledger:read"], "airports": ["KLMO"],
         })
         assert resp.json()["revoked_keys"] == 0
 
@@ -320,3 +323,105 @@ def test_unknown_user_is_404(tmp_path, monkeypatch):
     with TestClient(app) as client:
         login(client)
         assert client.post("/admin/users/nope/suspend").status_code == 404
+
+
+# ─── Partner grants must state `airports` explicitly (final-review FIX 1) ───
+#
+# api_keys.serialize_airports documents "None or an empty list both mean 'all
+# airports'". UserAccessRequest.airports defaulted to None, so approving a
+# partner without ever mentioning airports silently granted every airport at
+# the site — verified live by the reviewer via
+# POST /admin/users/p1/approve {"role":"partner","scopes":["ops:read"]} => 200
+# with granted_airports = NULL. The admin UI's resolveAirportsSelection
+# already refused to submit that implicit default, which meant the UI, not
+# the server, was the only thing enforcing the feature's whole thesis. These
+# tests pin the server-side fix.
+
+def test_partner_approval_with_airports_omitted_is_rejected(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"],
+        })
+        assert resp.status_code == 400
+        with db_session(get_settings().database_path) as conn:
+            row = db.get_admin_user(conn, "u2")
+            assert row["status"] == "pending"
+            assert row["granted_airports"] is None
+
+
+def test_partner_approval_with_an_explicit_empty_airports_list_is_rejected(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": [],
+        })
+        assert resp.status_code == 400
+
+
+def test_partner_approval_accepts_the_explicit_all_airports_sentinel(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": ["*"],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["user"]["airports"] is None
+        with db_session(get_settings().database_path) as conn:
+            assert db.get_admin_user(conn, "u2")["granted_airports"] is None
+
+
+def test_partner_approval_rejects_the_sentinel_mixed_with_real_airports(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": ["*", "KLMO"],
+        })
+        assert resp.status_code == 400
+
+
+def test_partner_approval_with_specific_airports_still_works(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": ["KLMO"],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["user"]["airports"] == ["KLMO"]
+
+
+def test_admin_role_approval_is_unaffected_by_the_airports_requirement(tmp_path, monkeypatch):
+    # admin/super_admin ignore submitted scopes/airports entirely and store a
+    # NULL grant regardless — the explicit-airports requirement is scoped to
+    # role "partner" only, per _normalize_access.
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "admin", "scopes": [],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["user"]["airports"] is None
+
+
+def test_partner_patch_with_airports_omitted_is_rejected(tmp_path, monkeypatch):
+    # Same rule on the PATCH (edit) path, not just approve.
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner(status="approved")
+        resp = client.patch("/admin/users/u2", json={
+            "role": "partner", "scopes": ["ops:read"],
+        })
+        assert resp.status_code == 400

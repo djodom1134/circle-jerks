@@ -195,6 +195,27 @@ UI misclick can never lock the operator out, and the pin survives a database
 wipe. Everyone else lands in the pending queue at `/admin` → Access requests
 until a super-admin approves them.
 
+**`ADMIN_SUPERUSERS` semantics, two gotchas:**
+
+- **Removing an address does not demote the existing row.** The pin is
+  applied on every login (`apply_superuser_pin` in `backend/app/main.py`),
+  not on removal — there is no corresponding "un-pin" action. A row that was
+  pinned stays `role=super_admin` until someone edits it via `/admin/users`,
+  which becomes *possible* only once the address is off the list: while an
+  address is listed, `guard_modification` refuses to let anyone change that
+  row at all; the moment it's removed, that protection is gone too, and the
+  row is just an ordinary (if currently super_admin) account waiting for
+  someone to notice and downgrade it.
+- **Whoever controls that verified Google address auto-becomes super_admin,
+  every time, no approval step.** This is by design for a personal account
+  you control — but it is a real hazard on a corporate Google Workspace
+  domain that recycles addresses (e.g. a departed employee's mailbox
+  reassigned to someone new): the next person to sign in with that address
+  is instantly a super_admin with full user-management and unrestricted key
+  minting. Keep `ADMIN_SUPERUSERS` scoped to addresses whose ownership you
+  control for the life of the deployment, and prune it promptly when that
+  stops being true.
+
 ## Production `app_secret` guard
 
 `CIRCLEJERK_APP_SECRET` signs the admin session cookie and the OAuth state
@@ -211,6 +232,12 @@ deploy after this feature:
 ```bash
 openssl rand -hex 32
 ```
+
+**Pre-deploy check:** confirm `CIRCLEJERK_APP_SECRET` (`APP_SECRET` in the
+droplet's `.env`) is actually set to a real value before every deploy that
+restarts the api container — the guard above means an unset or default value
+makes the container refuse to start, which 502s **everything** under `/api`,
+not just the admin/auth routes.
 
 `local` and `test` environments are unaffected — only a `production` deploy
 with the default secret fails to start.

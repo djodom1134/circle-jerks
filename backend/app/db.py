@@ -457,6 +457,29 @@ def init_db(path: str) -> None:
         conn.close()
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """ALTER TABLE ... ADD COLUMN, tolerant of a concurrent winner.
+
+    `init_db` runs from both `main.lifespan` (uvicorn `--workers 3`) and
+    `worker.py`, so `docker-compose.prod.yml` starts four or more processes
+    that all race `_migrate` on first boot. Each guards on a `PRAGMA
+    table_info` read taken before sqlite's write lock, not under it, so a
+    loser can still lose the ALTER itself even though its own read said the
+    column was missing a moment earlier. Self-healing and one-time — once any
+    process lands the column, every later read (including a retry) sees it
+    and skips this call entirely — but unguarded it raises
+    `OperationalError: duplicate column name` and can crash-loop the api
+    container on the deploy that introduces a new column. Swallow only that
+    message; anything else (disk full, a genuinely malformed ALTER, ...) must
+    still surface.
+    """
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     additions: dict[str, list[tuple[str, str]]] = {
         "submission_aircraft": [
@@ -481,7 +504,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             continue  # table doesn't exist yet; SCHEMA will create it with the column
         for column, decl in cols:
             if column not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                _add_column_if_missing(conn, table, column, decl)
 
     # api_keys' CREATE TABLE in SCHEMA does not include owner_user_id — the
     # ALTER TABLE loop above is what adds that column, on a fresh database
