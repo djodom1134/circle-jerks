@@ -45,6 +45,36 @@ FORWARDED_ONLY_PARAMS = {"days"}
 SELF_DESCRIBING_PATHS = ("openapi.json", "docs")
 
 
+def _find_corrupted_flow_descriptions(node: object, path: str, in_scope: bool) -> list[str]:
+    """Guard against `description: foo, bar` inside a YAML flow mapping (e.g.
+    `icao24: { type: string, description: 24-bit ICAO, lowercase hex. }`):
+    the unquoted comma parses as a key separator, truncating the description
+    and leaving a garbage null-valued sibling key (here `lowercase hex.`)
+    behind. Scoped to descendants of a `properties`/`schemas` key, and only
+    keys that look like a description fragment (a space, or a trailing
+    period), so a legitimately-null field is never flagged.
+    """
+    hits: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if (
+                in_scope
+                and value is None
+                and isinstance(key, str)
+                and (" " in key or key.endswith("."))
+            ):
+                hits.append(f"{path}/{key}")
+            hits.extend(
+                _find_corrupted_flow_descriptions(
+                    value, f"{path}/{key}", in_scope or key in ("properties", "schemas")
+                )
+            )
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            hits.extend(_find_corrupted_flow_descriptions(item, f"{path}[{i}]", in_scope))
+    return hits
+
+
 def main() -> int:
     live = get_openapi(title="verify", version=API_VERSION, routes=router.routes)
     doc = yaml.safe_load(DOC.read_text())
@@ -78,6 +108,12 @@ def main() -> int:
     for section, name in sorted(set(re.findall(r"#/components/(\w+)/(\w+)", raw))):
         if name not in doc.get("components", {}).get(section, {}):
             problems.append(f"dangling $ref: #/components/{section}/{name}")
+
+    for hit in sorted(_find_corrupted_flow_descriptions(doc, "", False)):
+        problems.append(
+            f"corrupted description (unquoted comma in a flow-mapping "
+            f"`description:`, quote the value): {hit}"
+        )
 
     # The committed JSON is what the admin docs panel and /v1/openapi.json
     # serve. If it drifts from the YAML, partners read one contract while the

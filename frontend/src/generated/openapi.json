@@ -387,16 +387,14 @@
         "description": "One ranked aircraft. Ranking is by `vnap_score` \u00d7 `total_circles`;\nthat product itself is not published here \u2014 it is the internal sort\nkey, not a property of the aircraft.\n",
         "properties": {
           "aircraft_type": {
-            "description": "Airframe model from the registry",
+            "description": "Airframe model from the registry, when known.",
             "type": [
               "string",
               "null"
-            ],
-            "when known.": null
+            ]
           },
           "icao24": {
-            "description": "24-bit ICAO address",
-            "lowercase hex.": null,
+            "description": "24-bit ICAO address, lowercase hex.",
             "type": "string"
           },
           "last_reported_at_ts": {
@@ -496,16 +494,14 @@
             "type": "number"
           },
           "icao24": {
-            "description": "24-bit ICAO address",
-            "lowercase hex.": null,
+            "description": "24-bit ICAO address, lowercase hex.",
             "type": [
               "string",
               "null"
             ]
           },
           "id": {
-            "also half of the cursor.": null,
-            "description": "Stable identifier",
+            "description": "Stable identifier, also half of the cursor.",
             "type": "string"
           },
           "min_altitude_ft_agl": {
@@ -533,12 +529,11 @@
             ]
           },
           "registration": {
-            "description": "Tail number",
+            "description": "Tail number, when resolvable.",
             "type": [
               "string",
               "null"
-            ],
-            "when resolvable.": null
+            ]
           },
           "runway_id": {
             "type": [
@@ -728,9 +723,7 @@
             "type": "array"
           },
           "timezone": {
-            "and hours.": null,
-            "description": "IANA tz name used to bucket local days",
-            "months": null,
+            "description": "IANA tz name used to bucket local days, months, and hours.",
             "type": "string"
           }
         },

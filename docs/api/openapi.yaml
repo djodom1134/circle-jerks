@@ -738,11 +738,11 @@ components:
       description: One detected operation. Field set is frozen; new database columns do not appear here.
       required: [id, airport_icao, type, timestamp_ts]
       properties:
-        id: { type: string, description: Stable identifier, also half of the cursor. }
+        id: { type: string, description: "Stable identifier, also half of the cursor." }
         airport_icao: { type: string }
-        icao24: { type: [string, "null"], description: 24-bit ICAO address, lowercase hex. }
+        icao24: { type: [string, "null"], description: "24-bit ICAO address, lowercase hex." }
         callsign: { type: [string, "null"] }
-        registration: { type: [string, "null"], description: Tail number, when resolvable. }
+        registration: { type: [string, "null"], description: "Tail number, when resolvable." }
         type:
           type: string
           enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
@@ -904,7 +904,7 @@ components:
         key, not a property of the aircraft.
       required: [icao24, registration, owner_class, total_circles, report_count, vnap_score]
       properties:
-        icao24: { type: string, description: 24-bit ICAO address, lowercase hex. }
+        icao24: { type: string, description: "24-bit ICAO address, lowercase hex." }
         registration:
           type: string
           description: |
@@ -912,7 +912,7 @@ components:
             aircraft's callsign or registry entry, else the uppercase ICAO
             hex. Was `tail`; /v1/operations already calls this same concept
             `registration`.
-        aircraft_type: { type: [string, "null"], description: Airframe model from the registry, when known. }
+        aircraft_type: { type: [string, "null"], description: "Airframe model from the registry, when known." }
         owner_class: { type: string, description: "e.g. flight_school, private, commercial, unknown." }
         total_circles: { type: integer }
         report_count: { type: integer, description: Lifetime public report count for this aircraft. }
@@ -931,7 +931,7 @@ components:
       required: [airport_icao, timezone, data_since_ts, recent_days, monthly, time_of_day]
       properties:
         airport_icao: { type: string }
-        timezone: { type: string, description: IANA tz name used to bucket local days, months, and hours. }
+        timezone: { type: string, description: "IANA tz name used to bucket local days, months, and hours." }
         data_since_ts:
           type: [integer, "null"]
           description: Unix seconds of this airport's earliest classified operation, or null if it has none yet.
