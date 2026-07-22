@@ -162,6 +162,12 @@ class ApiKeyCreateRequest(BaseModel):
     airports: list[str] | None = None
 
 
+class UserAccessRequest(BaseModel):
+    role: str
+    scopes: list[str] = []
+    airports: list[str] | None = None
+
+
 VALID_OWNER_TYPES = frozenset({
     "individual", "llc", "corporation", "government",
     "flight_school", "university", "club", "trust",
@@ -1122,6 +1128,155 @@ async def admin_revoke_api_key(
     with db_session(settings.database_path) as conn:
         changed = db.revoke_api_key(conn, key_id, int(time.time()))
     return {"ok": True, "revoked": changed}
+
+
+def _user_record(row: dict) -> dict:
+    """Explicit field list, not {**row}. The row carries google_sub and
+    decided_by, which the admin UI has no use for."""
+    user = admin_users.from_row(row)
+    grant = user.grant
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "picture": row["picture"],
+        "role": row["role"],
+        "status": row["status"],
+        "scopes": sorted(grant.scopes),
+        "airports": sorted(grant.airports) if grant.airports is not None else None,
+        "requested_at": row["requested_at"],
+        "decided_at": row["decided_at"],
+        "last_login_at": row["last_login_at"],
+    }
+
+
+def _normalize_access(payload: UserAccessRequest) -> tuple[str, str | None, str | None]:
+    """Return (role, granted_scopes, granted_airports) for storage.
+
+    admin and super_admin store NULL grants: those roles are unrestricted by
+    definition and a stored narrower value would never be enforced.
+    """
+    if payload.role not in admin_users.ROLES:
+        raise HTTPException(status_code=400, detail=f"unknown role: {payload.role}")
+    if payload.role != "partner":
+        return payload.role, None, None
+    try:
+        scopes = api_keys.serialize_scopes(payload.scopes) if payload.scopes else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return payload.role, scopes, api_keys.serialize_airports(payload.airports)
+
+
+def _load_target(conn, user_id: str, actor: admin_users.AdminUser, settings: Settings):
+    row = db.get_admin_user(conn, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="user not found")
+    target = admin_users.from_row(row)
+    try:
+        admin_users.guard_modification(actor, target, superuser_emails(settings))
+    except admin_users.GuardViolation as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return row, target
+
+
+@app.get("/admin/users")
+async def admin_list_users(
+    _: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    status: str | None = None,
+):
+    if status and status not in admin_users.STATUSES:
+        raise HTTPException(status_code=400, detail=f"unknown status: {status}")
+    with db_session(settings.database_path) as conn:
+        rows = db.list_admin_users(conn, status=status)
+    return {"users": [_user_record(row) for row in rows]}
+
+
+@app.post("/admin/users/{user_id}/approve")
+async def admin_approve_user(
+    user_id: str,
+    payload: UserAccessRequest,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    role, scopes, airports = _normalize_access(payload)
+    with db_session(settings.database_path) as conn:
+        _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=role, status="approved", granted_scopes=scopes,
+            granted_airports=airports, decided_by=actor.id, now=int(time.time()),
+        )
+        row = db.get_admin_user(conn, user_id)
+    return {"user": _user_record(row)}
+
+
+@app.post("/admin/users/{user_id}/reject")
+async def admin_reject_user(
+    user_id: str,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row, _target = _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=row["role"], status="rejected", granted_scopes=None,
+            granted_airports=None, decided_by=actor.id, now=now,
+        )
+        revoked = db.revoke_keys_for_owner(conn, user_id, now)
+        row = db.get_admin_user(conn, user_id)
+    return {"user": _user_record(row), "revoked_keys": revoked}
+
+
+@app.post("/admin/users/{user_id}/suspend")
+async def admin_suspend_user(
+    user_id: str,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Suspension revokes their keys in the same transaction.
+
+    Suspending someone while their keys keep working is the obvious foot-gun;
+    the cascade removes it.
+    """
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row, _target = _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=row["role"], status="suspended",
+            granted_scopes=row["granted_scopes"], granted_airports=row["granted_airports"],
+            decided_by=actor.id, now=now,
+        )
+        revoked = db.revoke_keys_for_owner(conn, user_id, now)
+        row = db.get_admin_user(conn, user_id)
+    return {"user": _user_record(row), "revoked_keys": revoked}
+
+
+@app.patch("/admin/users/{user_id}")
+async def admin_update_user(
+    user_id: str,
+    payload: UserAccessRequest,
+    actor: Annotated[admin_users.AdminUser, Depends(require_super_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+):
+    """Edit role and grant. Narrowing revokes the keys that no longer fit.
+
+    Already-minted keys carry their own scopes, so widening changes nothing
+    retroactively and narrowing must be enforced explicitly.
+    """
+    role, scopes, airports = _normalize_access(payload)
+    now = int(time.time())
+    with db_session(settings.database_path) as conn:
+        row, _target = _load_target(conn, user_id, actor, settings)
+        db.set_admin_user_access(
+            conn, user_id, role=role, status=row["status"], granted_scopes=scopes,
+            granted_airports=airports, decided_by=actor.id, now=now,
+        )
+        updated = db.get_admin_user(conn, user_id)
+        revoked = db.revoke_keys_outside_grant(
+            conn, user_id, admin_users.from_row(updated).grant, now
+        )
+    return {"user": _user_record(updated), "revoked_keys": revoked}
 
 
 @app.get("/config")
