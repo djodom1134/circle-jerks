@@ -408,12 +408,16 @@ def normalize_prefix(raw: str | None) -> str | None:
     A protocol-relative value like "//evil.example/api" is rooted at "/" but
     is an absolute URL to another host. Left through, it would land in the
     schema's `servers` entry and Swagger's "Try it out" would send the
-    partner's API key off-site, so it is rejected explicitly.
+    partner's API key off-site, so it is rejected explicitly. A backslash in
+    that same second-character position, e.g. "/\\evil.example", is an
+    equivalent attack: WHATWG URL parsers (and therefore browsers) treat "\\"
+    as a path separator too, so `new URL("/\\evil.example", base)` resolves
+    off-origin exactly like "//evil.example" does. Both are rejected here.
     """
     if not raw:
         return None
     prefix = raw.strip().rstrip("/")
-    if not prefix.startswith("/") or prefix.startswith("//"):
+    if not prefix.startswith("/") or prefix[1:2] in ("/", "\\"):
         return None
     return prefix
 
@@ -453,7 +457,16 @@ async def public_openapi(request: Request) -> dict:
     document = _openapi_document()
     prefix = external_prefix(request)
     servers = [{"url": prefix}] if prefix else document.get("servers")
-    return {**document, "servers": servers}
+    if servers is None:
+        # Omit the key rather than emit `"servers": null` -- invalid OpenAPI,
+        # and worse than not mentioning servers at all. Latent today because
+        # docs/api/openapi.yaml always declares a `servers` block, but a
+        # future YAML without one must not regress to a null in the wire
+        # response.
+        result = {k: v for k, v in document.items() if k != "servers"}
+    else:
+        result = {**document, "servers": servers}
+    return result
 
 
 @router.get("/docs", include_in_schema=False)

@@ -1,4 +1,9 @@
 -r requirements.txt
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
+# Used by dev scripts only (scripts/build_openapi_json.py,
+# scripts/verify_openapi_doc.py) and by tests that exercise them, not
+# imported by the app itself -- must not ship in the production image
+# (see backend/Dockerfile, which installs requirements.txt only).
+pyyaml>=6.0
 

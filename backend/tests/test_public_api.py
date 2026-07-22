@@ -528,6 +528,12 @@ def test_served_openapi_is_the_partner_document(tmp_path, monkeypatch):
     # Left through, Swagger's "Try it out" would send the key off-site.
     ("//evil.example/api", None),
     ("//evil.example", None),
+    ("///evil.example", None),
+    # Backslash is the WHATWG URL parser's equivalent path separator:
+    # new URL("/\\evil.example", base) resolves off-origin exactly like
+    # "//evil.example" does, so it must be rejected the same way.
+    ("/\\evil.example", None),
+    ("/\\\\evil.example", None),
 ])
 def test_normalize_prefix(raw, expected):
     assert normalize_prefix(raw) == expected
@@ -564,8 +570,18 @@ def test_openapi_servers_cache_is_not_poisoned_across_requests(tmp_path, monkeyp
     """`_openapi_document()` is process-wide (`lru_cache`d). If the servers
     rewrite ever mutated that cached dict instead of copying it, the first
     caller's prefix would leak into every response after it -- exactly the
-    failure mode this design has to avoid."""
+    failure mode this design has to avoid.
+
+    A third, header-less request is essential here: a mutating implementation
+    (`document["servers"] = servers; return document`) still passes if every
+    request in the test carries a header, because each one just overwrites
+    the previous poison rather than exposing it. Only a request with no
+    header at all reveals whether the cached document survived intact --
+    which is why this last assertion reads the static list straight from
+    `_OPENAPI_DOCUMENT_PATH` rather than trusting whatever the handler
+    returns."""
     configure(tmp_path, monkeypatch)
+    document = json.loads(public_api._OPENAPI_DOCUMENT_PATH.read_text())
     with TestClient(app) as client:
         first = client.get(
             "/v1/openapi.json", headers={"X-Forwarded-Prefix": "/live"},
@@ -573,8 +589,10 @@ def test_openapi_servers_cache_is_not_poisoned_across_requests(tmp_path, monkeyp
         second = client.get(
             "/v1/openapi.json", headers={"X-Forwarded-Prefix": "/api"},
         ).json()
+        third = client.get("/v1/openapi.json").json()
     assert first["servers"] == [{"url": "/live"}]
     assert second["servers"] == [{"url": "/api"}]
+    assert third["servers"] == document["servers"]
 
 
 def test_caddyfile_forwarded_prefix_header_matches_the_constant():
@@ -592,6 +610,11 @@ def test_caddyfile_forwarded_prefix_header_matches_the_constant():
         if value in ("/api", "/live")
     ]
     assert matches, "Caddyfile sets no /api or /live forwarded-prefix header"
+    # A typo in a *value* (e.g. "/liv" instead of "/live") would make the
+    # `if value in (...)` filter above simply not match that line -- silently
+    # dropping it from `matches` instead of failing. Pin the set of matched
+    # values so a typo in either literal fails loudly instead of vanishing.
+    assert {value for _, value in matches} == {"/api", "/live"}
     for name, value in matches:
         assert name.lower() == public_api._FORWARDED_PREFIX_HEADER.lower(), (
             f"Caddyfile sets header {name!r} for {value}, but the app reads "
