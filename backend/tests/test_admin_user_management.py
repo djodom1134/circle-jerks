@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import db
@@ -425,3 +426,60 @@ def test_partner_patch_with_airports_omitted_is_rejected(tmp_path, monkeypatch):
             "role": "partner", "scopes": ["ops:read"],
         })
         assert resp.status_code == 400
+
+
+# ─── A blank-string list entry must not slip past the airports guard
+# (confirmation-review Fix A) ───
+#
+# `if not payload.airports:` only rejects an omitted/null field or an explicit
+# `[]` — but a one-element list of whitespace (`[""]`, `["  "]`, `["\t"]`,
+# `["", ""]`) is truthy, so it sailed past that check. `_normalize_access`
+# then handed the list straight to `api_keys.serialize_airports`, which
+# strips every entry down to nothing and returns None: an unrestricted NULL
+# grant produced by exactly what a client sends when a comma-separated text
+# field is left empty. The reviewer proved this end to end over real HTTP:
+#   approve {"role":"partner","scopes":["ops:read"],"airports":["  "]} => 200,
+#   granted_airports = NULL, and a partner-minted key with airports=["KBJC"]
+#   then worked against GET /v1/operations?airport=KBJC.
+# `_normalize_access` now strips/uppercases/drops-blanks *before* the
+# emptiness check, so every one of these inputs is indistinguishable from an
+# omitted field and hits the same 400.
+
+BLANK_AIRPORTS_PAYLOADS = [[""], ["  "], ["\t"], ["", ""]]
+
+
+@pytest.mark.parametrize("airports", BLANK_AIRPORTS_PAYLOADS)
+def test_partner_approval_rejects_blank_string_airports_entries(tmp_path, monkeypatch, airports):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner()
+        resp = client.post("/admin/users/u2/approve", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": airports,
+        })
+        assert resp.status_code == 400
+        with db_session(get_settings().database_path) as conn:
+            row = db.get_admin_user(conn, "u2")
+            assert row["status"] == "pending"
+            assert row["granted_airports"] is None
+
+
+@pytest.mark.parametrize("airports", BLANK_AIRPORTS_PAYLOADS)
+def test_partner_patch_rejects_blank_string_airports_entries(tmp_path, monkeypatch, airports):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        login(client)
+        seed_partner(status="approved")
+        with db_session(get_settings().database_path) as conn:
+            db.set_admin_user_access(
+                conn, "u2", role="partner", status="approved",
+                granted_scopes="ops:read", granted_airports="KLMO",
+                decided_by=None, now=1,
+            )
+        resp = client.patch("/admin/users/u2", json={
+            "role": "partner", "scopes": ["ops:read"], "airports": airports,
+        })
+        assert resp.status_code == 400
+        with db_session(get_settings().database_path) as conn:
+            row = db.get_admin_user(conn, "u2")
+            assert row["granted_airports"] == "KLMO"

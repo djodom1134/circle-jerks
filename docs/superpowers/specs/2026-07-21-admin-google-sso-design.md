@@ -88,8 +88,24 @@ partner signs in, lands in pending, and asks you to approve them.
 
 The pending list is therefore internet-reachable and could be filled with junk rows by
 a bot. Accepted, because a pending user can do *nothing* — no data, no keys, no routes.
-Mitigated by rate-limiting the start and callback endpoints. Invite-first was rejected
-for inverting the flow (approving people before they ask).
+
+**The endpoints are not rate-limited.** The real barrier is cost, not a request
+counter: `/start` performs no I/O at all — it only signs a state cookie and redirects
+to Google — and `/callback` refuses before it ever touches the database unless the
+caller presents both a server-signed state cookie *and* a genuine Google authorization
+code (one that exchanges successfully at Google's token endpoint and decodes to a
+token whose claims pass every check, including `email_verified is true`). So a filled
+pending row costs the attacker one verified Google account, and buys them nothing —
+zero data, zero keys, zero routes. Invite-first was rejected for inverting the flow
+(approving people before they ask).
+
+An IP-keyed rate limiter was considered and rejected. Behind this deployment's Caddy
+config — no `trusted_proxies`, no `X-Real-IP`, and Caddy v2 *appends* to
+`X-Forwarded-For` rather than replacing it — the left-most hop that `client_ip()`
+reads is caller-supplied. A limiter keyed on it would be trivially evaded by rotating
+the header, and it would double as a way to lock a *chosen* IP out of Google sign-in
+for the window's duration by spoofing that address. That is a strictly worse position
+than having no limiter at all, so none was added.
 
 ### D5. Four lifecycle verbs, with cascades
 
@@ -241,7 +257,9 @@ explicitly permits as sufficient. Avoiding that machinery — and the failure mo
 stale key cache — is the primary reason this flow was chosen over a frontend Google
 Identity Services button.
 
-Both endpoints are rate-limited (D4).
+Neither endpoint is rate-limited (D4) — the cost of a pending row is one verified
+Google account, not a request budget, and an IP-keyed limiter was rejected as
+evadable and abusable behind this deployment's Caddy config.
 
 ### Settings
 
@@ -434,8 +452,10 @@ that regex is ever edited.
 
 ## Risks
 
-**The pending list is internet-reachable.** Accepted (D4), mitigated by rate limiting
-and by pending users having zero capability.
+**The pending list is internet-reachable.** Accepted (D4). Not rate-limited — an
+IP-keyed limiter was rejected as both evadable and abusable given this deployment's
+Caddy config (see D4) — but bounded by cost instead: a pending row requires a genuine
+verified Google account, and a pending user has zero capability regardless.
 
 **Per-request user lookup on every admin route.** Deliberate — it is what makes
 suspension immediate. If the admin surface ever grows hot enough for this to matter, a

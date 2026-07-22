@@ -885,41 +885,11 @@ def _validate_oauth_redirect_target(candidate: str | None) -> str:
     return candidate if candidate in ADMIN_OAUTH_REDIRECT_TARGETS else ADMIN_OAUTH_DEFAULT_REDIRECT
 
 
-# Per-client-IP limit on the two unauthenticated OAuth endpoints (D4 in the
-# design doc claims this exists; until now it did not). A real sign-in is one
-# GET to /start and one to /callback; a human retrying a typo'd account, a
-# cancelled consent screen, or several people behind one corporate NAT might
-# plausibly produce a double-digit burst. 20 requests per IP per endpoint per
-# minute comfortably covers that while still capping a scripted loop at a few
-# hundred pending rows an hour instead of thousands a minute — the concern the
-# design doc raises is a filled pending queue, not a instant one.
-GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS = 60
-GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE = 20
-
-
-async def _enforce_google_oauth_rate_limit(store: Store, request: Request, endpoint: str) -> None:
-    ip = client_ip(request) or "unknown"
-    now = int(time.time())
-    window = now // GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS
-    used = await store.incr_counter(
-        f"admin_oauth:{endpoint}:{ip}:{window}", GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS
-    )
-    if used > GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE:
-        raise HTTPException(
-            status_code=429,
-            detail="too many sign-in attempts; slow down",
-            headers={"Retry-After": str(GOOGLE_OAUTH_RATE_LIMIT_WINDOW_SECONDS)},
-        )
-
-
 @app.get("/admin/auth/google/start")
 async def admin_google_start(
-    request: Request,
     settings: Annotated[Settings, Depends(settings_dep)],
-    store: Annotated[Store, Depends(store_dep)],
     next: str | None = None,
 ):
-    await _enforce_google_oauth_rate_limit(store, request, "start")
     if not google_configured(settings):
         raise HTTPException(status_code=503, detail="google sign-in is not configured")
     state = secrets.token_urlsafe(24)
@@ -1006,11 +976,9 @@ def _oauth_failure(status_code: int, detail: str) -> JSONResponse:
 async def admin_google_callback(
     request: Request,
     settings: Annotated[Settings, Depends(settings_dep)],
-    store: Annotated[Store, Depends(store_dep)],
     code: str | None = None,
     state: str | None = None,
 ):
-    await _enforce_google_oauth_rate_limit(store, request, "callback")
     if not google_configured(settings):
         raise HTTPException(status_code=503, detail="google sign-in is not configured")
 
@@ -1264,10 +1232,15 @@ def _normalize_access(payload: UserAccessRequest) -> tuple[str, str | None, str 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if not payload.airports:
-        # Covers both an omitted/null field and an explicit `[]` — the same
-        # hazard either way, since both would otherwise fall through to
-        # serialize_airports' "empty means all" behavior.
+    # Normalize (strip + uppercase, drop blanks) *before* the emptiness
+    # check. A one-element list of whitespace (`[""]`, `["  "]`, `["\t"]`,
+    # `["", ""]`) is truthy, so gating on `if not payload.airports:` alone
+    # lets it through; `serialize_airports` would then strip it down to
+    # nothing and store an unrestricted NULL grant. Normalizing first means
+    # any input that has no real ICAO content in it — however it's spelled —
+    # hits the same explicit-opt-in requirement as an omitted field.
+    cleaned = [icao.strip().upper() for icao in (payload.airports or []) if icao.strip()]
+    if not cleaned:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1276,15 +1249,15 @@ def _normalize_access(payload: UserAccessRequest) -> tuple[str, str | None, str 
                 "grant every airport"
             ),
         )
-    if payload.airports == [UNRESTRICTED_AIRPORTS_SENTINEL]:
+    if cleaned == [UNRESTRICTED_AIRPORTS_SENTINEL]:
         airports = None
-    elif any(icao.strip() == UNRESTRICTED_AIRPORTS_SENTINEL for icao in payload.airports):
+    elif UNRESTRICTED_AIRPORTS_SENTINEL in cleaned:
         raise HTTPException(
             status_code=400,
             detail=f'"{UNRESTRICTED_AIRPORTS_SENTINEL}" must be the only entry when granting every airport',
         )
     else:
-        airports = api_keys.serialize_airports(payload.airports)
+        airports = api_keys.serialize_airports(cleaned)
     return payload.role, scopes, airports
 
 

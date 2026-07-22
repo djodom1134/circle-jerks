@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi.testclient import TestClient
 
 from app import db, google_oauth
-from app.main import GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE, app, db_session
+from app.main import app, db_session
 from app.settings import get_settings
 
 CLIENT_ID = "client-123.apps.googleusercontent.com"
@@ -309,56 +309,6 @@ def test_callback_without_a_code_parameter_is_rejected(tmp_path, monkeypatch):
         )
         assert resp.status_code == 400
         assert resp.json() == {"detail": "sign-in could not be completed"}
-
-
-# ─── Rate limiting (final-review FIX 2) ──────────────────────────────────────
-#
-# The design doc claims twice that /start and /callback are rate-limited
-# (D4: "Mitigated by rate-limiting the start and callback endpoints"; "Both
-# endpoints are rate-limited (D4)"). Until this fix there was no limiter at
-# all. These tests make that claim true.
-
-def test_start_is_rate_limited_per_ip(tmp_path, monkeypatch):
-    configure(tmp_path, monkeypatch)
-    with TestClient(app) as client:
-        for _ in range(GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE):
-            assert client.get("/admin/auth/google/start", follow_redirects=False).status_code == 307
-        resp = client.get("/admin/auth/google/start", follow_redirects=False)
-        assert resp.status_code == 429
-        assert resp.headers["Retry-After"]
-
-
-def test_callback_is_rate_limited_per_ip_with_a_clean_429_not_a_500(tmp_path, monkeypatch):
-    configure(tmp_path, monkeypatch)
-    stub_exchange(monkeypatch)
-    with TestClient(app) as client:
-        state = start(client)
-        # Each of these fails on the (irrelevant) wrong state, but that check
-        # runs after the rate limiter, so it still consumes the budget.
-        for _ in range(GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE):
-            client.get("/admin/auth/google/callback?code=abc&state=wrong", follow_redirects=False)
-        resp = client.get(
-            f"/admin/auth/google/callback?code=abc&state={state}", follow_redirects=False
-        )
-        assert resp.status_code == 429
-        assert resp.headers["Retry-After"]
-
-
-def test_start_and_callback_rate_limits_are_independent(tmp_path, monkeypatch):
-    """Exhausting /callback's budget must not cost /start anything — otherwise
-    a real operator's retries on one endpoint could lock them out of the
-    other."""
-    configure(tmp_path, monkeypatch)
-    stub_exchange(monkeypatch)
-    with TestClient(app) as client:
-        for _ in range(GOOGLE_OAUTH_RATE_LIMIT_PER_MINUTE):
-            client.get("/admin/auth/google/callback?code=abc&state=wrong", follow_redirects=False)
-        assert client.get(
-            "/admin/auth/google/callback?code=abc&state=wrong", follow_redirects=False
-        ).status_code == 429
-
-        # /start's own budget is untouched.
-        assert client.get("/admin/auth/google/start", follow_redirects=False).status_code == 307
 
 
 # ─── D6: /developers survives the round trip (final-review FIX 3) ───────────
