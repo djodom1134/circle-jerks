@@ -1059,7 +1059,7 @@ async def admin_live_sources(
     }
 
 
-def _api_key_record(row: dict, settings: Settings) -> dict:
+def _api_key_record(row: dict, settings: Settings, viewer_id: str | None = None) -> dict:
     return {
         "id": row["id"],
         "name": row["name"],
@@ -1071,6 +1071,8 @@ def _api_key_record(row: dict, settings: Settings) -> dict:
         ),
         "created_at": row["created_at"],
         "created_by": row["created_by"],
+        "owner_user_id": row["owner_user_id"],
+        "owned": viewer_id is not None and row["owner_user_id"] == viewer_id,
         "last_used_at": row["last_used_at"],
         "revoked_at": row["revoked_at"],
     }
@@ -1078,24 +1080,28 @@ def _api_key_record(row: dict, settings: Settings) -> dict:
 
 @app.get("/admin/api-keys")
 async def admin_list_api_keys(
-    _: Annotated[dict, Depends(require_admin)],
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
+    """Admins see every key including legacy unowned ones; partners see theirs."""
     with db_session(settings.database_path) as conn:
-        rows = db.list_api_keys(conn)
-    return {"keys": [_api_key_record(row, settings) for row in rows]}
+        rows = db.list_api_keys(conn) if user.is_admin else db.list_api_keys(conn, owner_user_id=user.id)
+    return {"keys": [_api_key_record(row, settings, viewer_id=user.id) for row in rows]}
 
 
 @app.post("/admin/api-keys")
 async def admin_create_api_key(
     payload: ApiKeyCreateRequest,
-    user: Annotated[admin_users.AdminUser, Depends(require_admin)],
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
     """Returns the full key exactly once. It is unrecoverable afterwards."""
     try:
+        api_keys.enforce_grant(payload.scopes, payload.airports, user.grant)
         scopes = api_keys.serialize_scopes(payload.scopes)
     except ValueError as exc:
+        # GrantViolation subclasses ValueError, so both the unknown-scope and
+        # the exceeds-grant cases land here as a 400.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     airports = api_keys.serialize_airports(payload.airports)
@@ -1112,20 +1118,26 @@ async def admin_create_api_key(
             airports=airports,
             created_at=now,
             created_by=user.email,
+            owner_user_id=user.id,
         )
         row = db.get_api_key(conn, key_id)
 
-    record = _api_key_record(row, settings)
+    record = _api_key_record(row, settings, viewer_id=user.id)
     return {"key": full_key, "record": record}
 
 
 @app.post("/admin/api-keys/{key_id}/revoke")
 async def admin_revoke_api_key(
     key_id: str,
-    _: Annotated[dict, Depends(require_admin)],
+    user: Annotated[admin_users.AdminUser, Depends(require_user)],
     settings: Annotated[Settings, Depends(settings_dep)],
 ):
     with db_session(settings.database_path) as conn:
+        row = db.get_api_key(conn, key_id)
+        # 404 for both "does not exist" and "not yours": a 403 would confirm
+        # the id is real, making key ids enumerable.
+        if not row or (not user.is_admin and row["owner_user_id"] != user.id):
+            raise HTTPException(status_code=404, detail="key not found")
         changed = db.revoke_api_key(conn, key_id, int(time.time()))
     return {"ok": True, "revoked": changed}
 
