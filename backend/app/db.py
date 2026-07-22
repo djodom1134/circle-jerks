@@ -509,7 +509,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     admin_users_existing = {
         row["name"] for row in conn.execute("PRAGMA table_info(admin_users)").fetchall()
     }
-    if admin_users_existing:
+    if "email" in admin_users_existing:
         conn.execute(
             "UPDATE admin_users SET email = ? WHERE id = ? AND email <> ?",
             (admin_users.LOCAL_ADMIN_EMAIL, admin_users.LOCAL_ADMIN_ID, admin_users.LOCAL_ADMIN_EMAIL),

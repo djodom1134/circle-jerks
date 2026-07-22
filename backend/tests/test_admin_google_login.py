@@ -292,3 +292,20 @@ def test_state_cookie_is_cleared_on_failure_paths_too(tmp_path, monkeypatch):
         assert resp.status_code == 400
         assert resp.json() == {"detail": "sign-in could not be completed"}
         assert google_oauth.OAUTH_STATE_COOKIE not in client.cookies
+
+
+def test_callback_without_a_code_parameter_is_rejected(tmp_path, monkeypatch):
+    """The missing-code check must return early, not fall through to the
+    database write that issues a session cookie. Without the return, a
+    request missing the code parameter would proceed to a successful login
+    and every existing test would still pass.
+    """
+    configure(tmp_path, monkeypatch)
+    stub_exchange(monkeypatch)
+    with TestClient(app) as client:
+        state = start(client)
+        resp = client.get(
+            f"/admin/auth/google/callback?state={state}", follow_redirects=False
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "sign-in could not be completed"}
