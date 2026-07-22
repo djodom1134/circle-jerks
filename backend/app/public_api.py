@@ -387,13 +387,73 @@ def _openapi_document() -> dict:
     scripts/build_openapi_json.py and committed at
     backend/app/generated/openapi.json; scripts/verify_openapi_doc.py fails
     the build if the committed copy drifts from the YAML.
+
+    Cached because it is parsed from disk; callers must never mutate the
+    dict this returns (see `public_openapi`) or the mutation would apply to
+    every subsequent request on the process for the lifetime of the cache.
     """
     return json.loads(_OPENAPI_DOCUMENT_PATH.read_text())
 
 
+_FORWARDED_PREFIX_HEADER = "X-Forwarded-Prefix"
+
+
+def normalize_prefix(raw: str | None) -> str | None:
+    """Normalize a forwarded prefix, or None when there isn't a usable one.
+
+    Trailing slashes are dropped so the value concatenates cleanly with the
+    "/v1/..." paths in the schema, and anything that is not rooted at "/" is
+    discarded rather than trusted.
+
+    A protocol-relative value like "//evil.example/api" is rooted at "/" but
+    is an absolute URL to another host. Left through, it would land in the
+    schema's `servers` entry and Swagger's "Try it out" would send the
+    partner's API key off-site, so it is rejected explicitly.
+    """
+    if not raw:
+        return None
+    prefix = raw.strip().rstrip("/")
+    if not prefix.startswith("/") or prefix.startswith("//"):
+        return None
+    return prefix
+
+
+def external_prefix(request: Request) -> str | None:
+    """The path prefix a proxy stripped, as that proxy declared it.
+
+    Every proxy in front of this app strips its prefix before forwarding:
+    Caddy uses `handle_path /api/*` (and `/live/*` on the ledger domain) and
+    Vite rewrites `/api` away, so `request.url.path` is always the bare
+    "/v1/..." and cannot tell us anything. The prefix therefore has to be
+    declared out of band, via X-Forwarded-Prefix, which each of those proxies
+    sets. Under direct uvicorn nobody sets it and this is None.
+    """
+    return normalize_prefix(request.headers.get(_FORWARDED_PREFIX_HEADER))
+
+
 @router.get("/openapi.json", include_in_schema=False)
-async def public_openapi() -> dict:
-    return _openapi_document()
+async def public_openapi(request: Request) -> dict:
+    """The committed partner document, with `servers` rewritten per request.
+
+    The document itself is the single source of truth generated from
+    docs/api/openapi.yaml -- nothing here re-parses YAML or touches any other
+    field. Only `servers` varies per request, because the same app answers
+    under two different external prefixes (`/api` on circlejerks.live,
+    `/live` on the ledger and mirror hosts -- see Caddyfile) plus a third in
+    local dev (vite.config.ts), and Swagger's "Try it out" needs the prefix
+    the browser actually used or it either CORS-fails on the mirror hosts or
+    silently targets production from a developer's machine.
+
+    `_openapi_document()` is `lru_cache`d, so its dict is shared by every
+    request on this process. Mutating it (e.g. `doc["servers"] = ...`) would
+    therefore leak whichever request happened to run first into every
+    response after it. Building a new dict via `{**document, ...}` instead
+    leaves the cached original untouched.
+    """
+    document = _openapi_document()
+    prefix = external_prefix(request)
+    servers = [{"url": prefix}] if prefix else document.get("servers")
+    return {**document, "servers": servers}
 
 
 @router.get("/docs", include_in_schema=False)

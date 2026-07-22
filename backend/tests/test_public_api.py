@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, Request
@@ -16,6 +18,7 @@ from app.public_api import (
     ApiError,
     decode_cursor,
     encode_cursor,
+    normalize_prefix,
     page_limit,
     paged,
     parse_time,
@@ -476,9 +479,11 @@ def test_paged_emits_next_cursor_only_on_a_full_page():
 # docs/api/openapi.yaml (no error envelope, and it still advertised 422 after
 # validation moved to 400), so it is now served pre-generated instead — see
 # scripts/build_openapi_json.py and backend/app/generated/openapi.json. The
-# document is static and committed, so there is no longer a per-request
-# servers/prefix computation to test; the servers block is whatever
-# docs/api/openapi.yaml declares.
+# document itself is static and committed, but `servers` still has to answer
+# under whichever external prefix fronted this particular request (`/api` on
+# circlejerks.live, `/live` on the ledger and mirror hosts, a third in local
+# dev), so that part is still computed per request from X-Forwarded-Prefix —
+# see `external_prefix` / `normalize_prefix` in app.public_api.
 
 def test_openapi_declares_both_auth_mechanisms(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
@@ -506,3 +511,90 @@ def test_served_openapi_is_the_partner_document(tmp_path, monkeypatch):
     operations_get = body["paths"]["/v1/operations"]["get"]
     assert "400" in operations_get["responses"]
     assert "422" not in operations_get["responses"]
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("/api", "/api"),
+    ("/live", "/live"),
+    ("/api/", "/api"),
+    ("/deep/nest/", "/deep/nest"),
+    ("  /api  ", "/api"),
+    (None, None),
+    ("", None),
+    ("/", None),
+    ("api", None),
+    ("https://evil.example/api", None),
+    # Protocol-relative: rooted at "/" but an absolute URL to another host.
+    # Left through, Swagger's "Try it out" would send the key off-site.
+    ("//evil.example/api", None),
+    ("//evil.example", None),
+])
+def test_normalize_prefix(raw, expected):
+    assert normalize_prefix(raw) == expected
+
+
+# The proxies strip their prefix before FastAPI sees the request, so these go
+# through the real app with the header Caddy and Vite actually set.
+@pytest.mark.parametrize("prefix", ["/api", "/live"])
+def test_openapi_servers_follow_the_forwarded_prefix(tmp_path, monkeypatch, prefix):
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        schema = client.get(
+            "/v1/openapi.json", headers={"X-Forwarded-Prefix": prefix},
+        ).json()
+    assert schema["servers"] == [{"url": prefix}]
+
+
+def test_openapi_falls_back_to_the_static_servers_without_a_forwarded_prefix(
+    tmp_path, monkeypatch,
+):
+    """Direct uvicorn access, or a bad/missing header: no per-request prefix
+    to trust, so the partner-documented production `servers` from the YAML is
+    served instead of omitting the block entirely. That static list is
+    strictly more useful to a partner than no `servers` at all."""
+    configure(tmp_path, monkeypatch)
+    document = json.loads(public_api._OPENAPI_DOCUMENT_PATH.read_text())
+    with TestClient(app) as client:
+        schema = client.get("/v1/openapi.json").json()
+    assert schema["servers"] == document["servers"]
+    assert schema["servers"]  # sanity: the YAML actually declares some
+
+
+def test_openapi_servers_cache_is_not_poisoned_across_requests(tmp_path, monkeypatch):
+    """`_openapi_document()` is process-wide (`lru_cache`d). If the servers
+    rewrite ever mutated that cached dict instead of copying it, the first
+    caller's prefix would leak into every response after it -- exactly the
+    failure mode this design has to avoid."""
+    configure(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        first = client.get(
+            "/v1/openapi.json", headers={"X-Forwarded-Prefix": "/live"},
+        ).json()
+        second = client.get(
+            "/v1/openapi.json", headers={"X-Forwarded-Prefix": "/api"},
+        ).json()
+    assert first["servers"] == [{"url": "/live"}]
+    assert second["servers"] == [{"url": "/api"}]
+
+
+def test_caddyfile_forwarded_prefix_header_matches_the_constant():
+    """Nothing at the type level connects the Caddyfile's `header_up` literals
+    to `_FORWARDED_PREFIX_HEADER`; a typo in either of Caddy's two `/api` and
+    `/live` blocks would silently reproduce the exact bug this module exists
+    to fix, with the rest of the suite still green. Bind them together here."""
+    caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
+    if not caddyfile.exists():
+        pytest.skip("Caddyfile not present in this checkout")
+    text = caddyfile.read_text()
+    matches = [
+        (name, value)
+        for name, value in re.findall(r"header_up\s+(\S+)\s+(/\S+)", text)
+        if value in ("/api", "/live")
+    ]
+    assert matches, "Caddyfile sets no /api or /live forwarded-prefix header"
+    for name, value in matches:
+        assert name.lower() == public_api._FORWARDED_PREFIX_HEADER.lower(), (
+            f"Caddyfile sets header {name!r} for {value}, but the app reads "
+            f"{public_api._FORWARDED_PREFIX_HEADER!r} (case-insensitive "
+            "header names, but the literal name must still match)"
+        )
