@@ -406,8 +406,8 @@ paths:
 
         When the requested airport has no scored aircraft, the underlying view falls
         back to the nearest neighbouring airport and sets `is_fallback: true` with
-        `resolved_icao` naming the substitute — always check those two fields before
-        attributing the result. **If your key is restricted, a fallback to an
+        `resolved_airport_icao` naming the substitute — always check those two fields
+        before attributing the result. **If your key is restricted, a fallback to an
         airport outside your scope is suppressed**: you receive an empty list with
         `is_fallback: false`, never another field's data.
       operationId: getWorstOffenders
@@ -424,10 +424,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/WorstOffenders" }
               example:
-                airport_icao: KBJC
-                source_icao: KBJC
-                resolved_icao: KBDU
-                resolved_label: "Boulder, CO"
+                requested_airport_icao: KBJC
+                resolved_airport_icao: KBDU
+                resolved_airport_label: "Boulder, CO"
                 is_fallback: true
                 offenders: []
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -448,12 +447,7 @@ paths:
           description: Trend series for the last twelve months.
           content:
             application/json:
-              schema:
-                type: object
-                required: [airport_icao]
-                properties:
-                  airport_icao: { type: string }
-                additionalProperties: true
+              schema: { $ref: "#/components/schemas/OperationsTrends" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -886,20 +880,121 @@ components:
 
     WorstOffenders:
       type: object
-      required: [airport_icao, source_icao, resolved_icao, is_fallback, offenders]
+      required: [requested_airport_icao, resolved_airport_icao, resolved_airport_label, is_fallback, offenders]
       properties:
-        airport_icao: { type: string, description: The airport you requested. }
-        source_icao: { type: string, description: Same as airport_icao. }
-        resolved_icao:
+        requested_airport_icao: { type: string, description: The airport you requested. }
+        resolved_airport_icao:
           type: string
-          description: The airport the offenders actually come from. Differs when is_fallback is true.
-        resolved_label: { type: string }
+          description: |
+            The airport the offenders actually come from. Differs from
+            requested_airport_icao when is_fallback is true.
+        resolved_airport_label: { type: string, description: Human-readable label (city or name) for resolved_airport_icao. }
         is_fallback:
           type: boolean
           description: True when the requested airport had no scored aircraft and a neighbour was substituted.
         offenders:
           type: array
-          items: { type: object, additionalProperties: true }
+          items: { $ref: "#/components/schemas/Offender" }
+
+    Offender:
+      type: object
+      description: |
+        One ranked aircraft. Ranking is by `vnap_score` × `total_circles`;
+        that product itself is not published here — it is the internal sort
+        key, not a property of the aircraft.
+      required: [icao24, registration, owner_class, total_circles, report_count, vnap_score]
+      properties:
+        icao24: { type: string, description: 24-bit ICAO address, lowercase hex. }
+        registration:
+          type: string
+          description: |
+            Display identifier: an N-number when one is resolvable from the
+            aircraft's callsign or registry entry, else the uppercase ICAO
+            hex. Was `tail`; /v1/operations already calls this same concept
+            `registration`.
+        aircraft_type: { type: [string, "null"], description: Airframe model from the registry, when known. }
+        owner_class: { type: string, description: "e.g. flight_school, private, commercial, unknown." }
+        total_circles: { type: integer }
+        report_count: { type: integer, description: Lifetime public report count for this aircraft. }
+        vnap_score:
+          type: number
+          description: 0..100. See /v1/meta's constants.vnap_score_scale.
+        worst_axis: { type: [string, "null"], description: Name of the VNAP axis with the aircraft's highest violation score. }
+        worst_axis_score: { type: [number, "null"], description: 0..100. Null exactly when worst_axis is null. }
+        last_reported_at_ts:
+          type: [integer, "null"]
+          description: Unix seconds of the most recent public report against this aircraft, or null if it has never been reported.
+
+    OperationsTrends:
+      type: object
+      description: Field set is frozen; new database columns do not appear here.
+      required: [airport_icao, timezone, data_since_ts, recent_days, monthly, time_of_day]
+      properties:
+        airport_icao: { type: string }
+        timezone: { type: string, description: IANA tz name used to bucket local days, months, and hours. }
+        data_since_ts:
+          type: [integer, "null"]
+          description: Unix seconds of this airport's earliest classified operation, or null if it has none yet.
+        recent_days:
+          type: array
+          description: Last 10 local days with at least one classified operation, oldest first.
+          items:
+            type: object
+            required: [date, operations, fraction_light_aircraft, fraction_touch_and_go]
+            properties:
+              date: { type: string, description: "Local calendar date, YYYY-MM-DD." }
+              operations: { type: integer }
+              fraction_light_aircraft:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Fraction of the day's operations flown by an ICAO emitter
+                  category A1 (light) aircraft. 0.0, not null, on a day with
+                  zero operations.
+              fraction_touch_and_go:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Fraction of the day's operations that were touch-and-gos.
+                  0.0, not null, on a day with zero operations.
+        monthly:
+          type: array
+          description: One entry per local calendar month with at least one classified operation, oldest first.
+          items:
+            type: object
+            required: [month, total, landings, takeoffs, touch_and_gos, fraction_touch_and_go, by_type, by_emitter]
+            properties:
+              month: { type: string, description: "Local calendar month, YYYY-MM." }
+              total: { type: integer }
+              landings: { type: integer }
+              takeoffs: { type: integer }
+              touch_and_gos: { type: integer, description: Was `tg`. }
+              fraction_touch_and_go:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Fraction of the month's total that were touch-and-gos.
+                  0.0, not null, in a month with zero operations.
+              by_type:
+                type: object
+                additionalProperties: { type: integer }
+                description: Operation count per airframe model; models outside the top 8 for the window collapse into "Other".
+              by_emitter:
+                type: object
+                additionalProperties: { type: integer }
+                description: Operation count per ICAO emitter-category bucket (A1, A2, A6, B1, B4); anything else collapses into "Other".
+        time_of_day:
+          type: array
+          description: All 24 local hours, always fully populated (zero-filled), covering the whole window.
+          items:
+            type: object
+            required: [hour, operations]
+            properties:
+              hour: { type: integer, minimum: 0, maximum: 23, description: Local hour of day. }
+              operations: { type: integer }
 
     Runway:
       type: object

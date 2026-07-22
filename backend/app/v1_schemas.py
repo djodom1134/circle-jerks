@@ -318,3 +318,153 @@ def runways_out(airport_icao: str, rows) -> RunwaysOut:
             for r in rows
         ],
     )
+
+
+class OffenderOut(BaseModel):
+    icao24: str
+    # `tail`, renamed. services.rank_worst_offenders sets it from
+    # registry.resolve_display_tail(callsign, registration, icao24), whose
+    # own signature returns `str` (never Optional) — it falls all the way
+    # back to `icao24.upper()`, so this is never null in practice. The
+    # brief's example declared it `str | None`; that is the brief being
+    # wrong per the task's own nullability-checking instruction.
+    registration: str
+    # services.py: `ac.get("aircraft_type")` <- vnap.py's `model`, which is
+    # `next((r["model"] for r in ac_rows if r["model"]), None)` — genuinely
+    # null when the registry has no model for any of the aircraft's rows.
+    aircraft_type: str | None
+    # services.py: `ac.get("owner_class")` <- vnap.py's `owner_class =
+    # override if override else inferred`, where `inferred` itself defaults
+    # to the literal string "unknown" (never None). Always a non-null
+    # string; the brief's `str | None` is wrong here too.
+    owner_class: str
+    total_circles: int
+    report_count: int
+    # rank_worst_offenders: `vnap = ac.get("vnap_score") or 0.0` then
+    # `"vnap_score": round(vnap, 1)` — always a float. Offenders with a
+    # product (vnap_score * circles) of 0 or less are filtered out before
+    # this dict is built, so every surviving row's vnap_score is > 0 as
+    # well as never None. Non-nullable, unlike the brief's `float | None`.
+    vnap_score: float
+    # worst_axis/worst_axis_score: null together when the aircraft has no
+    # non-null per-axis scores at all (`scored` ends up empty, so
+    # `(None, None)`) — a real reachable case, matches the brief.
+    worst_axis: str | None
+    worst_axis_score: float | None
+    # `last_reported_at`. aircraft_report_counts.last_reported_at is itself
+    # `INTEGER NOT NULL`, but db.report_meta() only returns an entry for an
+    # icao24 that has a row there at all; an aircraft can clear the VNAP
+    # scoring gate without ever having a public report filed, in which case
+    # `meta.get(icao24, {})` is `{}` and `.get("last_reported_at")` is None.
+    # Nullable for that reason, not because the column itself allows it.
+    last_reported_at_ts: int | None
+
+
+class WorstOffendersOut(BaseModel):
+    requested_airport_icao: str
+    resolved_airport_icao: str
+    # services.build_worst_offenders: `resolved_label = airport.city or
+    # airport.name or icao`, and services._suppress_foreign_fallback's
+    # override is `label or requested` — both chains end on a guaranteed
+    # non-empty ICAO string, so this is never null on either code path.
+    # Non-nullable, unlike the brief's `str | None` (also matches the
+    # existing YAML, which already declares it a plain `string`).
+    resolved_airport_label: str
+    is_fallback: bool
+    offenders: list[OffenderOut]
+
+
+def worst_offenders_out(requested: str, resolved: str, label: str | None,
+                        is_fallback: bool, rows) -> WorstOffendersOut:
+    return WorstOffendersOut(
+        requested_airport_icao=requested,
+        resolved_airport_icao=resolved,
+        resolved_airport_label=label,
+        is_fallback=is_fallback,
+        offenders=[
+            OffenderOut(
+                icao24=r["icao24"],
+                registration=r["tail"],
+                aircraft_type=r["aircraft_type"],
+                owner_class=r["owner_class"],
+                total_circles=r["total_circles"],
+                report_count=r["report_count"],
+                vnap_score=r["vnap_score"],
+                worst_axis=r["worst_axis"],
+                worst_axis_score=r["worst_axis_score"],
+                last_reported_at_ts=r["last_reported_at"],
+            )
+            for r in rows
+        ],
+    )
+
+
+class RecentDay(BaseModel):
+    date: str
+    operations: int
+    # db.py: `"pct_light": round(100.0 * d["light"] / n, 2) if n else 0.0` —
+    # a PERCENT (0..100), not a fraction, and `if n else 0.0` means it is
+    # 0.0 (never None) even on a day with zero operations. Divide by 100;
+    # non-nullable, unlike the brief's example (which assumed a 0..1 input
+    # and `float | None`).
+    fraction_light_aircraft: float
+    # Same shape as above: db.py's `"pct_tg": round(100.0 * d["tg"] / n, 2)
+    # if n else 0.0`.
+    fraction_touch_and_go: float
+
+
+class MonthlyTrend(BaseModel):
+    month: str
+    total: int
+    landings: int
+    takeoffs: int
+    touch_and_gos: int
+    # db.py: `"pct_tg": round(100.0 * m["tg"] / m["total"], 2) if m["total"]
+    # else 0.0` — a percent, non-nullable, same correction as RecentDay.
+    fraction_touch_and_go: float
+    by_type: dict[str, int]
+    by_emitter: dict[str, int]
+
+
+class HourBucket(BaseModel):
+    hour: int
+    operations: int
+
+
+class TrendsOut(BaseModel):
+    airport_icao: str
+    timezone: str
+    # db.py: `SELECT MIN(timestamp) ... WHERE icao=? AND type IN (...)`. A
+    # freshly seeded airport with zero operations (db.seed_db populates no
+    # `operations` rows) makes this a SQL MIN() over an empty set, i.e. SQL
+    # NULL -> Python None. Reachable in production (a brand-new airport
+    # before its first tracked flight) and in this repo's own test fixtures.
+    # Nullable, unlike the brief's non-Optional `int` — declaring it
+    # required would 500 exactly that case.
+    data_since_ts: int | None
+    recent_days: list[RecentDay]
+    monthly: list[MonthlyTrend]
+    time_of_day: list[HourBucket]
+
+
+def trends_out(airport_icao: str, timezone: str, data_since: int | None,
+               recent, monthly, time_of_day) -> TrendsOut:
+    return TrendsOut(
+        airport_icao=airport_icao,
+        timezone=timezone,
+        data_since_ts=data_since,
+        recent_days=[
+            RecentDay(date=d["date"], operations=d["operations"],
+                      fraction_light_aircraft=round(d["pct_light"] / 100.0, 4),
+                      fraction_touch_and_go=round(d["pct_tg"] / 100.0, 4))
+            for d in recent
+        ],
+        monthly=[
+            MonthlyTrend(month=m["month"], total=m["total"], landings=m["landings"],
+                         takeoffs=m["takeoffs"], touch_and_gos=m["tg"],
+                         fraction_touch_and_go=round(m["pct_tg"] / 100.0, 4),
+                         by_type=m["by_type"], by_emitter=m["by_emitter"])
+            for m in monthly
+        ],
+        time_of_day=[HourBucket(**h) for h in time_of_day],
+    )

@@ -191,3 +191,79 @@ def test_runways_drop_the_duplicated_internal_icao():
     dumped = out.runways[0].model_dump()
     assert "icao" not in dumped
     assert dumped["runway_id"] == "29"
+
+
+def test_offender_uses_registration_not_tail():
+    # /v1/operations already calls this `registration`. Two names for one
+    # concept in one API is exactly what a domain model removes.
+    row = {"icao24": "acbc30", "tail": "N92DV", "total_circles": 498,
+           "vnap_score": 30.3, "product": 15089.4, "report_count": 3,
+           "last_reported_at": 1783772707, "worst_axis": "tightness",
+           "worst_axis_score": 65.0, "aircraft_type": None, "owner_class": "unknown"}
+    out = v1_schemas.worst_offenders_out("KLMO", "KLMO", "Vance Brand", False, [row])
+    o = out.offenders[0]
+    assert o.registration == "N92DV"
+    assert not hasattr(o, "tail")
+
+
+def test_the_internal_sort_key_is_not_published():
+    # `product` is total_circles * vnap_score — the ranking scalar, not a
+    # property of the aircraft.
+    row = {"icao24": "acbc30", "tail": "N92DV", "total_circles": 498,
+           "vnap_score": 30.3, "product": 15089.4, "report_count": 3,
+           "last_reported_at": 1783772707, "worst_axis": "tightness",
+           "worst_axis_score": 65.0, "aircraft_type": None, "owner_class": "unknown"}
+    out = v1_schemas.worst_offenders_out("KLMO", "KLMO", "Vance Brand", False, [row])
+    assert "product" not in out.offenders[0].model_dump()
+
+
+def test_fallback_provenance_is_named_honestly():
+    out = v1_schemas.worst_offenders_out("KLMO", "KBJC", "Rocky Mountain", True, [])
+    assert out.requested_airport_icao == "KLMO"
+    assert out.resolved_airport_icao == "KBJC"
+    assert out.is_fallback is True
+
+
+def test_trend_ratios_are_fractions_and_abbreviations_expand():
+    # Controller pre-flight resolution (binding, overrides the brief): db.py
+    # computes `pct_tg`/`pct_light` as real PERCENTS (0..100) —
+    # `round(100.0 * tg / total, 2)` / `round(100.0 * light / n, 2)` — not
+    # fractions, so the builder must divide by 100, exactly as Task 4 did for
+    # `stopped_pct`. Both also default to 0.0 (never None) when the
+    # denominator is 0, so the fraction_* fields are non-nullable floats.
+    recent = [{"date": "2026-07-21", "operations": 40, "pct_light": 80.0, "pct_tg": 55.0}]
+    monthly = [{"month": "2026-07", "total": 900, "landings": 300, "takeoffs": 300,
+                "tg": 300, "pct_tg": 33.0, "by_type": {}, "by_emitter": {}}]
+    out = v1_schemas.trends_out("KLMO", "America/Denver", 1780000000, recent, monthly,
+                                [{"hour": 14, "operations": 12}])
+    assert out.recent_days[0].fraction_light_aircraft == 0.8
+    assert out.recent_days[0].fraction_touch_and_go == 0.55
+    assert out.monthly[0].touch_and_gos == 300
+    assert out.monthly[0].fraction_touch_and_go == 0.33
+    assert not hasattr(out.monthly[0], "tg")
+
+
+def test_trends_data_since_is_none_for_an_airport_with_no_operations():
+    # db.py's `SELECT MIN(timestamp) ... WHERE icao=? AND type IN (...)` is a
+    # SQL MIN() over an empty set when the airport has no operations rows at
+    # all (e.g. a freshly seeded airport, before its first tracked flight) —
+    # SQL NULL, i.e. Python None. Declaring data_since_ts non-Optional (as
+    # the brief's example did) would 500 that airport's /operations-trends
+    # response instead of publishing an honest "no data yet".
+    out = v1_schemas.trends_out("KLMO", "America/Denver", None, [], [], [])
+    assert out.data_since_ts is None
+
+
+def test_trend_fractions_are_zero_not_none_on_empty_days():
+    # db.py's `if total else 0.0` / `if n else 0.0` guards mean an empty
+    # window reports 0.0, not None — unlike /stats' fraction_stopped, which
+    # is genuinely None on an empty window. Getting this backwards would
+    # either 500 (declaring non-nullable but receiving None) or falsely
+    # publish these as optional when they never are.
+    recent = [{"date": "2026-07-21", "operations": 0, "pct_light": 0.0, "pct_tg": 0.0}]
+    monthly = [{"month": "2026-07", "total": 0, "landings": 0, "takeoffs": 0,
+                "tg": 0, "pct_tg": 0.0, "by_type": {}, "by_emitter": {}}]
+    out = v1_schemas.trends_out("KLMO", "America/Denver", 1780000000, recent, monthly, [])
+    assert out.recent_days[0].fraction_light_aircraft == 0.0
+    assert out.recent_days[0].fraction_touch_and_go == 0.0
+    assert out.monthly[0].fraction_touch_and_go == 0.0

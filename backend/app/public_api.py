@@ -731,13 +731,16 @@ def _suppress_foreign_fallback(conn, ctx: ApiKeyContext, requested: str,
     }
 
 
-@router.get("/airports/{icao}/worst-offenders", summary="Most-reported aircraft")
+@router.get(
+    "/airports/{icao}/worst-offenders", summary="Most-reported aircraft",
+    response_model=v1_schemas.WorstOffendersOut,
+)
 async def airport_worst_offenders(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
     limit: int = 5,
-) -> dict:
+) -> v1_schemas.WorstOffendersOut:
     now = int(time.time())
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
@@ -745,22 +748,36 @@ async def airport_worst_offenders(
             conn, normalized, now=now, limit=max(1, min(int(limit), 10))
         )
         offenders = _suppress_foreign_fallback(conn, ctx, normalized, offenders)
-    # airport_icao last: build_worst_offenders returns a whole response body in
-    # main.py, so it may already carry the key. Ours is the normalized one.
-    return {**offenders, "airport_icao": normalized}
+    return v1_schemas.worst_offenders_out(
+        normalized,
+        offenders["resolved_icao"],
+        offenders["resolved_label"],
+        offenders["is_fallback"],
+        offenders["offenders"],
+    )
 
 
-@router.get("/airports/{icao}/operations-trends", summary="Twelve-month trends")
+@router.get(
+    "/airports/{icao}/operations-trends", summary="Twelve-month trends",
+    response_model=v1_schemas.TrendsOut,
+)
 async def airport_operations_trends(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.TrendsOut:
     now = int(time.time())
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         trends = db.airport_operations_trends(conn, normalized, now_ts=now, months=12)
-    return {"airport_icao": normalized, **trends}
+    return v1_schemas.trends_out(
+        normalized,
+        trends["timezone"],
+        trends["data_since"],
+        trends["recent_days"],
+        trends["monthly"],
+        trends["time_of_day"],
+    )
 
 
 @router.get("/airports/{icao}/vnap-compliance", summary="Per-aircraft VNAP compliance")

@@ -383,6 +383,73 @@
         ],
         "type": "object"
       },
+      "Offender": {
+        "description": "One ranked aircraft. Ranking is by `vnap_score` \u00d7 `total_circles`;\nthat product itself is not published here \u2014 it is the internal sort\nkey, not a property of the aircraft.\n",
+        "properties": {
+          "aircraft_type": {
+            "description": "Airframe model from the registry",
+            "type": [
+              "string",
+              "null"
+            ],
+            "when known.": null
+          },
+          "icao24": {
+            "description": "24-bit ICAO address",
+            "lowercase hex.": null,
+            "type": "string"
+          },
+          "last_reported_at_ts": {
+            "description": "Unix seconds of the most recent public report against this aircraft, or null if it has never been reported.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "owner_class": {
+            "description": "e.g. flight_school, private, commercial, unknown.",
+            "type": "string"
+          },
+          "registration": {
+            "description": "Display identifier: an N-number when one is resolvable from the\naircraft's callsign or registry entry, else the uppercase ICAO\nhex. Was `tail`; /v1/operations already calls this same concept\n`registration`.\n",
+            "type": "string"
+          },
+          "report_count": {
+            "description": "Lifetime public report count for this aircraft.",
+            "type": "integer"
+          },
+          "total_circles": {
+            "type": "integer"
+          },
+          "vnap_score": {
+            "description": "0..100. See /v1/meta's constants.vnap_score_scale.",
+            "type": "number"
+          },
+          "worst_axis": {
+            "description": "Name of the VNAP axis with the aircraft's highest violation score.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "worst_axis_score": {
+            "description": "0..100. Null exactly when worst_axis is null.",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "icao24",
+          "registration",
+          "owner_class",
+          "total_circles",
+          "report_count",
+          "vnap_score"
+        ],
+        "type": "object"
+      },
       "Operation": {
         "description": "One detected operation. Field set is frozen; new database columns do not appear here.",
         "properties": {
@@ -532,6 +599,148 @@
           "airport_icao",
           "type",
           "timestamp_ts"
+        ],
+        "type": "object"
+      },
+      "OperationsTrends": {
+        "description": "Field set is frozen; new database columns do not appear here.",
+        "properties": {
+          "airport_icao": {
+            "type": "string"
+          },
+          "data_since_ts": {
+            "description": "Unix seconds of this airport's earliest classified operation, or null if it has none yet.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "monthly": {
+            "description": "One entry per local calendar month with at least one classified operation, oldest first.",
+            "items": {
+              "properties": {
+                "by_emitter": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "description": "Operation count per ICAO emitter-category bucket (A1, A2, A6, B1, B4); anything else collapses into \"Other\".",
+                  "type": "object"
+                },
+                "by_type": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "description": "Operation count per airframe model; models outside the top 8 for the window collapse into \"Other\".",
+                  "type": "object"
+                },
+                "fraction_touch_and_go": {
+                  "description": "Fraction of the month's total that were touch-and-gos.\n0.0, not null, in a month with zero operations.\n",
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "landings": {
+                  "type": "integer"
+                },
+                "month": {
+                  "description": "Local calendar month, YYYY-MM.",
+                  "type": "string"
+                },
+                "takeoffs": {
+                  "type": "integer"
+                },
+                "total": {
+                  "type": "integer"
+                },
+                "touch_and_gos": {
+                  "description": "Was `tg`.",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "month",
+                "total",
+                "landings",
+                "takeoffs",
+                "touch_and_gos",
+                "fraction_touch_and_go",
+                "by_type",
+                "by_emitter"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "recent_days": {
+            "description": "Last 10 local days with at least one classified operation, oldest first.",
+            "items": {
+              "properties": {
+                "date": {
+                  "description": "Local calendar date, YYYY-MM-DD.",
+                  "type": "string"
+                },
+                "fraction_light_aircraft": {
+                  "description": "Fraction of the day's operations flown by an ICAO emitter\ncategory A1 (light) aircraft. 0.0, not null, on a day with\nzero operations.\n",
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "fraction_touch_and_go": {
+                  "description": "Fraction of the day's operations that were touch-and-gos.\n0.0, not null, on a day with zero operations.\n",
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "operations": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "date",
+                "operations",
+                "fraction_light_aircraft",
+                "fraction_touch_and_go"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "time_of_day": {
+            "description": "All 24 local hours, always fully populated (zero-filled), covering the whole window.",
+            "items": {
+              "properties": {
+                "hour": {
+                  "description": "Local hour of day.",
+                  "maximum": 23,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "operations": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "hour",
+                "operations"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "timezone": {
+            "and hours.": null,
+            "description": "IANA tz name used to bucket local days",
+            "months": null,
+            "type": "string"
+          }
+        },
+        "required": [
+          "airport_icao",
+          "timezone",
+          "data_since_ts",
+          "recent_days",
+          "monthly",
+          "time_of_day"
         ],
         "type": "object"
       },
@@ -759,37 +968,33 @@
       },
       "WorstOffenders": {
         "properties": {
-          "airport_icao": {
-            "description": "The airport you requested.",
-            "type": "string"
-          },
           "is_fallback": {
             "description": "True when the requested airport had no scored aircraft and a neighbour was substituted.",
             "type": "boolean"
           },
           "offenders": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/Offender"
             },
             "type": "array"
           },
-          "resolved_icao": {
-            "description": "The airport the offenders actually come from. Differs when is_fallback is true.",
+          "requested_airport_icao": {
+            "description": "The airport you requested.",
             "type": "string"
           },
-          "resolved_label": {
+          "resolved_airport_icao": {
+            "description": "The airport the offenders actually come from. Differs from\nrequested_airport_icao when is_fallback is true.\n",
             "type": "string"
           },
-          "source_icao": {
-            "description": "Same as airport_icao.",
+          "resolved_airport_label": {
+            "description": "Human-readable label (city or name) for resolved_airport_icao.",
             "type": "string"
           }
         },
         "required": [
-          "airport_icao",
-          "source_icao",
-          "resolved_icao",
+          "requested_airport_icao",
+          "resolved_airport_icao",
+          "resolved_airport_label",
           "is_fallback",
           "offenders"
         ],
@@ -904,16 +1109,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "properties": {
-                    "airport_icao": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "airport_icao"
-                  ],
-                  "type": "object"
+                  "$ref": "#/components/schemas/OperationsTrends"
                 }
               }
             },
@@ -1211,7 +1407,7 @@
     },
     "/v1/airports/{icao}/worst-offenders": {
       "get": {
-        "description": "Aircraft ranked by circling behaviour and report volume. Requires\n`aggregates:read`.\n\nWhen the requested airport has no scored aircraft, the underlying view falls\nback to the nearest neighbouring airport and sets `is_fallback: true` with\n`resolved_icao` naming the substitute \u2014 always check those two fields before\nattributing the result. **If your key is restricted, a fallback to an\nairport outside your scope is suppressed**: you receive an empty list with\n`is_fallback: false`, never another field's data.\n",
+        "description": "Aircraft ranked by circling behaviour and report volume. Requires\n`aggregates:read`.\n\nWhen the requested airport has no scored aircraft, the underlying view falls\nback to the nearest neighbouring airport and sets `is_fallback: true` with\n`resolved_airport_icao` naming the substitute \u2014 always check those two fields\nbefore attributing the result. **If your key is restricted, a fallback to an\nairport outside your scope is suppressed**: you receive an empty list with\n`is_fallback: false`, never another field's data.\n",
         "operationId": "getWorstOffenders",
         "parameters": [
           {
@@ -1234,12 +1430,11 @@
             "content": {
               "application/json": {
                 "example": {
-                  "airport_icao": "KBJC",
                   "is_fallback": true,
                   "offenders": [],
-                  "resolved_icao": "KBDU",
-                  "resolved_label": "Boulder, CO",
-                  "source_icao": "KBJC"
+                  "requested_airport_icao": "KBJC",
+                  "resolved_airport_icao": "KBDU",
+                  "resolved_airport_label": "Boulder, CO"
                 },
                 "schema": {
                   "$ref": "#/components/schemas/WorstOffenders"
