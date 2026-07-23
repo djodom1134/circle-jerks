@@ -713,6 +713,63 @@
         ],
         "type": "object"
       },
+      "OperationsSummary": {
+        "description": "FAA operation totals for a window. Derived, not stored.",
+        "properties": {
+          "airport_icao": {
+            "type": "string"
+          },
+          "arrivals": {
+            "description": "Landings + touch-and-gos + low-approach touchdowns.",
+            "type": "integer"
+          },
+          "by_event_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Raw event count per detector type in the window (for transparency).",
+            "type": "object"
+          },
+          "departures": {
+            "description": "Takeoffs + touch-and-gos + low-approach touchdowns.",
+            "type": "integer"
+          },
+          "faa_operations": {
+            "description": "Total FAA operations (takeoffs + landings; a touch-and-go is 2).",
+            "type": "integer"
+          },
+          "low_approach_touchdown_max_agl_ft": {
+            "description": "The AGL threshold at or below which a low approach is a touchdown.",
+            "type": "integer"
+          },
+          "low_approach_touchdowns": {
+            "description": "Low approaches counted as touchdowns (each worth 2 operations).",
+            "type": "integer"
+          },
+          "since_ts": {
+            "description": "Unix seconds",
+            "inclusive.": null,
+            "type": "integer"
+          },
+          "until_ts": {
+            "description": "Unix seconds",
+            "inclusive.": null,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "airport_icao",
+          "since_ts",
+          "until_ts",
+          "faa_operations",
+          "arrivals",
+          "departures",
+          "by_event_type",
+          "low_approach_touchdowns",
+          "low_approach_touchdown_max_agl_ft"
+        ],
+        "type": "object"
+      },
       "OperationsTrends": {
         "description": "Field set is frozen; new database columns do not appear here.",
         "properties": {
@@ -2002,6 +2059,98 @@
           }
         },
         "summary": "Classified operations for an airport",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/v1/operations/summary": {
+      "get": {
+        "description": "Window totals in the canonical FAA sense of an operation \u2014 one takeoff\nor one landing. A takeoff or landing counts 1, a touch-and-go counts 2,\na low approach counts 2 when it was a real touchdown\n(min_altitude_ft_agl <= 25) else 0, and circles / passes count 0.\n`arrivals + departures == faa_operations`. Draws from the long-term\n(cold) store, so it covers the full retained history, not just the hot\nwindow. Requires the `ops:read` scope.\n",
+        "operationId": "operationsSummary",
+        "parameters": [
+          {
+            "description": "ICAO code, case-insensitive.",
+            "in": "query",
+            "name": "airport",
+            "required": true,
+            "schema": {
+              "example": "KLMO",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Start of range, inclusive. Defaults to 7 days before `until`.",
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "example": "2025-07-21T00:00:00Z",
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of range, inclusive. Defaults to now.",
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "example": "1784667715",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "airport_icao": "KLMO",
+                  "arrivals": 64800,
+                  "by_event_type": {
+                    "circle": 31000,
+                    "landing": 14005,
+                    "low_approach": 30976,
+                    "takeoff": 15905,
+                    "touch_and_go": 28591
+                  },
+                  "departures": 64743,
+                  "faa_operations": 129543,
+                  "low_approach_touchdown_max_agl_ft": 25,
+                  "low_approach_touchdowns": 27810,
+                  "since_ts": 1721520000,
+                  "until_ts": 1753056000
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OperationsSummary"
+                }
+              }
+            },
+            "description": "FAA operation totals for the window.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "summary": "FAA operation totals for an airport",
         "tags": [
           "operations"
         ]

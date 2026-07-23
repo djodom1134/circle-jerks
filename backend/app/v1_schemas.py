@@ -132,6 +132,32 @@ def operation_out(row) -> OperationOut:
     )
 
 
+class OperationsSummaryOut(BaseModel):
+    airport_icao: str
+    since_ts: int
+    until_ts: int
+    faa_operations: int
+    arrivals: int
+    departures: int
+    by_event_type: dict[str, int]
+    low_approach_touchdowns: int
+    low_approach_touchdown_max_agl_ft: int
+
+
+def operations_summary_out(icao: str, since_ts: int, until_ts: int, summary: dict) -> OperationsSummaryOut:
+    return OperationsSummaryOut(
+        airport_icao=icao,
+        since_ts=since_ts,
+        until_ts=until_ts,
+        faa_operations=summary["faa_operations"],
+        arrivals=summary["arrivals"],
+        departures=summary["departures"],
+        by_event_type=summary["by_event_type"],
+        low_approach_touchdowns=summary["low_approach_touchdowns"],
+        low_approach_touchdown_max_agl_ft=faa_operations.LOW_APPROACH_TOUCHDOWN_MAX_AGL_FT,
+    )
+
+
 # Which datum each live source's `altitude_ft` carries. live_sources.py maps
 # ADS-B alt_baro/alt_geom into the explicit baro_/geo_ fields for these six —
 # verified against CIRCLEJERK_LIVE_SOURCE_PRIORITY in .env.example

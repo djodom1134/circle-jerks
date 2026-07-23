@@ -563,6 +563,36 @@ async def list_operations(
     )
 
 
+@router.get(
+    "/operations/summary", summary="FAA operation totals for an airport",
+    response_model=v1_schemas.OperationsSummaryOut,
+)
+async def operations_summary(
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("ops:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+    airport: str,
+    since: str | None = None,
+    until: str | None = None,
+) -> v1_schemas.OperationsSummaryOut:
+    with db_session(settings.database_path) as conn:
+        icao = _known_airport(conn, ctx, airport)
+        start_ts, end_ts = resolve_range(since, until, now=int(time.time()))
+        hist_path = (
+            settings.history_database_path
+            if history_store.available(settings) and history_store.airport_allowed(icao, settings)
+            else None
+        )
+        summary = db.faa_operations_summary(
+            conn,
+            icao=icao,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            history_path=hist_path,
+            hot_cutoff_ts=int(time.time()) - settings.track_archive_horizon_days * 86400,
+        )
+    return v1_schemas.operations_summary_out(icao, start_ts, end_ts, summary)
+
+
 # Matches the scan ring used by the historical track-density view.
 TRACK_RING_NM = 8.0
 

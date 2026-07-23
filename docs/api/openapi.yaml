@@ -270,6 +270,63 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /v1/operations/summary:
+    get:
+      tags: [operations]
+      summary: FAA operation totals for an airport
+      description: |
+        Window totals in the canonical FAA sense of an operation — one takeoff
+        or one landing. A takeoff or landing counts 1, a touch-and-go counts 2,
+        a low approach counts 2 when it was a real touchdown
+        (min_altitude_ft_agl <= 25) else 0, and circles / passes count 0.
+        `arrivals + departures == faa_operations`. Draws from the long-term
+        (cold) store, so it covers the full retained history, not just the hot
+        window. Requires the `ops:read` scope.
+      operationId: operationsSummary
+      parameters:
+        - name: airport
+          in: query
+          required: true
+          description: ICAO code, case-insensitive.
+          schema: { type: string, example: KLMO }
+        - name: since
+          in: query
+          description: Start of range, inclusive. Defaults to 7 days before `until`.
+          schema: { type: string, example: "2025-07-21T00:00:00Z" }
+        - name: until
+          in: query
+          description: End of range, inclusive. Defaults to now.
+          schema: { type: string, example: "1784667715" }
+      responses:
+        "200":
+          description: FAA operation totals for the window.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationsSummary" }
+              example:
+                airport_icao: KLMO
+                since_ts: 1721520000
+                until_ts: 1753056000
+                faa_operations: 129543
+                arrivals: 64800
+                departures: 64743
+                by_event_type:
+                  landing: 14005
+                  takeoff: 15905
+                  touch_and_go: 28591
+                  low_approach: 30976
+                  circle: 31000
+                low_approach_touchdowns: 27810
+                low_approach_touchdown_max_agl_ft: 25
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /v1/tracks:
     get:
       tags: [tracks]
@@ -775,6 +832,32 @@ components:
         origin_label: { type: [string, "null"] }
         operator: { type: [string, "null"] }
         flight_school: { type: [string, "null"] }
+
+    OperationsSummary:
+      type: object
+      description: FAA operation totals for a window. Derived, not stored.
+      required:
+        [airport_icao, since_ts, until_ts, faa_operations, arrivals, departures,
+         by_event_type, low_approach_touchdowns, low_approach_touchdown_max_agl_ft]
+      properties:
+        airport_icao: { type: string }
+        since_ts: { type: integer, description: Unix seconds, inclusive. }
+        until_ts: { type: integer, description: Unix seconds, inclusive. }
+        faa_operations:
+          type: integer
+          description: Total FAA operations (takeoffs + landings; a touch-and-go is 2).
+        arrivals: { type: integer, description: Landings + touch-and-gos + low-approach touchdowns. }
+        departures: { type: integer, description: Takeoffs + touch-and-gos + low-approach touchdowns. }
+        by_event_type:
+          type: object
+          additionalProperties: { type: integer }
+          description: Raw event count per detector type in the window (for transparency).
+        low_approach_touchdowns:
+          type: integer
+          description: Low approaches counted as touchdowns (each worth 2 operations).
+        low_approach_touchdown_max_agl_ft:
+          type: integer
+          description: The AGL threshold at or below which a low approach is a touchdown.
 
     TrackSample:
       type: object
