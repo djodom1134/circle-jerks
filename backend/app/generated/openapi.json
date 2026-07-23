@@ -2102,7 +2102,7 @@
               "application/json": {
                 "example": {
                   "airport_icao": "KLMO",
-                  "arrivals": 64800,
+                  "arrivals": 70406,
                   "by_event_type": {
                     "circle": 31000,
                     "landing": 14005,
@@ -2110,8 +2110,8 @@
                     "takeoff": 15905,
                     "touch_and_go": 28591
                   },
-                  "departures": 64743,
-                  "faa_operations": 129543,
+                  "departures": 72306,
+                  "faa_operations": 142712,
                   "low_approach_touchdown_max_agl_ft": 25,
                   "low_approach_touchdowns": 27810,
                   "since_ts": 1721520000,

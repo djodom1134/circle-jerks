@@ -850,9 +850,9 @@ In `docs/api/openapi.yaml`, add a new path immediately after the `/v1/operations
                 airport_icao: KLMO
                 since_ts: 1721520000
                 until_ts: 1753056000
-                faa_operations: 129543
-                arrivals: 64800
-                departures: 64743
+                faa_operations: 142712
+                arrivals: 70406
+                departures: 72306
                 by_event_type:
                   landing: 14005
                   takeoff: 15905
