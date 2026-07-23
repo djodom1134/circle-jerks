@@ -218,8 +218,9 @@ prevent.
 
 ## Open items carried forward
 
-- `archive_to_history_once` is captured but unscheduled, matching production. Whether the
-  cold store should be continuously fed by the worker loop is a separate decision.
+- `archive_to_history_once` runs from `archive_loop` on the prune interval, matching
+  production. Its behavior under the operational load of a fresh deploy (it holds a write
+  lock while syncing the aging tail) is worth watching on the first post-deploy prune cycle.
 - The broader "production carries uncommitted source" problem is not solved by this one
   capture; a deploy discipline that forbids editing `/srv/circlejerk/app` by hand is the
   real fix.
