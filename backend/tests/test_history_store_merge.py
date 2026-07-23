@@ -59,21 +59,28 @@ def test_cold_rows_older_than_the_cutoff_are_served(tmp_path):
 
 
 def test_the_hot_cold_boundary_does_not_duplicate(tmp_path):
-    # A row exactly at the cutoff belongs to hot (>= cutoff); the same id in cold
-    # (< cutoff would be a different ts) must not both appear. Seed the boundary.
+    # A row exactly at the cutoff belongs to hot (>= cutoff); the cold slice's
+    # upper bound must be *exclusive* of the cutoff so that row is never also
+    # served from cold. To make that exclusivity actually observable, seed
+    # the same id (timestamp, id=cutoff) identity into BOTH stores -- simulating
+    # archival copying the boundary row into cold just before/around the
+    # moment it's pruned from hot, which does happen transiently in
+    # production. With the boundary correct, cold's query never reaches
+    # ts == cutoff, so this row is only ever served once (from hot).
     hot = str(tmp_path / "hot.sqlite3"); db.init_db(hot)
     cold = _cold_db(tmp_path)
     cutoff = 10_000
     with db.connect(cold) as cconn:
-        _seed_operation(cconn, id="c1", icao="KLMO", ts=9_999)   # last cold ts
+        _seed_operation(cconn, id="c1", icao="KLMO", ts=9_999)     # last true cold ts
+        _seed_operation(cconn, id="boundary", icao="KLMO", ts=10_000)    # archival-lag copy of the boundary row
     with db.connect(hot) as conn:
-        _seed_operation(conn, id="h1", icao="KLMO", ts=10_000)   # first hot ts
+        _seed_operation(conn, id="boundary", icao="KLMO", ts=10_000)     # first hot ts (the "real" copy)
         rows = db.read_operations_page(
             conn, icao="KLMO", start_ts=0, end_ts=20_000,
             history_path=cold, hot_cutoff_ts=cutoff,
         )
     ids = [r["id"] for r in rows]
-    assert ids == ["c1", "h1"]
+    assert ids == ["c1", "boundary"]
     assert len(ids) == len(set(ids))   # no duplication at the seam
 
 
