@@ -661,16 +661,14 @@ NOW = 1_700_000_000
 
 
 def _seed(db_path, *, icao, id, ts, type, agl):
+    # init_db seeds KBJC and KLMO into `airports`, so _known_airport resolves
+    # them (same reliance as test_public_api_operations.py's seed_operations).
     db.init_db(db_path)
     with db.db_session(db_path) as conn:
         conn.execute(
             "INSERT INTO operations (id, icao, icao24, type, timestamp, min_altitude_ft_agl) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (id, icao, "a26f5e", type, ts, agl),
-        )
-        # KBJC/KLMO must exist so _known_airport resolves rather than 404ing.
-        conn.execute(
-            "INSERT OR IGNORE INTO airports (icao, name) VALUES (?, ?)", (icao, icao)
         )
         conn.commit()
 
