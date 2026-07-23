@@ -203,7 +203,7 @@ paths:
           description: Restrict to one operation type.
           schema:
             type: string
-            enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
+            enum: [touch_and_go, circle, low_approach, landing, takeoff, pass_over_user]
         - name: icao24
           in: query
           description: Restrict to one aircraft by its 24-bit ICAO address.
@@ -246,6 +246,7 @@ paths:
                     callsign: N333RX
                     registration: N333RX
                     type: touch_and_go
+                    faa_operation_count: 2
                     timestamp_ts: 1784664115
                     runway_id: "11"
                     turn_direction: right
@@ -725,7 +726,7 @@ components:
     Operation:
       type: object
       description: One detected operation. Field set is frozen; new database columns do not appear here.
-      required: [id, airport_icao, type, timestamp_ts]
+      required: [id, airport_icao, type, timestamp_ts, faa_operation_count]
       properties:
         id: { type: string, description: "Stable identifier, also half of the cursor." }
         airport_icao: { type: string }
@@ -734,7 +735,15 @@ components:
         registration: { type: [string, "null"], description: "Tail number, when resolvable." }
         type:
           type: string
-          enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
+          enum: [touch_and_go, circle, low_approach, landing, takeoff, pass_over_user]
+        faa_operation_count:
+          type: integer
+          enum: [0, 1, 2]
+          description: |
+            FAA operations this event represents: a takeoff or a landing is 1, a
+            touch-and-go is 2, a low approach is 2 when it was a real touchdown
+            (min_altitude_ft_agl <= 25) else 0, and circles / passes are 0.
+            Derived from `type` and `min_altitude_ft_agl`; not a stored column.
         timestamp_ts: { type: integer, description: Unix seconds. }
         runway_id: { type: [string, "null"] }
         turn_direction: { type: [string, "null"], enum: [left, right, null] }

@@ -812,3 +812,12 @@ def test_a_restricted_key_still_403s_a_foreign_airport_with_cold_configured(tmp_
         r = client.get("/v1/operations?airport=KBJC&limit=1", headers={"X-Api-Key": key})
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "forbidden_airport"
+
+
+def test_faa_operation_count_is_derived_per_type():
+    assert v1_schemas.operation_out(op_row(type="landing", min_altitude_ft_agl=0)).faa_operation_count == 1
+    assert v1_schemas.operation_out(op_row(type="takeoff", min_altitude_ft_agl=0)).faa_operation_count == 1
+    assert v1_schemas.operation_out(op_row(type="touch_and_go", min_altitude_ft_agl=900)).faa_operation_count == 2
+    assert v1_schemas.operation_out(op_row(type="low_approach", min_altitude_ft_agl=15)).faa_operation_count == 2
+    assert v1_schemas.operation_out(op_row(type="low_approach", min_altitude_ft_agl=120)).faa_operation_count == 0
+    assert v1_schemas.operation_out(op_row(type="circle", min_altitude_ft_agl=10)).faa_operation_count == 0

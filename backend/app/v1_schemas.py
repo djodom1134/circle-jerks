@@ -17,7 +17,7 @@ import json
 
 from pydantic import BaseModel, ConfigDict
 
-from . import api_keys
+from . import api_keys, faa_operations
 from .deviation import CORRIDOR_NM
 
 # Published in /v1/meta so a consumer can interpret fraction_off_pattern.
@@ -75,6 +75,7 @@ class OperationOut(BaseModel):
     callsign: str | None
     registration: str | None
     type: str
+    faa_operation_count: int
     timestamp_ts: int
     runway_id: str | None
     turn_direction: str | None
@@ -109,6 +110,9 @@ def operation_out(row) -> OperationOut:
         callsign=row["callsign"],
         registration=row["registration"],
         type=row["type"],
+        faa_operation_count=faa_operations.faa_operation_count(
+            row["type"], row["min_altitude_ft_agl"]
+        ),
         timestamp_ts=row["timestamp"],
         runway_id=row["runway_id"],
         turn_direction=row["turn_direction"],

@@ -584,6 +584,15 @@
               "null"
             ]
           },
+          "faa_operation_count": {
+            "description": "FAA operations this event represents: a takeoff or a landing is 1, a\ntouch-and-go is 2, a low approach is 2 when it was a real touchdown\n(min_altitude_ft_agl <= 25) else 0, and circles / passes are 0.\nDerived from `type` and `min_altitude_ft_agl`; not a stored column.\n",
+            "enum": [
+              0,
+              1,
+              2
+            ],
+            "type": "integer"
+          },
           "flight_school": {
             "type": [
               "string",
@@ -677,6 +686,7 @@
               "circle",
               "low_approach",
               "landing",
+              "takeoff",
               "pass_over_user"
             ],
             "type": "string"
@@ -698,7 +708,8 @@
           "id",
           "airport_icao",
           "type",
-          "timestamp_ts"
+          "timestamp_ts",
+          "faa_operation_count"
         ],
         "type": "object"
       },
@@ -1862,6 +1873,7 @@
                 "circle",
                 "low_approach",
                 "landing",
+                "takeoff",
                 "pass_over_user"
               ],
               "type": "string"
@@ -1917,6 +1929,7 @@
                       "deviation_mean_nm": null,
                       "deviation_peak_nm": null,
                       "emitter_category": null,
+                      "faa_operation_count": 2,
                       "flight_school": null,
                       "fraction_off_pattern": null,
                       "icao24": "a1b2c3",
