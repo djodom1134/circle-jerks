@@ -747,13 +747,11 @@
             "type": "integer"
           },
           "since_ts": {
-            "description": "Unix seconds",
-            "inclusive.": null,
+            "description": "Unix seconds, inclusive.",
             "type": "integer"
           },
           "until_ts": {
-            "description": "Unix seconds",
-            "inclusive.": null,
+            "description": "Unix seconds, inclusive.",
             "type": "integer"
           }
         },
