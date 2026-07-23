@@ -70,9 +70,18 @@ export function StudyClaim({ data }: { data: LedgerResponse }) {
         of it from the runway.
       </p>
 
-      <p style={{ marginTop: "20px" }}>
+      <p style={{ marginTop: "22px" }}>
+        Now the City's own consultant has confirmed the other half. A brand-new <strong>2026 Rates and Charges
+        Study</strong> projects the airport fund <strong>insolvent by 2028</strong> and "Critical" by 2030 — and prices
+        the one lever big enough to reverse it: a landing fee worth a <strong>$1.16&nbsp;million</strong> swing.
+      </p>
+
+      <p style={{ marginTop: "20px", display: "flex", flexWrap: "wrap", gap: "14px" }}>
+        <a className="cta" href="/the-airport-is-in-trouble.html">
+          The airport is in financial trouble →
+        </a>
         <a className="cta" href="/what-the-70m-counts.html">
-          Read the full breakdown — the study vs. the real data →
+          What the "$73.6M" really counts →
         </a>
       </p>
     </section>
