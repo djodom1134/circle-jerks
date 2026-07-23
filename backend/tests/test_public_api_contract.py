@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-import pytest
+import time
 
-from app import v1_schemas
+import pytest
+from fastapi.testclient import TestClient
+
+from app import db, v1_schemas
+from app.main import app
+from test_public_api import configure, mint
 
 
 def op_row(**kw) -> dict:
@@ -492,3 +497,159 @@ def test_patterns_out_name_can_be_null():
              "created_at": 1784600000}]
     out = v1_schemas.patterns_out("KLMO", rows)
     assert out.patterns[0].name is None
+
+
+# ─── Cross-cutting contract guarantees (Task 8) ──────────────────────────────
+#
+# The tests above build models directly and prove each builder does the right
+# thing in isolation. These run against the real app through a TestClient, so
+# a regression that reintroduces a retired name -- or wires a raw dict through
+# a route without going by way of these builders at all -- is caught the same
+# way a partner would find it: by reading the actual response body.
+#
+# response_model= already fixes wire keys to a model's declared fields, and
+# the drift gate added to scripts/verify_openapi_doc.py (see MODEL_FOR_SCHEMA
+# there) binds those fields to the published document. Together that pins
+# document, model, and wire transitively. What that chain cannot express is a
+# VALUE guarantee -- that a fraction genuinely stays inside 0..1 -- or a
+# regression test against a name coming back from the dead, which is what the
+# two checks below are for.
+
+@pytest.fixture
+def v1_client_and_key(tmp_path, monkeypatch):
+    """A configured TestClient plus an unrestricted, all-scopes API key, with
+    a handful of KLMO touch-and-go operations seeded so the checks below walk
+    real response bodies instead of empty pages.
+
+    Reuses the configure()/mint() helpers backend/tests/test_public_api.py and
+    its sibling test_public_api_*.py files already share, rather than
+    inventing a parallel setup.
+    """
+    db_path = configure(tmp_path, monkeypatch)
+    db.init_db(db_path)
+    now = int(time.time())
+    with db.db_session(db_path) as conn:
+        for i in range(5):
+            db.upsert_operation(conn, {
+                "id": f"contract-{i:03d}",
+                "icao": "KLMO",
+                "icao24": "a1b2c3",
+                "callsign": "N333RX",
+                "registration": "N333RX",
+                "type": "touch_and_go",
+                "timestamp": now - i,
+                "runway_id": "29",
+                "runway_heading_deg": 290.0,
+                "turn_direction": "left",
+                "min_altitude_ft_agl": 900,
+            })
+    key = mint(
+        db_path,
+        scopes=["ops:read", "tracks:read", "aggregates:read", "ledger:read"],
+        airports=None,
+    )
+    with TestClient(app) as client:
+        yield client, key
+
+
+def _walk_keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _walk_keys(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_keys(item)
+
+
+def _walk_pairs(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k, v
+            yield from _walk_pairs(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_pairs(item)
+
+
+# Names retired across Tasks 2-7. Assembled by reading every builder in
+# v1_schemas.py (and the two internal-dict keys public_api.py/services.py
+# still carry, source_icao/resolved_icao/resolved_label, ahead of the rename
+# worst_offenders_out applies) for a `field = row["old_name"]` rename or a
+# `row["dropped_name"]` that is read and then never assigned to any field --
+# not copied from the brief's shorter illustrative list, which covered only
+# the /operations, /stats, /vnap-compliance, and /flow renames and missed
+# several others Tasks 4-7 also made:
+#   - `tg` -> `touch_and_gos` on /operations-trends' monthly entries
+#     (distinct from `pct_tg` -> `fraction_touch_and_go`, already listed)
+#   - `data_since` -> `data_since_ts` on /operations-trends
+#   - `last_reported_at` -> `last_reported_at_ts` on /worst-offenders
+#   - `resolved_label` -> `resolved_airport_label` on /worst-offenders
+#   - `established_at` / `ended_at` -> `established_at_ts` / `ended_at_ts`,
+#     and `changed_at` -> `changed_at_ts`, all on /flow
+#   - `geometry_json` -> `geometry` on /patterns
+#   - the bare internal `icao` column (distinct from `icao24` and from every
+#     published `*_icao`/`*icao24` field, none of which match this exact
+#     key) dropped from /runways and /flow
+RETIRED = (
+    "pct_off_pattern", "stopped_pct", "pct_light", "pct_tg", "tg",
+    "product", "tail", "cowboy_callsign", "cowboy_icao24",
+    "cowboy_registration", "trigger_op_id", "source_icao", "resolved_icao",
+    "resolved_label", "cowboy_count", "owner_source", "metrics",
+    "timestamp", "last_reported_at", "data_since", "established_at",
+    "ended_at", "changed_at", "geometry_json", "icao",
+)
+
+# `id` is deliberately NOT in RETIRED above: it is a real, documented field on
+# /operations (OperationOut.id) and /patterns (PatternOut.id), so banning it
+# globally would false-positive on both. It WAS dropped from /flow
+# (ActiveFlowOut/RunwayChangeOut both omit it, per
+# test_flow_publishes_no_internal_identifiers above) and never existed on
+# /runways in the first place (the seed rows have no separate `id` column at
+# all) -- scoped to just those two paths.
+ID_RETIRED_PATHS = (
+    "/v1/airports/KLMO/runways",
+    "/v1/airports/KLMO/flow",
+)
+
+ALL_V1_PATHS = (
+    "/v1/meta", "/v1/operations?airport=KLMO&limit=1",
+    "/v1/airports/KLMO/stats", "/v1/airports/KLMO/runways",
+    "/v1/airports/KLMO/worst-offenders",
+    "/v1/airports/KLMO/operations-trends",
+    "/v1/airports/KLMO/vnap-compliance",
+    "/v1/airports/KLMO/flow", "/v1/airports/KLMO/patterns",
+)
+
+
+def test_no_retired_name_appears_in_any_v1_response(v1_client_and_key):
+    client, key = v1_client_and_key
+    for path in ALL_V1_PATHS:
+        resp = client.get(path, headers={"X-Api-Key": key})
+        assert resp.status_code == 200, path
+        keys = set(_walk_keys(resp.json()))
+        leaked = keys & set(RETIRED)
+        assert not leaked, f"{path} still publishes {sorted(leaked)}"
+
+
+def test_the_internal_id_never_reaches_flow_or_runways(v1_client_and_key):
+    # Scoped separately from the walk above -- see the ID_RETIRED_PATHS note.
+    client, key = v1_client_and_key
+    for path in ID_RETIRED_PATHS:
+        resp = client.get(path, headers={"X-Api-Key": key})
+        assert resp.status_code == 200, path
+        keys = set(_walk_keys(resp.json()))
+        assert "id" not in keys, f"{path} still publishes the internal id"
+
+
+def test_every_fraction_field_is_within_zero_and_one(v1_client_and_key):
+    # The test that would have caught stopped_pct: 28.9 sitting beside
+    # pct_off_pattern: 0.42.
+    client, key = v1_client_and_key
+    for path in ("/v1/operations?airport=KLMO&limit=50",
+                 "/v1/airports/KLMO/stats",
+                 "/v1/airports/KLMO/operations-trends"):
+        body = client.get(path, headers={"X-Api-Key": key}).json()
+        for k, v in _walk_pairs(body):
+            if k.startswith("fraction_") and isinstance(v, (int, float)):
+                assert 0.0 <= v <= 1.0, f"{path}: {k} = {v}"

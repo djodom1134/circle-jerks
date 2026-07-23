@@ -115,6 +115,48 @@ def main() -> int:
             f"`description:`, quote the value): {hit}"
         )
 
+    # Bind the served shape to the published one. The checks above cover
+    # paths, parameters, and $refs -- none of them compared response BODIES,
+    # which is how /runways shipped an undocumented `icao` with the suite
+    # green.
+    #
+    # Scope: the ten top-level response bodies only. Nested component
+    # schemas (AxisScore, StopBreakdown, ActiveFlow, RunwayChange,
+    # VnapAircraft, Offender, Window) are NOT separately compared
+    # field-by-field here -- they are sub-objects referenced by these ten,
+    # not response bodies of their own; a rename that ripples up into one of
+    # the ten's own declared properties is still caught, but their internal
+    # shape is not independently checked. `Error` (the shared error
+    # envelope) and `LedgerEnvelope` (the sidecar pass-through placeholder,
+    # declared `extra="allow"` with no fields of its own) are excluded on
+    # purpose: neither is wired to a route via `response_model=`.
+    #
+    # Imported here rather than at module scope, after sys.path already has
+    # `backend/` on it (see above) -- mirroring how this script's own
+    # top-level app imports are ordered relative to that same sys.path setup.
+    from app import v1_schemas  # noqa: E402
+
+    MODEL_FOR_SCHEMA = {
+        "Meta": v1_schemas.MetaOut,
+        "Operation": v1_schemas.OperationOut,
+        "TrackSample": v1_schemas.TrackSampleOut,
+        "AirportStats": v1_schemas.AirportStatsOut,
+        "Runway": v1_schemas.RunwayOut,
+        "WorstOffenders": v1_schemas.WorstOffendersOut,
+        "OperationsTrends": v1_schemas.TrendsOut,
+        "VnapCompliance": v1_schemas.VnapComplianceOut,
+        "Flow": v1_schemas.FlowOut,
+        "Pattern": v1_schemas.PatternOut,
+    }
+    for schema_name, model in MODEL_FOR_SCHEMA.items():
+        declared = set((doc["components"]["schemas"].get(schema_name, {})
+                        .get("properties") or {}).keys())
+        actual = set(model.model_fields)
+        for missing in sorted(actual - declared):
+            problems.append(f"{schema_name}: model field '{missing}' is not documented")
+        for extra in sorted(declared - actual):
+            problems.append(f"{schema_name}: documented '{extra}' is not a model field")
+
     # The committed JSON is what the admin docs panel and /v1/openapi.json
     # serve. If it drifts from the YAML, partners read one contract while the
     # API advertises another.
