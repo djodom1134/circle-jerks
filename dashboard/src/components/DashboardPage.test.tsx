@@ -7,7 +7,7 @@ import { allTypes, allLocalities } from "../lib/facets";
 const base = {
   data: DAILY_FIXTURE, origins: ORIGINS_FIXTURE, offenders: WORST_OFFENDERS_FIXTURE, hourly: HOURLY_FIXTURE,
   airportLabel: "KLMO · Longmont", filter: { types: allTypes(), localities: allLocalities() },
-  colorBy: "locality" as const, dark: false, aircraftCount: 312,
+  colorBy: "locality" as const, dark: false, originCount: 312,
   selectedOrigin: null, onSelectOrigin: () => {},
 };
 

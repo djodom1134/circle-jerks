@@ -28,4 +28,16 @@ describe("OriginHub", () => {
     render(<OriginHub origins={null} selectedOrigin={null} onSelectOrigin={() => {}} airportIcao="KLMO" />);
     expect(screen.getByText(/unavailable/i)).toBeTruthy();
   });
+
+  it("shows a zero-result state (not 'unavailable') when origins is present but empty", () => {
+    render(<OriginHub
+      origins={{
+        airport_icao: "KLMO", window: { from: "2026-07-01", to: "2026-07-31" },
+        total_out_of_town: 0, origins: [], other: { count: 0, arrivals: 0 },
+      }}
+      selectedOrigin={null} onSelectOrigin={() => {}} airportIcao="KLMO"
+    />);
+    expect(screen.getByText(/no out-of-town origins/i)).toBeTruthy();
+    expect(screen.queryByText(/unavailable/i)).toBeNull();
+  });
 });

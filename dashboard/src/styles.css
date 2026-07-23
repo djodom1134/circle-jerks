@@ -53,6 +53,10 @@ body { margin: 0; background: var(--surface); color: var(--ink);
 .rowbar .ct { font-size: 11px; color: var(--ink2); width: 38px; text-align: right; }
 .heat { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; }
 .heat i { aspect-ratio: 1; border-radius: 2px; }
+.origin-pill { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 14px; padding: 5px 12px; border-radius: 999px; background: var(--line); color: var(--ink); font-size: 13px; }
+.origin-pill button { border: none; background: transparent; color: var(--ink2); cursor: pointer; font-size: 14px; line-height: 1; }
+.origin-notice { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); color: var(--ink); font-size: 13px; }
+.origin-notice button { border: 1px solid var(--line); background: transparent; color: var(--ink2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
 .hub { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
 .hub h5 { margin: 0 0 2px; font-size: 14px; }
 .hub svg { width: 100%; height: auto; display: block; }

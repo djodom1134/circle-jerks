@@ -18,7 +18,7 @@ interface DashboardPageProps {
   filter: FilterState;
   colorBy: ColorBy;
   dark: boolean;
-  aircraftCount: number;
+  originCount: number;
   selectedOrigin: string | null;
   onSelectOrigin(icao: string | null): void;
 }
@@ -32,7 +32,7 @@ export function DashboardPage(props: DashboardPageProps) {
     <main>
       {inCoverage ? (
         <>
-          <KpiRow days={days} filter={filter} aircraftCount={props.aircraftCount} />
+          <KpiRow days={days} filter={filter} originCount={props.originCount} />
           <DayBarChart days={days} filter={filter} colorBy={colorBy} dark={dark} />
         </>
       ) : (

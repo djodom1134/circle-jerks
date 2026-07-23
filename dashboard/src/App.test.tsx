@@ -47,4 +47,31 @@ describe("App", () => {
     fireEvent.click(takeoffs); // last one — guard keeps it on
     expect(takeoffs.getAttribute("aria-pressed")).toBe("true");
   });
+
+  it("selecting an origin shows a filter pill", async () => {
+    stubRoutes();
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("region", { name: /filters/i })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /KBDU/ }));
+    await waitFor(() => expect(screen.getByText(/filtered to/i)).toBeTruthy());
+    expect(screen.getByRole("button", { name: /clear origin filter/i })).toBeTruthy();
+  });
+
+  it("a failed origin fetch clears the selection and shows a notice", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("origin=")) return Promise.reject(new Error("network error"));
+      if (url.includes("/daily-operations")) return Promise.resolve(jsonResponse(DAILY_FIXTURE));
+      if (url.includes("/origins")) return Promise.resolve(jsonResponse(ORIGINS_FIXTURE));
+      if (url.includes("/worst-offenders")) return Promise.resolve(jsonResponse(WORST_OFFENDERS_FIXTURE));
+      if (url.includes("/hourly-profile")) return Promise.resolve(jsonResponse(HOURLY_FIXTURE));
+      return Promise.reject(new Error(`unexpected ${url}`));
+    }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("region", { name: /filters/i })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /KBDU/ }));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.getByRole("alert").textContent).toMatch(/couldn't load arrivals/i);
+    expect(screen.queryByText(/filtered to/i)).toBeNull();
+  });
 });

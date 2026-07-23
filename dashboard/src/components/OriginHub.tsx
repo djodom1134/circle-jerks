@@ -11,9 +11,13 @@ export function OriginHub({ origins, selectedOrigin, onSelectOrigin, airportIcao
   airportIcao: string;
 }) {
   const reduce = usePrefersReducedMotion();
-  if (!origins || origins.origins.length === 0) {
+  if (!origins) {
     return <section className="hub"><h5>Where out-of-town traffic comes from</h5>
       <p className="cap">Origin data unavailable for this airport yet.</p></section>;
+  }
+  if (origins.origins.length === 0) {
+    return <section className="hub"><h5>Where out-of-town traffic comes from</h5>
+      <p className="cap">No out-of-town origins recorded yet.</p></section>;
   }
 
   const maxArr = origins.origins[0].arrivals || 1;
