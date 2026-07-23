@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo
 
-from . import admin_users, api_keys
+from . import admin_users, api_keys, faa_operations
 from .geo import Point, distance_nm
 
 
@@ -740,6 +740,94 @@ def read_operations_page(
             conn.execute("DETACH hist")
     rows.sort(key=lambda r: (r["timestamp"], r["id"]))
     return rows[: int(limit)]
+
+
+def faa_operations_summary(
+    conn: sqlite3.Connection,
+    *,
+    icao: str,
+    start_ts: int,
+    end_ts: int,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
+) -> dict:
+    """Weighted FAA-operation totals for an airport over [start_ts, end_ts].
+
+    Mirrors read_operations_page's hot/cold seam: when history_path is set and
+    the window reaches older than hot_cutoff_ts, the older slice is summed from
+    the cold store (timestamp < cutoff) and the recent slice from hot
+    (timestamp >= cutoff). The two slices are time-disjoint, so summing their
+    weighted counts never double-counts the boundary. With no history_path (or a
+    fully-recent window) only the hot `operations` table is read.
+
+    Returns keys: faa_operations, arrivals, departures, low_approach_touchdowns,
+    and by_event_type (a {type: count} map over every observed type).
+    """
+    icao = icao.upper()
+
+    def _slice(table: str, lo: int, hi: int) -> dict:
+        agg = conn.execute(
+            f"SELECT {faa_operations.FAA_OPS_SUM_SQL} AS faa_operations, "
+            f"{faa_operations.FAA_ARRIVALS_SUM_SQL} AS arrivals, "
+            f"{faa_operations.FAA_DEPARTURES_SUM_SQL} AS departures, "
+            f"{faa_operations.LOW_APPROACH_TOUCHDOWN_COUNT_SQL} AS low_approach_touchdowns "
+            f"FROM {table} WHERE icao = ? AND timestamp >= ? AND timestamp <= ?",
+            (icao, int(lo), int(hi)),
+        ).fetchone()
+        by_type = {
+            r["type"]: r["n"]
+            for r in conn.execute(
+                f"SELECT type, COUNT(*) AS n FROM {table} "
+                "WHERE icao = ? AND timestamp >= ? AND timestamp <= ? GROUP BY type",
+                (icao, int(lo), int(hi)),
+            ).fetchall()
+        }
+        return {
+            "faa_operations": agg["faa_operations"] or 0,   # SUM over 0 rows is NULL
+            "arrivals": agg["arrivals"] or 0,
+            "departures": agg["departures"] or 0,
+            "low_approach_touchdowns": agg["low_approach_touchdowns"] or 0,
+            "by_event_type": by_type,
+        }
+
+    def _merge(a: dict, b: dict) -> dict:
+        by_type = dict(a["by_event_type"])
+        for t, n in b["by_event_type"].items():
+            by_type[t] = by_type.get(t, 0) + n
+        return {
+            "faa_operations": a["faa_operations"] + b["faa_operations"],
+            "arrivals": a["arrivals"] + b["arrivals"],
+            "departures": a["departures"] + b["departures"],
+            "low_approach_touchdowns": a["low_approach_touchdowns"] + b["low_approach_touchdowns"],
+            "by_event_type": by_type,
+        }
+
+    use_cold = (
+        history_path is not None
+        and hot_cutoff_ts is not None
+        and int(start_ts) < int(hot_cutoff_ts)
+    )
+    if not use_cold:
+        return _slice("operations", start_ts, end_ts)
+
+    cutoff = int(hot_cutoff_ts)
+    result = {
+        "faa_operations": 0, "arrivals": 0, "departures": 0,
+        "low_approach_touchdowns": 0, "by_event_type": {},
+    }
+    attached = False
+    try:
+        conn.execute("ATTACH ? AS hist", (history_path,))
+        attached = True
+        cold_hi = min(int(end_ts), cutoff - 1)
+        if int(start_ts) <= cold_hi:  # older slice -> cold
+            result = _merge(result, _slice("hist.operations", start_ts, cold_hi))
+        if int(end_ts) >= cutoff:  # recent slice -> hot
+            result = _merge(result, _slice("operations", max(int(start_ts), cutoff), end_ts))
+    finally:
+        if attached:
+            conn.execute("DETACH hist")
+    return result
 
 
 def read_track_archive_page(
