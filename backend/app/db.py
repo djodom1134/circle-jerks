@@ -742,6 +742,83 @@ def read_operations_page(
     return rows[: int(limit)]
 
 
+def _runway_ops_with_spans(conn: sqlite3.Connection, table: str, icao: str) -> list[tuple]:
+    """(start, end, icao24, id, type) for every runway operation of an airport in
+    one table. A touch-and-go recovers its lap span from the circle it derives
+    from (same icao24+timestamp); a low approach is a zero-length point. Computed
+    over the airport's FULL history — the greedy suppression below depends on
+    where the scan starts, so a windowed slice would decide one lap differently on
+    two pages of the same site."""
+    rows = conn.execute(
+        # Only a touch-and-go carries a lap span (recovered from the circle it
+        # derives from). A low approach is a zero-length POINT — giving it a
+        # span, even from a circle that coincidentally shares its timestamp,
+        # would let it suppress DISTINCT later laps. Mirrors ledger laps.py,
+        # which only ever spans `touch_and_go`.
+        f"SELECT r.id AS id, r.icao24 AS icao24, r.timestamp AS ts, r.type AS type, "
+        f"       CASE WHEN r.type = 'touch_and_go' THEN "
+        f"         (SELECT MAX(c.time_total_s) FROM {table} c "
+        f"           WHERE c.icao = r.icao AND c.type = 'circle' "
+        f"             AND c.icao24 = r.icao24 AND c.timestamp = r.timestamp) "
+        f"       END AS lap_seconds "
+        f"FROM {table} r "
+        f"WHERE r.icao = ? AND r.type IN ('touch_and_go','low_approach') AND r.icao24 IS NOT NULL",
+        (icao.upper(),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        end = int(row["ts"])
+        dur = row["lap_seconds"]
+        start = end - int(dur) if dur is not None and int(dur) > 0 else end
+        out.append((start, end, row["icao24"], row["id"], row["type"]))
+    return out
+
+
+def duplicate_runway_op_ids(
+    conn: sqlite3.Connection,
+    *,
+    icao: str,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
+) -> set[str]:
+    """`operations.id` of every runway op that is a re-detection of another lap by
+    the same aircraft — the read-time floor that stops one physical lap counting
+    twice. Generalises `ledger-api/app/laps.py` to BOTH runway-op types: an
+    aircraft cannot fly two overlapping laps, so any touch-and-go OR low approach
+    that begins before an already-kept lap of the same aircraft ended is a
+    duplicate (a sliding-window re-detection of the touch-and-go, or a low
+    approach that is really that lap's own touchdown). Unprovable duplicates —
+    zero-length ops whose span can't be recovered — are kept, so the result is a
+    FLOOR: real activity is never under-reported."""
+    icao = icao.upper()
+    laps = _runway_ops_with_spans(conn, "operations", icao)
+    use_cold = history_path is not None and hot_cutoff_ts is not None
+    if use_cold:
+        attached = False
+        try:
+            conn.execute("ATTACH ? AS hist", (history_path,))
+            attached = True
+            cutoff = int(hot_cutoff_ts)
+            cold = _runway_ops_with_spans(conn, "hist.operations", icao)
+            # Seam: cold owns timestamps < cutoff, hot owns >= cutoff (mirrors
+            # read_operations_page), so an archival-lag copy is never seen twice.
+            laps = [lap for lap in laps if lap[1] >= cutoff] + [lap for lap in cold if lap[1] < cutoff]
+        finally:
+            if attached:
+                conn.execute("DETACH hist")
+
+    laps.sort()  # by (start, end, icao24, id, type) — order-independent result
+    suppressed: set[str] = set()
+    kept_end: dict[str, int] = {}
+    for start, end, icao24, op_id, _type in laps:
+        prev_end = kept_end.get(icao24)
+        if prev_end is not None and start < prev_end:
+            suppressed.add(op_id)  # begins before the kept lap ended -> same lap
+            continue
+        kept_end[icao24] = end
+    return suppressed
+
+
 def faa_operations_summary(
     conn: sqlite3.Connection,
     *,
@@ -765,20 +842,32 @@ def faa_operations_summary(
     """
     icao = icao.upper()
 
+    # Read-time lap-duplicate suppression (the FLOOR): a phantom set of op ids
+    # that re-detect a lap already counted, so one physical lap never scores
+    # twice. Computed once, globally, then excluded from every slice below.
+    suppressed = duplicate_runway_op_ids(
+        conn, icao=icao, history_path=history_path, hot_cutoff_ts=hot_cutoff_ts
+    )
+    conn.execute("DROP TABLE IF EXISTS temp._phantom_ops")
+    conn.execute("CREATE TEMP TABLE _phantom_ops (id TEXT PRIMARY KEY)")
+    if suppressed:
+        conn.executemany("INSERT OR IGNORE INTO _phantom_ops VALUES (?)", [(i,) for i in suppressed])
+    _excl = " AND id NOT IN (SELECT id FROM _phantom_ops)"
+
     def _slice(table: str, lo: int, hi: int) -> dict:
         agg = conn.execute(
             f"SELECT {faa_operations.FAA_OPS_SUM_SQL} AS faa_operations, "
             f"{faa_operations.FAA_ARRIVALS_SUM_SQL} AS arrivals, "
             f"{faa_operations.FAA_DEPARTURES_SUM_SQL} AS departures, "
             f"{faa_operations.LOW_APPROACH_TOUCHDOWN_COUNT_SQL} AS low_approach_touchdowns "
-            f"FROM {table} WHERE icao = ? AND timestamp >= ? AND timestamp <= ?",
+            f"FROM {table} WHERE icao = ? AND timestamp >= ? AND timestamp <= ?{_excl}",
             (icao, int(lo), int(hi)),
         ).fetchone()
         by_type = {
             r["type"]: r["n"]
             for r in conn.execute(
                 f"SELECT type, COUNT(*) AS n FROM {table} "
-                "WHERE icao = ? AND timestamp >= ? AND timestamp <= ? GROUP BY type",
+                f"WHERE icao = ? AND timestamp >= ? AND timestamp <= ?{_excl} GROUP BY type",
                 (icao, int(lo), int(hi)),
             ).fetchall()
         }

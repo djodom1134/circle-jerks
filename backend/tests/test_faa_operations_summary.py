@@ -99,3 +99,23 @@ def test_summary_recent_window_never_touches_cold(tmp_path):
         )
     assert s["faa_operations"] == 1               # only the hot landing
     assert s["by_event_type"] == {"landing": 1}
+
+
+def test_summary_suppresses_a_coincident_low_approach(tmp_path):
+    # A touch-and-go lap [1000,1300] (its circle carries time_total_s=300); a
+    # low_approach at 1150 is that lap's OWN touchdown -> suppressed. A standalone
+    # low_approach at 2000 is a distinct op -> kept.
+    hot = str(tmp_path / "hot.sqlite3"); db.init_db(hot)
+    with db.connect(hot) as conn:
+        conn.execute(
+            "INSERT INTO operations (id, icao, icao24, type, timestamp, time_total_s) "
+            "VALUES ('c', 'KLMO', 'a26f5e', 'circle', 1300, 300)")
+        _seed(conn, id="tg", icao="KLMO", ts=1300, type="touch_and_go", agl=0)
+        _seed(conn, id="la_dup", icao="KLMO", ts=1150, type="low_approach", agl=0)   # inside lap
+        _seed(conn, id="la_real", icao="KLMO", ts=2000, type="low_approach", agl=0)  # distinct
+        s = db.faa_operations_summary(conn, icao="KLMO", start_ts=0, end_ts=3000)
+
+    # touch_and_go(2) + kept low_approach touchdown(2); the coincident one is gone.
+    assert s["faa_operations"] == 4
+    assert s["by_event_type"] == {"circle": 1, "touch_and_go": 1, "low_approach": 1}
+    assert s["low_approach_touchdowns"] == 1
