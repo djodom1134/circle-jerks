@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -518,12 +519,24 @@ def test_patterns_out_name_can_be_null():
 @pytest.fixture
 def v1_client_and_key(tmp_path, monkeypatch):
     """A configured TestClient plus an unrestricted, all-scopes API key, with
-    a handful of KLMO touch-and-go operations seeded so the checks below walk
-    real response bodies instead of empty pages.
+    KLMO data seeded so every structure the checks below walk is non-empty --
+    not just the plain touch-and-go operations, which only ever populate
+    /operations and /stats and leave /worst-offenders, /flow, /patterns, and
+    /tracks trivially empty (and therefore untested).
 
     Reuses the configure()/mint() helpers backend/tests/test_public_api.py and
     its sibling test_public_api_*.py files already share, rather than
-    inventing a parallel setup.
+    inventing a parallel setup:
+      - worst-offenders: the same 6 touch-and-go + 6 circle + 4 low pass-over
+        shape as test_worst_offenders.py's `_seed_klmo_offender` (6+6 clears
+        the VNAP scoring gate -- score_min_tg=1, score_min_circles=3 -- and
+        the low pass-overs give the aircraft a nonzero violation score, so it
+        survives rank_worst_offenders' product>0 filter).
+      - flow: test_flow.py's `test_flow_endpoint` sequence -- db.open_flow
+        followed by db.insert_runway_change.
+      - patterns: test_patterns.py's db.save_runway_pattern.
+      - tracks: test_public_api_tracks.py's seed_tracks INSERT, at KLMO's
+        coordinates so an airport-scoped /v1/tracks query's bbox picks it up.
     """
     db_path = configure(tmp_path, monkeypatch)
     db.init_db(db_path)
@@ -543,13 +556,58 @@ def v1_client_and_key(tmp_path, monkeypatch):
                 "turn_direction": "left",
                 "min_altitude_ft_agl": 900,
             })
+
+        # Worst-offenders: see _seed_klmo_offender in test_worst_offenders.py.
+        base = now - 100000
+
+        def offender_op(oid, type_, ts, min_agl=None, turn=None):
+            db.upsert_operation(conn, db.operation_from_event({
+                "id": oid, "type": type_, "icao24": "a5a764", "callsign": "N4632F",
+                "timestamp": ts, "airport_icao": "KLMO", "runway_id": "29",
+                "turn_direction": turn, "min_altitude_ft_agl": min_agl,
+            }))
+        for i in range(6):
+            offender_op(f"wo-g{i}", "touch_and_go", base + i * 10, turn="right")
+        for i in range(6):
+            offender_op(f"wo-c{i}", "circle", base + 100 + i * 10, turn="right")
+        for i in range(4):
+            offender_op(f"wo-p{i}", "pass_over_user", base + 200 + i * 10, min_agl=150)
+
+        # Flow: open runway + a preceding change, per test_flow_endpoint.
+        db.open_flow(conn, "KLMO", "29", base + 300, 290, 8.0)
+        db.insert_runway_change(
+            conn, "KLMO", "11", "29", base + 300,
+            {"icao24": "a1b2c3", "callsign": "N333RX", "registration": "N333RX",
+             "id": "contract-000"},
+            290, 8.0, wind_favored_new=1,
+        )
+
+        # Patterns: one saved pattern for KLMO's 29 end.
+        db.save_runway_pattern(
+            conn, "KLMO", "29",
+            json.dumps({"points": [{"lat": 40.1591, "lon": -105.1487}],
+                       "closed": True, "spline": "catmull-rom"}),
+            name="contract-test",
+        )
+
+        # Tracks: one sample at KLMO's coordinates, per seed_tracks in
+        # test_public_api_tracks.py.
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO track_archive
+            (icao24, timestamp, lat, lon, altitude_ft, heading_deg,
+             vertical_rate_fpm, callsign, in_window, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'test')
+            """,
+            ("a1b2c3", now, 40.1646, -105.1630, 5500.0, 290.0, 0.0, "N333RX"),
+        )
     key = mint(
         db_path,
         scopes=["ops:read", "tracks:read", "aggregates:read", "ledger:read"],
         airports=None,
     )
     with TestClient(app) as client:
-        yield client, key
+        yield client, key, now
 
 
 def _walk_keys(obj):
@@ -621,20 +679,53 @@ ALL_V1_PATHS = (
     "/v1/airports/KLMO/flow", "/v1/airports/KLMO/patterns",
 )
 
+# Paths whose response bodies must be non-empty for the retired-name walk to
+# mean anything -- keyed by the field(s) in the response that must not be
+# empty/null. Without this guard, if the fixture's seed data ever regressed
+# back to producing empty offenders/recent_changes/active/patterns/data, the
+# walk below would go back to silently covering nothing for those four
+# structures, exactly as Finding 1 describes, and nothing would say so.
+NOT_EMPTY_GUARDS = {
+    "/v1/airports/KLMO/worst-offenders": ("offenders",),
+    "/v1/airports/KLMO/flow": ("active", "recent_changes"),
+    "/v1/airports/KLMO/patterns": ("patterns",),
+}
+
+
+def _assert_covering_body_is_non_empty(path: str, body: dict) -> None:
+    for field in NOT_EMPTY_GUARDS.get(path.split("?", 1)[0], ()):
+        value = body[field]
+        assert value not in (None, [], {}), (
+            f"{path}: {field!r} is empty/null -- the fixture no longer seeds "
+            "data for this structure, so the retired-name walk below is not "
+            "actually exercising it"
+        )
+
 
 def test_no_retired_name_appears_in_any_v1_response(v1_client_and_key):
-    client, key = v1_client_and_key
-    for path in ALL_V1_PATHS:
+    client, key, now = v1_client_and_key
+    # /v1/tracks needs an explicit since/until window (it refuses an
+    # unrestricted range); a 10-minute window around the seeded sample's
+    # timestamp comfortably covers it. TrackSampleOut is one of the ten
+    # drift-bound schemas, so leaving this path out of the walk -- as the
+    # original ALL_V1_PATHS did -- would leave a route-level bypass on
+    # /tracks invisible to this test.
+    tracks_path = f"/v1/tracks?airport=KLMO&since={now - 300}&until={now + 300}"
+    for path in ALL_V1_PATHS + (tracks_path,):
         resp = client.get(path, headers={"X-Api-Key": key})
         assert resp.status_code == 200, path
-        keys = set(_walk_keys(resp.json()))
+        body = resp.json()
+        _assert_covering_body_is_non_empty(path, body)
+        if path == tracks_path:
+            assert body["data"], f"{path}: data is empty -- TrackSampleOut is not exercised"
+        keys = set(_walk_keys(body))
         leaked = keys & set(RETIRED)
         assert not leaked, f"{path} still publishes {sorted(leaked)}"
 
 
 def test_the_internal_id_never_reaches_flow_or_runways(v1_client_and_key):
     # Scoped separately from the walk above -- see the ID_RETIRED_PATHS note.
-    client, key = v1_client_and_key
+    client, key, _now = v1_client_and_key
     for path in ID_RETIRED_PATHS:
         resp = client.get(path, headers={"X-Api-Key": key})
         assert resp.status_code == 200, path
@@ -645,11 +736,13 @@ def test_the_internal_id_never_reaches_flow_or_runways(v1_client_and_key):
 def test_every_fraction_field_is_within_zero_and_one(v1_client_and_key):
     # The test that would have caught stopped_pct: 28.9 sitting beside
     # pct_off_pattern: 0.42.
-    client, key = v1_client_and_key
+    client, key, _now = v1_client_and_key
     for path in ("/v1/operations?airport=KLMO&limit=50",
                  "/v1/airports/KLMO/stats",
                  "/v1/airports/KLMO/operations-trends"):
-        body = client.get(path, headers={"X-Api-Key": key}).json()
+        resp = client.get(path, headers={"X-Api-Key": key})
+        assert resp.status_code == 200, path
+        body = resp.json()
         for k, v in _walk_pairs(body):
             if k.startswith("fraction_") and isinstance(v, (int, float)):
                 assert 0.0 <= v <= 1.0, f"{path}: {k} = {v}"
