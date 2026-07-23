@@ -25,9 +25,16 @@ describe("month slicing", () => {
 describe("filteredDaySeries", () => {
   const july = daysForMonth(DAILY_FIXTURE, "2026-07");
 
-  it("colours by locality: segment keys are the selected localities", () => {
+  it("colours by locality: segment keys are the localities in fixed order, regardless of Set order", () => {
     const series = filteredDaySeries(july, ALL, "locality");
-    expect(Object.keys(series[0].segments).sort()).toEqual(["local", "out_of_town", "unclassified"]);
+    expect(Object.keys(series[0].segments)).toEqual(["local", "out_of_town", "unclassified"]);
+    // Keys must follow LOCALITIES order, not the caller's Set insertion order.
+    const scrambled = filteredDaySeries(
+      july,
+      { types: allTypes(), localities: new Set<Locality>(["unclassified", "out_of_town", "local"]) },
+      "locality",
+    );
+    expect(Object.keys(scrambled[0].segments)).toEqual(["local", "out_of_town", "unclassified"]);
   });
 
   it("filtering to one type reduces every day's total", () => {
@@ -38,8 +45,15 @@ describe("filteredDaySeries", () => {
   });
 
   it("filtering out a locality drops it from the stack and the total", () => {
-    const noVisitors = filteredDaySeries(july, { types: allTypes(), localities: new Set<Locality>(["local", "unclassified"]) }, "locality");
+    const all = filteredDaySeries(july, ALL, "locality");
+    const noVisitors = filteredDaySeries(
+      july,
+      { types: allTypes(), localities: new Set<Locality>(["local", "unclassified"]) },
+      "locality",
+    );
+    const i = all.findIndex((d) => d.segments.out_of_town > 0);
     expect(Object.keys(noVisitors[0].segments)).not.toContain("out_of_town");
+    expect(noVisitors[i].total).toBeLessThan(all[i].total);
   });
 
   it("a zero-day inside coverage has total 0 (a real zero, not missing)", () => {
