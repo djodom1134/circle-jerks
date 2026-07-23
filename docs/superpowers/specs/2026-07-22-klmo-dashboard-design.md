@@ -19,19 +19,26 @@ locality and a radial hub of observed origins.
 
 ## Scope boundary (read first)
 
-This spec covers **the dashboard only**: a new frontend app, the minimal `/v1`
-aggregate endpoints it reads, and its Caddy hosting.
+This spec covers **the frontend dashboard app only** — the React + Vite build, its
+components, and its client-side data logic, developed and tested against **fixtures**
+that match the data contract below.
 
-**Out of scope / owned by a separate, already-running process:**
-- The **year-long operations backfill** (classifying a year of KLMO tracks into
-  `operations` rows).
-- The **observed-origin pipeline** that populates `operations.origin_airport_icao`
-  and the per-operation **locality** classification.
+**Explicitly owned by others / not built by this plan:**
+- The **two `/v1` aggregate endpoints** (`daily-operations`, `origins`) and any
+  scope-3 helpers — the user owns their implementation. This spec defines them **as a
+  contract the frontend targets**, not as work to be done here.
+- The **Caddy proxy / hosting** (same-origin `/api/*` → `/v1` with a server-side key)
+  — the user owns it. The frontend assumes only that its endpoints are reachable at
+  same-origin `/api/*`.
+- The **year-long operations backfill** and the **observed-origin pipeline** that
+  populates `operations.origin_airport_icao` / locality — a separate, already-running
+  process.
 
-The dashboard treats locality/origin as a **data contract** the backend fulfils
-(defined in "Locality contract" below). It must degrade gracefully while the
-backfill is mid-flight: months with no data render as honest empty/partial states,
-never as errors or fabricated zeros presented as complete.
+The frontend treats locality/origin/coverage as a **data contract** fulfilled
+elsewhere. It must degrade gracefully while that data is mid-flight: months with no
+data render as honest empty/partial states, never as errors or fabricated zeros
+presented as complete. **Delivered against fixtures, it is complete; it shows real
+data once the endpoints and backfill land.**
 
 ## Non-goals
 
@@ -59,24 +66,19 @@ customer of the public API" true rather than aspirational.
 UI hard-codes KLMO; every label, title, and query derives from the resolved airport
 and its `/v1/meta`.
 
-### Same-origin proxy; API key stays server-side
+### Same-origin `/api/*` (proxy owned externally)
 
-The browser never holds an API key. Caddy adds a site block for
-`klmo.airfieldeconomics.org` (and future mirror hosts) that:
-- serves the built `dashboard/dist` for page routes, and
-- reverse-proxies `/api/*` → the circlejerks `/v1` API, **injecting the
-  `Authorization: Bearer <key>` header** from an env var.
+The frontend calls its endpoints at **same-origin relative paths** (`/api/…`) and
+holds **no API key**. The Caddy proxy that serves `dashboard/dist`, reverse-proxies
+`/api/*` → `/v1`, and injects `Authorization: Bearer <key>` (resolved **per host**,
+so each customer airport gets its own key and 120 req/min budget) is **owned by the
+user, not built here** — it follows the existing ledger block's same-origin `/api`
+pattern. The frontend's only assumption is that `GET /api/airports/{icao}/…` reaches
+the corresponding `/v1` route.
 
-This is the pattern the ledger block already uses (`Caddyfile` — same-origin `/api`,
-"zero CORS changes anywhere"). The dashboard is still a genuine external `/v1`
-consumer; the proxy adds only auth. **Key resolution is by hostname** so a future
-customer airport gets its own key, its own 120 req/min budget, and its own usage
-accounting from day one (env vars `DASHBOARD_KEY_KLMO`, …; the proxy maps host →
-key). CORS on `/v1` is untouched (stays localhost-only for dev).
-
-**Rate-budget consequence:** the 120 req/min limit is **shared across all
-visitors** of a host. The endpoint design is therefore *chunky, not chatty* — see
-below.
+**Rate-budget consequence the frontend must respect:** the 120 req/min limit is
+**shared across all visitors** of a host, so the app is designed to be *chunky, not
+chatty* — one whole-history fetch, then client-side arithmetic (see below).
 
 ---
 
@@ -101,9 +103,13 @@ claim about a named party. The dashboard consumes these three buckets as a contr
 the exact derivation (and whether locality is stored per-op or joined from a
 per-aircraft classification) lives in the backend/backfill, not the frontend.
 
-### Endpoints (new on `/v1`, additive)
+### Endpoints — the contract the frontend targets (implemented by the user)
 
-**1. `GET /v1/airports/{icao}/daily-operations?from=&to=` — the workhorse (required)**
+These are **not built by this plan**. They are the interface the app is written and
+fixtured against; the user implements them on `/v1` (reached via the proxy at
+same-origin `/api/*`). Shapes are normative — the fixtures mirror them exactly.
+
+**1. `GET /api/airports/{icao}/daily-operations?from=&to=` — the workhorse (required)**
 
 Returns **every day** in `[from, to]` (default: full available history), each day
 faceted by **operation type × locality**. Scope: `aggregates:read`.
@@ -134,7 +140,7 @@ with genuinely zero operations."
 from a single origin (faceted by type only — a single origin is by definition
 out-of-town). One request per hub click; see the relational hub.
 
-**2. `GET /v1/airports/{icao}/origins?from=&to=` — feeds the relational hub (required)**
+**2. `GET /api/airports/{icao}/origins?from=&to=` — feeds the relational hub (required)**
 
 Per-origin **arrival counts** for the window, ranked, **top N + `other`** (origin
 cardinality is unbounded, so this cannot live in the daily payload). Scope:
@@ -147,17 +153,17 @@ cardinality is unbounded, so this cannot live in the daily payload). Scope:
   "other": { "count": 12, "arrivals": 58 } }
 ```
 
-**Scope-3 panels — reuse first, add minimal aggregates only if needed:**
-- **Busiest aircraft:** reuse `/v1/airports/{icao}/worst-offenders` if its metric is
-  acceptable; otherwise a small per-aircraft op-count facet. (Plan decides.)
-- **Hour-of-day profile:** the daily payload is daily, not hourly. Add a small
-  `GET /v1/airports/{icao}/hourly-profile?from=&to=` (24 buckets, optionally split by
-  locality) **only if** reusing the existing `/operations-trends` `time_of_day`
-  (all-time) is insufficient for a windowed view.
+**Scope-3 panels — the frontend targets whichever source the user provides:**
+- **Busiest aircraft:** the existing `/api/airports/{icao}/worst-offenders` is
+  reachable today; the panel targets it unless the user prefers a per-aircraft
+  op-count aggregate.
+- **Hour-of-day profile:** needs a windowed 24-bucket source. The panel targets a
+  `GET /api/airports/{icao}/hourly-profile?from=&to=` if the user provides one, and
+  otherwise falls back to the existing `/operations-trends` `time_of_day` (all-time).
+  The component is written source-agnostically behind `api.ts`.
 
-Keeping new surface to endpoints 1 and 2 covers the hero chart, KPIs, trend, and the
-hub — the heart of the product. The two smaller panels are additive and right-sized
-in the plan.
+Endpoints 1 and 2 are the required contract (hero chart, KPIs, trend, hub); the two
+scope-3 panels degrade to "unavailable" cleanly if their source isn't wired yet.
 
 ---
 
@@ -252,34 +258,37 @@ State lives in `App`; panels are prop-driven and side-effect-free except `api.ts
 - Adding an airport = DNS record + proxy key entry + hostname-map entry (no code).
 - Locality/origin already generalize (any airport with an origin pipeline populated).
 
-## Testing
+## Testing (frontend only — vitest + testing-library)
 
 - `lib/facets.ts`: exhaustive unit tests — filter combinations, monthly rollup,
-  coverage vs zero-day, KPI math.
+  coverage vs zero-day, KPI math. The arithmetic core.
 - `lib/airport.ts`: hostname resolution + override.
-- `api.ts`: contract-shape tests against fixtures.
-- Component tests (vitest + testing-library): Toolbar filter emits, DayBarChart
-  colour-by re-stack, OriginHub `onSelectOrigin` cross-filter.
-- Backend: new endpoints get response-shape + scope-enforcement tests alongside the
-  existing `/v1` suite (`backend/.venv/bin/python -m pytest`), including
-  coverage-boundary and locality-bucket correctness.
+- `lib/api.ts`: contract-shape parsing against **fixtures** that mirror the endpoint
+  shapes above (checked into `dashboard/src/fixtures/`).
+- Component tests: Toolbar filter emits, DayBarChart colour-by re-stack, OriginHub
+  `onSelectOrigin` cross-filter, empty/partial-coverage rendering.
+- No backend tests in this plan — the endpoints are owned and tested by the user.
 
-## Dependencies on the backfill process (explicit)
+## Dependencies (explicit — owned outside this plan)
 
-The dashboard is buildable and testable **now** against fixtures. It shows real KLMO
-history only once the separate process has: (1) classified the year of operations,
-and (2) populated `operations.origin_airport_icao` so locality resolves. Until then,
-the UI honestly shows the ~5½ weeks that exist, bounded by `coverage`.
+The dashboard is buildable, testable, and mergeable **now** against fixtures. It
+shows real KLMO data once the user has: (1) implemented the `daily-operations` and
+`origins` endpoints and the Caddy proxy, and (2) the separate process has classified
+the year of operations and populated `operations.origin_airport_icao` so locality
+resolves. Until then the fixtures stand in, and against live-but-partial data the UI
+honestly shows what exists, bounded by `coverage`.
 
 ## Decisions locked (via brainstorming + visual companion)
 
-1. Dashboard + backfill in **parallel**; backfill owned by a separate process.
+1. **Frontend only.** The `/v1` endpoints and the Caddy proxy are a contract this app
+   targets; the user owns their implementation. Built and tested against fixtures.
 2. Locality from observed origin, homebase.py's asymmetric rules → `local /
    out_of_town / unclassified`.
 3. Filters = **two independent dimensions** (type × locality).
 4. **New `dashboard/` app**, airport from **hostname**.
-5. **Same-origin Caddy proxy**, key server-side, per-host key.
-6. Daily endpoint = **one request, whole history, pre-faceted** by type × locality.
+5. Frontend calls **same-origin `/api/*`**; key/proxy owned externally, per-host key.
+6. Daily endpoint contract = **one request, whole history, pre-faceted** by type ×
+   locality; all toolbar filtering is client-side.
 7. **Layout A** (toolbar + one hero chart).
 8. Colour-by default **locality**, toggle to type.
 9. Composition **scope 3** (full dashboard).
