@@ -16,3 +16,51 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--surface); color: var(--ink);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+/* ---- layout ---- */
+.app { max-width: 1080px; margin: 0 auto; padding: 20px 16px 60px; }
+.toolbar { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; }
+.toolbar-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 5px 0; }
+.airport-label { font-weight: 700; font-size: 15px; }
+.month-nav { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 14px; }
+.month-nav button { width: 26px; height: 26px; border: 1px solid var(--line); background: transparent; color: var(--ink2); border-radius: 6px; cursor: pointer; }
+.month-nav button:disabled { opacity: 0.35; cursor: default; }
+.group-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink2); }
+.colorby-label { margin-left: auto; }
+.chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px; font-size: 12px; color: var(--ink2); background: transparent; cursor: pointer; }
+.chip.on { background: #2a78d6; border-color: #2a78d6; color: #fff; }
+.chip.who.on { background: #eb6834; border-color: #eb6834; color: #fff; }
+.seg-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg-toggle button { padding: 4px 12px; font-size: 12px; color: var(--ink2); background: transparent; border: none; cursor: pointer; }
+.seg-toggle button.act { background: var(--ink); color: var(--surface); }
+.kpi-row { display: flex; gap: 10px; margin-bottom: 16px; }
+.kpi { flex: 1; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.kpi b { display: block; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+.kpi span { color: var(--ink2); font-size: 11px; }
+.chart-card { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; }
+.chart-title { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.chart-title span { color: var(--ink2); font-size: 12px; }
+.legend { display: flex; gap: 16px; margin-top: 10px; color: var(--ink2); font-size: 12px; flex-wrap: wrap; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -1px; }
+.panel-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.panel { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.panel h6 { margin: 0 0 8px; font-size: 12px; }
+.panel .cap { color: var(--ink2); font-size: 11px; }
+.rowbar { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.rowbar .nm { width: 60px; font-size: 11px; color: var(--ink2); flex: none; }
+.rowbar .tr { flex: 1; height: 9px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.rowbar .fl { height: 100%; background: #2a78d6; }
+.rowbar .ct { font-size: 11px; color: var(--ink2); width: 38px; text-align: right; }
+.heat { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; }
+.heat i { aspect-ratio: 1; border-radius: 2px; }
+.hub { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.hub h5 { margin: 0 0 2px; font-size: 14px; }
+.hub svg { width: 100%; height: auto; display: block; }
+.state { text-align: center; padding: 60px 20px; color: var(--ink2); }
+.state.error button, .hub button { cursor: pointer; }
+.state .detail { font-size: 12px; opacity: 0.8; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* ---- hub draw-in (skipped under reduced motion via absence of .animate) ---- */
+.hub svg.animate path { stroke-dasharray: 320; stroke-dashoffset: 320; animation: hub-draw 1.1s ease forwards; }
+@keyframes hub-draw { to { stroke-dashoffset: 0; } }
+@media (max-width: 720px) { .panel-row { grid-template-columns: 1fr; } .kpi-row { flex-wrap: wrap; } }
