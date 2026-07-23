@@ -678,33 +678,68 @@ def read_operations_page(
     runway_id: str | None = None,
     after: tuple[int, str] | None = None,
     limit: int = 500,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
 ) -> list[sqlite3.Row]:
     """One keyset-paginated page of operations, ordered by (timestamp, id).
 
     Keyset rather than OFFSET: an offset scan re-walks every skipped row, which
     turns a deep page over a year of KLMO history into a full table scan on the
     same connection that serves the live site.
+
+    When `history_path` is set and the window reaches older than `hot_cutoff_ts`,
+    the page also draws from the long-term ("cold") store: cold serves timestamps
+    < the cutoff, hot serves >= the cutoff (time-disjoint), and the two result
+    sets are merged by (timestamp, id). Rows are accessed by column name, so the
+    two tables' column order need not match. With no history_path (or a recent
+    window) this is byte-identical to the operational-only read.
     """
-    query = (
-        "SELECT * FROM operations "
-        "WHERE icao = ? AND timestamp >= ? AND timestamp <= ?"
+    def _page(table: str, lo: int, hi: int) -> tuple[str, list]:
+        q = f"SELECT * FROM {table} WHERE icao = ? AND timestamp >= ? AND timestamp <= ?"
+        a: list = [icao.upper(), int(lo), int(hi)]
+        if types:
+            q += f" AND type IN ({','.join('?' for _ in types)})"
+            a.extend(types)
+        if icao24:
+            q += " AND icao24 = ?"
+            a.append(icao24.lower())
+        if runway_id:
+            q += " AND runway_id = ?"
+            a.append(runway_id)
+        if after is not None:
+            q += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+            a.extend([after[0], after[0], after[1]])
+        q += " ORDER BY timestamp ASC, id ASC LIMIT ?"
+        a.append(int(limit))
+        return q, a
+
+    use_cold = (
+        history_path is not None
+        and hot_cutoff_ts is not None
+        and int(start_ts) < int(hot_cutoff_ts)
     )
-    args: list = [icao.upper(), int(start_ts), int(end_ts)]
-    if types:
-        query += f" AND type IN ({','.join('?' for _ in types)})"
-        args.extend(types)
-    if icao24:
-        query += " AND icao24 = ?"
-        args.append(icao24.lower())
-    if runway_id:
-        query += " AND runway_id = ?"
-        args.append(runway_id)
-    if after is not None:
-        query += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
-        args.extend([after[0], after[0], after[1]])
-    query += " ORDER BY timestamp ASC, id ASC LIMIT ?"
-    args.append(int(limit))
-    return conn.execute(query, args).fetchall()
+    if not use_cold:
+        q, a = _page("operations", start_ts, end_ts)
+        return conn.execute(q, a).fetchall()
+
+    cutoff = int(hot_cutoff_ts)
+    rows: list = []
+    attached = False
+    try:
+        conn.execute("ATTACH ? AS hist", (history_path,))
+        attached = True
+        cold_hi = min(int(end_ts), cutoff - 1)
+        if int(start_ts) <= cold_hi:  # older slice -> cold
+            q, a = _page("hist.operations", start_ts, cold_hi)
+            rows.extend(conn.execute(q, a).fetchall())
+        if int(end_ts) >= cutoff:  # recent slice -> hot
+            q, a = _page("operations", max(int(start_ts), cutoff), end_ts)
+            rows.extend(conn.execute(q, a).fetchall())
+    finally:
+        if attached:
+            conn.execute("DETACH hist")
+    rows.sort(key=lambda r: (r["timestamp"], r["id"]))
+    return rows[: int(limit)]
 
 
 def read_track_archive_page(
@@ -716,26 +751,74 @@ def read_track_archive_page(
     bbox: tuple[float, float, float, float] | None = None,
     after: tuple[int, str] | None = None,
     limit: int = 500,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
 ) -> list[sqlite3.Row]:
     """One keyset-paginated page of raw track samples, ordered by
     (timestamp, icao24) — which is also the cursor tuple.
 
     `bbox` is (min_lat, min_lon, max_lat, max_lon).
+
+    When `history_path` is set and the window reaches older than `hot_cutoff_ts`,
+    the page also draws from the long-term ("cold") store: the hot table serves
+    timestamps >= the cutoff, the cold table serves timestamps < the cutoff, so
+    the two are strictly time-disjoint and the keyset cursor stays valid across
+    both. With no history_path (or a fully-recent window) this is byte-identical
+    to the operational-only read.
     """
-    query = "SELECT * FROM track_archive WHERE timestamp >= ? AND timestamp <= ?"
-    args: list = [int(start_ts), int(end_ts)]
-    if icao24:
-        query += " AND icao24 = ?"
-        args.append(icao24.lower())
-    if bbox is not None:
-        query += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
-        args.extend([bbox[0], bbox[2], bbox[1], bbox[3]])
-    if after is not None:
-        query += " AND (timestamp > ? OR (timestamp = ? AND icao24 > ?))"
-        args.extend([after[0], after[0], after[1]])
-    query += " ORDER BY timestamp ASC, icao24 ASC LIMIT ?"
+    def _filters(lo: int, hi: int) -> tuple[str, list]:
+        q = "WHERE timestamp >= ? AND timestamp <= ?"
+        a: list = [int(lo), int(hi)]
+        if icao24:
+            q += " AND icao24 = ?"
+            a.append(icao24.lower())
+        if bbox is not None:
+            q += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
+            a.extend([bbox[0], bbox[2], bbox[1], bbox[3]])
+        if after is not None:
+            q += " AND (timestamp > ? OR (timestamp = ? AND icao24 > ?))"
+            a.extend([after[0], after[0], after[1]])
+        return q, a
+
+    use_cold = (
+        history_path is not None
+        and hot_cutoff_ts is not None
+        and int(start_ts) < int(hot_cutoff_ts)
+    )
+    if not use_cold:
+        where, args = _filters(start_ts, end_ts)
+        args.append(int(limit))
+        return conn.execute(
+            f"SELECT * FROM track_archive {where} ORDER BY timestamp ASC, icao24 ASC LIMIT ?",
+            args,
+        ).fetchall()
+
+    cols = ", ".join(_TRACK_ARCHIVE_COLUMNS)
+    cutoff = int(hot_cutoff_ts)
+    parts: list[str] = []
+    args = []
+    cold_hi = min(int(end_ts), cutoff - 1)
+    if int(start_ts) <= cold_hi:  # older slice -> cold store
+        w, a = _filters(start_ts, cold_hi)
+        parts.append(f"SELECT {cols} FROM hist.track_archive {w}")
+        args += a
+    if int(end_ts) >= cutoff:  # recent slice -> hot store
+        w, a = _filters(max(int(start_ts), cutoff), end_ts)
+        parts.append(f"SELECT {cols} FROM track_archive {w}")
+        args += a
+    union = " UNION ALL ".join(parts)
     args.append(int(limit))
-    return conn.execute(query, args).fetchall()
+    attached = False
+    try:
+        conn.execute("ATTACH ? AS hist", (history_path,))
+        attached = True
+        return conn.execute(
+            f"SELECT * FROM ({union}) ORDER BY timestamp ASC, icao24 ASC LIMIT ?",
+            args,
+        ).fetchall()
+    finally:
+        if attached:
+            conn.execute("DETACH hist")
 
 
 def existing_operation_ids(
