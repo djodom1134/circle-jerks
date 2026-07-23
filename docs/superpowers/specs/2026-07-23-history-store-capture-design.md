@@ -43,12 +43,14 @@ reshape branch descend from — in **non-overlapping** ways except two handlers:
 | `backend/app/settings.py` | **+2 fields**: `history_database_path: str \| None = None` and `permanent_history_airports: list[str] = ["KLMO"]`. |
 | `backend/app/db.py` | `read_operations_page` and `read_track_archive_page` gain `history_path: str \| None = None` and `hot_cutoff_ts: int \| None = None`, plus inner `_page`/`_filters` helpers. When `history_path` is set and the window reaches older than `hot_cutoff_ts`, the page merges hot (`timestamp >= cutoff`) and cold (`< cutoff`) — time-disjoint, merged by `(timestamp, id)`, accessed by column name so column order need not match. With no `history_path`, byte-identical to the operational-only read. |
 | `backend/app/public_api.py` | Two call sites — `list_operations` and `list_tracks` — compute `hist_path = settings.history_database_path if history_store.available(settings) and history_store.airport_allowed(icao, settings) else None` and pass `history_path=hist_path, hot_cutoff_ts=now - track_archive_horizon_days*86400` into the db read. **These are the two handlers the `/v1` reshape rewrote.** |
-| `backend/app/archive.py` | **+1 function** `archive_to_history_once(settings)`: syncs the aging tail of the hot archive into the cold store before prune. No-op if the store is unavailable or no allowlist. |
+| `backend/app/archive.py` | **+1 function** `archive_to_history_once(settings)` **and its call site** inside the existing `archive_loop` — on the prune interval the loop syncs the aging tail of the hot archive into the cold store before prune. No-op if the store is unavailable or no allowlist. |
 | `docker-compose.prod.yml` | **+1 env line** on the api service: `CIRCLEJERK_HISTORY_DATABASE_PATH: /app/data/klmo_history.sqlite3`. The file lives in the already-mounted `/srv/circlejerk/data:/app/data` volume — **no new volume mount**. |
 
-`worker.py` is **unchanged** — `archive_to_history_once` is not wired into the running
-loop; the live path is read-only serving. This is captured as-is (the function is brought
-into git so the sync path is recorded, even though nothing currently schedules it).
+`worker.py` is **unchanged** and already schedules `archive_loop` (branch `worker.py:247`).
+The loop already exists on the branch; the capture adds the `archive_to_history_once`
+function and the single call to it inside the loop. So the sync **is** active in
+production, gated by `history_store.available()` — inert in local/test where no
+`history_database_path` is configured, which is what keeps the existing suite green.
 
 ## Goals
 
@@ -65,9 +67,10 @@ into git so the sync path is recorded, even though nothing currently schedules i
 ## Non-goals
 
 - Redesigning the cold store or its schema. Capture what runs.
-- Wiring `archive_to_history_once` into the worker loop. It is unwired in production; this
-  design records it, it does not schedule it. If scheduling is wanted, that is a separate,
-  deliberate change.
+- Extending the cold-store fallthrough to the aggregate endpoints (D6). The year stays
+  reachable row-by-row via `/v1/operations` and `/v1/tracks`, not as aggregate stats.
+- Deriving the missing quality layers (deviation/VNAP pattern-fit, wind, origin trace-back,
+  runway rollups). Those are a data-pipeline effort; this capture serves whatever is present.
 - Migrating or touching the 7.4 GB cold DB itself. It is data, correctly not in git; the
   code points at it via `history_database_path`.
 - Any change to the reshape's field names, models, or the drift gate.
@@ -123,6 +126,53 @@ override for it). Capture the default as-is. `history_database_path` defaults to
 (feature off) and is switched on per-environment by the compose env line — so the feature
 is inert in local/test unless a path is set, which is exactly what keeps the existing 814
 tests green.
+
+### D5. Fix `altitude_datum` for the backfill source string
+
+Probing the live cold store showed its 47M track rows carry `source='adsblol_globe_history'`,
+which is **not** in the reshape's `_ALTITUDE_DATUM_BY_SOURCE` map (that maps the live
+`adsb_lol`, not the backfill string). So `/v1/tracks` over the historical year currently
+reports `altitude_datum: "unknown"` for every row, though the value is barometric. The
+capture adds `'adsblol_globe_history' → 'barometric'` to the map, with a test, and audits
+any other backfill source strings the same way. This is a data-correctness fix that belongs
+with the feature that surfaces the data.
+
+### D6. Aggregates stay hot-only — the cold fallthrough is not extended
+
+Only `/v1/operations` and `/v1/tracks` route to the cold store, matching production. The
+aggregate endpoints (`stats`, `operations-trends`, `worst-offenders`, `vnap-compliance`,
+`flow`, `patterns`) read the hot 7-day window only, so the historical year is reachable
+row-by-row but not as aggregates. This is a deliberate scope boundary, not an omission:
+extending the fallthrough is new scope, and it is largely moot until the derived layers
+that feed those aggregates are computed (see the reconciliation below). Recorded so a future
+reader knows the year's invisibility to aggregates is by decision.
+
+## Data reconciliation — what the API can query vs. what the cold store holds
+
+Grounded in a live probe of the 7.4 GB cold store (121,325 operations; 47M track rows):
+
+**Tier A — richly queryable over the year (the two cold-fallthrough endpoints):**
+- `/v1/tracks`: all 47M raw positions (lat/lon, heading, callsign, icao24, barometric
+  altitude). `geo_altitude_ft`/`vertical_rate_fpm` are sparse in the backfill; the parser
+  fix applies to live ingest, not this historical data.
+- `/v1/operations`: `type` 100%, `runway_id`/`min_altitude_ft_agl` 74%, `turn_direction`
+  50%, `registration` 44%, `operator` 42%.
+
+**The nullable-field work is load-bearing here.** The derived-quality fields are near-empty
+in the cold store — `fraction_off_pattern`/`deviation_*`/`time_*` ~0%, `wind_*` ~1%,
+`origin_airport_icao`/`flight_school` 0%, `emitter_category` ~0%. Because Tasks 2–7 made
+every one of these nullable (against the plan's original non-nullable examples), a year-old
+row serializes cleanly with nulls instead of raising a `ValidationError` and 500-ing the
+page. Had the model kept the plan's types, the historical year would be un-queryable.
+
+**Tier B — the year is invisible (aggregates are hot-only, per D6):** `stats`,
+`operations-trends`, `worst-offenders`, `vnap-compliance`, `flow`, `patterns` see only the
+last 7 days.
+
+**Tier C — derived layers not yet computed:** `worst-offenders`/`vnap-compliance` rank on
+`vnap_score` (deviation/pattern-fit derived, ~0% populated); `flow`/`patterns` need the
+runway rollups (~0%). So even where Tier B could reach the year, the analytical values would
+be empty until those layers are derived — a data-pipeline task outside this capture.
 
 ## Architecture
 
