@@ -52,3 +52,16 @@ def test_airport_allowed_permits_an_icao24_only_query(tmp_path):
 
 def test_horizon_seconds_is_days_times_86400(tmp_path):
     assert history_store.horizon_seconds(_settings(tmp_path)) == 7 * 86400
+
+
+import asyncio
+
+from app import archive as archive_mod
+
+
+def test_archive_to_history_is_a_noop_when_unavailable(tmp_path):
+    # The sync must be inert without a configured, present cold store — this is
+    # what keeps it dormant in local/test and every existing suite green.
+    s = _settings(tmp_path, path=None)
+    result = asyncio.run(archive_mod.archive_to_history_once(s))
+    assert result == {"skipped": "history_unavailable_or_no_allowlist"}

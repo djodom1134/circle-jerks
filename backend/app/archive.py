@@ -24,11 +24,15 @@ import logging
 import time
 from typing import Iterable
 
-from . import db
+from . import db, history_store
 from .settings import Settings
 from .store import Store, loads
 
 LOGGER = logging.getLogger(__name__)
+
+# Radius of the bbox we sync from hot -> cold for permanently-archived airports.
+# Matches the backfill filter radius so the cold store stays consistent.
+HISTORY_SYNC_RING_NM = 12.0
 
 # Window of samples we copy to the archive on each pass. We start a little
 # before the archive horizon (so a fresh archive run will catch samples that
@@ -115,6 +119,68 @@ async def prune_once(
         deleted = db.prune_track_archive(conn, cutoff)
         conn.commit()
     return deleted
+
+
+async def archive_to_history_once(settings: Settings) -> dict:
+    """Sync the aging tail of the hot archive into the long-term ("cold") store,
+    for airports we permanently archive, BEFORE prune deletes it from hot.
+
+    Copies only samples newer than the cold store already holds for that
+    airport's bbox (INSERT OR IGNORE covers any overlap), so the cold timeline
+    stays gap-free and continuously current. No-op if the history store isn't
+    configured/present.
+    """
+    if not history_store.available(settings) or not settings.permanent_history_airports:
+        return {"skipped": "history_unavailable_or_no_allowlist"}
+    from .geo import bbox_for_radius
+
+    cols = ", ".join(db._TRACK_ARCHIVE_COLUMNS)
+    written = 0
+    ops_written = 0
+    with db.db_session(settings.database_path) as conn:
+        conn.execute("ATTACH ? AS hist", (settings.history_database_path,))
+        try:
+            for icao in settings.permanent_history_airports:
+                airport = db.get_airport(conn, icao)
+                if airport is None:
+                    continue
+                min_lat, min_lon, max_lat, max_lon = bbox_for_radius(
+                    airport.lat, airport.lon, HISTORY_SYNC_RING_NM
+                )
+                cold_max = conn.execute(
+                    "SELECT COALESCE(MAX(timestamp), 0) FROM hist.track_archive "
+                    "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+                    (min_lat, max_lat, min_lon, max_lon),
+                ).fetchone()[0]
+                cur = conn.execute(
+                    f"INSERT OR IGNORE INTO hist.track_archive ({cols}) "
+                    f"SELECT {cols} FROM track_archive "
+                    f"WHERE timestamp > ? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+                    (int(cold_max), min_lat, max_lat, min_lon, max_lon),
+                )
+                written += cur.rowcount or 0
+
+                # Also sync this airport's operations (the derived constructs).
+                # Hot/cold operations column order differs, so name the columns;
+                # skip pass_over_user (person-relative, not persisted to history).
+                op_cols = ", ".join(
+                    row[1] for row in conn.execute("PRAGMA table_info(operations)").fetchall()
+                )
+                op_cold_max = conn.execute(
+                    "SELECT COALESCE(MAX(timestamp), 0) FROM hist.operations WHERE icao = ?",
+                    (icao.upper(),),
+                ).fetchone()[0]
+                op_cur = conn.execute(
+                    f"INSERT OR IGNORE INTO hist.operations ({op_cols}) "
+                    f"SELECT {op_cols} FROM operations "
+                    f"WHERE icao = ? AND timestamp > ? AND type != 'pass_over_user'",
+                    (icao.upper(), int(op_cold_max)),
+                )
+                ops_written += op_cur.rowcount or 0
+            conn.commit()
+        finally:
+            conn.execute("DETACH hist")
+    return {"samples_written": written, "operations_written": ops_written}
 
 
 async def gap_fill_once(
@@ -538,6 +604,12 @@ async def archive_loop(
                 )
 
             if time.time() - last_prune >= prune_interval_seconds:
+                synced = await archive_to_history_once(settings)
+                if synced.get("samples_written"):
+                    LOGGER.info(
+                        "track archive: synced %d samples to long-term store",
+                        synced["samples_written"],
+                    )
                 deleted = await prune_once(settings, horizon_seconds=archive_horizon_seconds)
                 last_prune = time.time()
                 if deleted:
