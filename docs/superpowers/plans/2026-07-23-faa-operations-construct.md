@@ -879,8 +879,8 @@ In `docs/api/openapi.yaml`, add the schema immediately after the `Operation` sch
          by_event_type, low_approach_touchdowns, low_approach_touchdown_max_agl_ft]
       properties:
         airport_icao: { type: string }
-        since_ts: { type: integer, description: Unix seconds, inclusive. }
-        until_ts: { type: integer, description: Unix seconds, inclusive. }
+        since_ts: { type: integer, description: "Unix seconds, inclusive." }
+        until_ts: { type: integer, description: "Unix seconds, inclusive." }
         faa_operations:
           type: integer
           description: Total FAA operations (takeoffs + landings; a touch-and-go is 2).
