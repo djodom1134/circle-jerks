@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import db, v1_schemas
 from app.main import app
+from app.settings import get_settings
 from test_public_api import configure, mint
 
 
@@ -746,3 +747,68 @@ def test_every_fraction_field_is_within_zero_and_one(v1_client_and_key):
         for k, v in _walk_pairs(body):
             if k.startswith("fraction_") and isinstance(v, (int, float)):
                 assert 0.0 <= v <= 1.0, f"{path}: {k} = {v}"
+
+
+# ─── Task 3: cold-store routing composed with the reshape ───────────────────
+
+def test_backfill_source_reports_barometric_datum():
+    # The cold store's 47M rows carry source='adsblol_globe_history'. Without
+    # this mapping every historical /v1/tracks row reports altitude_datum
+    # 'unknown' despite being barometric.
+    from app import v1_schemas
+    row = {
+        "icao24": "a26f5e", "timestamp": 1784000000, "lat": 40.0, "lon": -105.1,
+        "altitude_ft": 900.0, "baro_altitude_ft": 900.0, "geo_altitude_ft": None,
+        "heading_deg": 290.0, "vertical_rate_fpm": None, "callsign": "N765J",
+        "emitter_category": None, "source": "adsblol_globe_history",
+    }
+    out = v1_schemas.track_sample_out(row)
+    assert out.altitude_datum == "barometric"
+
+
+def test_operations_query_serves_cold_rows_through_the_reshaped_model(tmp_path, monkeypatch):
+    """End-to-end proof (spec D3) that the reshape and history_store compose: a
+    /v1/operations query reaching into the cold period returns the historical
+    row mapped through operation_out, with the reshaped field name present
+    (timestamp_ts) and the un-derived quality fields null -- not a 500."""
+    hot = configure(tmp_path, monkeypatch)
+    cold = str(tmp_path / "cold.sqlite3")
+    db.init_db(cold)
+    old_ts = int(time.time()) - 60 * 86400  # 60 days ago, well past the 7-day horizon
+    with db.connect(cold) as c:
+        c.execute(
+            "INSERT INTO operations (id, icao, icao24, type, timestamp, runway_id) "
+            "VALUES ('cold1','KLMO','a26f5e','landing', ?, '29')", (old_ts,)
+        )
+        c.commit()
+    monkeypatch.setenv("CIRCLEJERK_HISTORY_DATABASE_PATH", cold)
+    get_settings.cache_clear()
+    key = mint(hot, scopes=["ops:read"], airports=None)
+    with TestClient(app) as client:
+        body = client.get(
+            f"/v1/operations?airport=KLMO&since={old_ts - 100}&until={int(time.time())}&limit=10",
+            headers={"X-Api-Key": key},
+        ).json()
+    ids = [r["id"] for r in body["data"]]
+    assert "cold1" in ids                              # the cold row was served
+    cold_row = next(r for r in body["data"] if r["id"] == "cold1")
+    assert cold_row["timestamp_ts"] == old_ts          # reshaped name, not `timestamp`
+    assert "fraction_off_pattern" in cold_row          # present…
+    assert cold_row["fraction_off_pattern"] is None     # …and null (un-derived), not a 500
+
+
+def test_a_restricted_key_still_403s_a_foreign_airport_with_cold_configured(tmp_path, monkeypatch):
+    """The cold routing must be an addition after the existing gates, never a
+    bypass: a KLMO-restricted key still gets 403 for a foreign airport even
+    with a cold store configured -- proving history_store.airport_allowed did
+    not open a hole."""
+    hot = configure(tmp_path, monkeypatch)
+    cold = str(tmp_path / "cold.sqlite3")
+    db.init_db(cold)
+    monkeypatch.setenv("CIRCLEJERK_HISTORY_DATABASE_PATH", cold)
+    get_settings.cache_clear()
+    key = mint(hot, scopes=["ops:read"], airports=["KLMO"])
+    with TestClient(app) as client:
+        r = client.get("/v1/operations?airport=KBJC&limit=1", headers={"X-Api-Key": key})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden_airport"

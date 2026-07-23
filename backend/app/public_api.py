@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import api_keys, db, v1_schemas, vnap
+from . import api_keys, db, history_store, v1_schemas, vnap
 from .api_keys import ApiKeyContext
 from .db import db_session
 from .geo import bbox_for_radius
@@ -531,6 +531,11 @@ async def list_operations(
         size = page_limit(limit)
         after = decode_cursor(cursor) if cursor else None
 
+        hist_path = (
+            settings.history_database_path
+            if history_store.available(settings) and history_store.airport_allowed(icao, settings)
+            else None
+        )
         rows = db.read_operations_page(
             conn,
             icao=icao,
@@ -541,6 +546,8 @@ async def list_operations(
             runway_id=runway,
             after=after,
             limit=size,
+            history_path=hist_path,
+            hot_cutoff_ts=int(time.time()) - settings.track_archive_horizon_days * 86400,
         )
 
     # `v1_schemas.operation_out` expects `airport_icao`; the stored column is
@@ -605,9 +612,11 @@ async def list_tracks(
     after = decode_cursor(cursor) if cursor else None
 
     bbox = None
+    airport_icao = None
     with db_session(settings.database_path) as conn:
         if airport:
             icao = require_airport(ctx, airport)
+            airport_icao = icao
             found = db.get_airport(conn, icao)
             if found is None:
                 raise ApiError(404, "not_found", f"unknown airport {icao}")
@@ -616,6 +625,12 @@ async def list_tracks(
             )
             bbox = (min_lat, min_lon, max_lat, max_lon)
 
+        hist_path = (
+            settings.history_database_path
+            if history_store.available(settings)
+            and history_store.airport_allowed(airport_icao, settings)
+            else None
+        )
         rows = db.read_track_archive_page(
             conn,
             start_ts=start_ts,
@@ -624,6 +639,8 @@ async def list_tracks(
             bbox=bbox,
             after=after,
             limit=size,
+            history_path=hist_path,
+            hot_cutoff_ts=int(time.time()) - settings.track_archive_horizon_days * 86400,
         )
 
     data = [v1_schemas.track_sample_out(row) for row in rows]

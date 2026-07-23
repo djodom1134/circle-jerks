@@ -155,6 +155,7 @@ _ALTITUDE_DATUM_BY_SOURCE = {
     "airplanes_live": "barometric",
     "opensky": "barometric",
     "flightaware_aeroapi": "unknown",
+    "adsblol_globe_history": "barometric",  # the KLMO year backfill (adsb.lol globe history)
 }
 
 
