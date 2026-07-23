@@ -518,7 +518,7 @@
             "type": "string"
           },
           "report_count": {
-            "description": "Lifetime public report count for this aircraft.",
+            "description": "Lifetime public report count for this aircraft. Same value as `reports` on /v1/airports/{icao}/vnap-compliance.",
             "type": "integer"
           },
           "total_circles": {
@@ -1145,7 +1145,7 @@
             ]
           },
           "reports": {
-            "description": "Lifetime public report count for this aircraft.",
+            "description": "Lifetime public report count for this aircraft. Same value as `report_count` on /v1/airports/{icao}/worst-offenders.",
             "type": "integer"
           },
           "runway_changes_initiated": {

@@ -904,7 +904,7 @@ components:
         aircraft_type: { type: [string, "null"], description: "Airframe model from the registry, when known." }
         owner_class: { type: string, description: "e.g. flight_school, private, commercial, unknown." }
         total_circles: { type: integer }
-        report_count: { type: integer, description: Lifetime public report count for this aircraft. }
+        report_count: { type: integer, description: "Lifetime public report count for this aircraft. Same value as `reports` on /v1/airports/{icao}/vnap-compliance." }
         vnap_score:
           type: number
           description: 0..100. See /v1/meta's constants.vnap_score_scale.
@@ -955,7 +955,7 @@ components:
         operations: { type: integer }
         circles: { type: integer }
         touch_and_gos: { type: integer }
-        reports: { type: integer, description: "Lifetime public report count for this aircraft." }
+        reports: { type: integer, description: "Lifetime public report count for this aircraft. Same value as `report_count` on /v1/airports/{icao}/worst-offenders." }
         runway_changes_initiated:
           type: integer
           description: |

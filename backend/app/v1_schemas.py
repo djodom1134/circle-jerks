@@ -376,7 +376,7 @@ class WorstOffendersOut(BaseModel):
     offenders: list[OffenderOut]
 
 
-def worst_offenders_out(requested: str, resolved: str, label: str | None,
+def worst_offenders_out(requested: str, resolved: str, label: str,
                         is_fallback: bool, rows) -> WorstOffendersOut:
     return WorstOffendersOut(
         requested_airport_icao=requested,
@@ -488,7 +488,6 @@ AXIS_LABELS = {
     "tg_volume": "Touch-and-go volume",
     "circle_restraint": "Circle restraint",
     "left_traffic": "Left traffic adherence",
-    "preferred_runway": "Preferred runway use",
 }
 
 
