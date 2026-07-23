@@ -1,7 +1,7 @@
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
 import type { DailyOperations } from "../lib/types";
 import { monthlyOutOfTownShare } from "../lib/facets";
-import { formatMonthLabel, formatPercent } from "../lib/format";
+import { formatMonthLabel } from "../lib/format";
 
 export function TrendPanel({ data, activeMonth }: { data: DailyOperations; activeMonth: string }) {
   const share = monthlyOutOfTownShare(data).slice(-12).map((m) => ({

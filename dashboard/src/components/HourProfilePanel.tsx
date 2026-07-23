@@ -1,8 +1,11 @@
 import type { HourlyProfileResponse } from "../lib/types";
 
 export function HourProfilePanel({ hourly }: { hourly: HourlyProfileResponse | null }) {
-  if (!hourly || hourly.hours.length === 0) {
+  if (!hourly) {
     return <div className="panel"><h6>By hour</h6><p className="cap">Unavailable for this window yet.</p></div>;
+  }
+  if (hourly.hours.length === 0) {
+    return <div className="panel"><h6>By hour</h6><p className="cap">No activity recorded for this window.</p></div>;
   }
   const max = hourly.hours.reduce((m, h) => Math.max(m, h.operations), 0) || 1;
   return (

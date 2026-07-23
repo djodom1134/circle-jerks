@@ -12,4 +12,9 @@ describe("HourProfilePanel", () => {
     render(<HourProfilePanel hourly={null} />);
     expect(screen.getByText(/unavailable/i)).toBeTruthy();
   });
+  it("distinguishes a real zero-result response from unavailable", () => {
+    render(<HourProfilePanel hourly={{ airport_icao: "KLMO", window: { from: "2026-07-01", to: "2026-07-31" }, hours: [] }} />);
+    expect(screen.getByText(/no activity/i)).toBeTruthy();
+    expect(screen.queryByText(/unavailable/i)).toBeNull();
+  });
 });

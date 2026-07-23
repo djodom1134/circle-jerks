@@ -2,8 +2,11 @@ import type { WorstOffendersResponse } from "../lib/types";
 import { formatInteger } from "../lib/format";
 
 export function AircraftPanel({ offenders }: { offenders: WorstOffendersResponse | null }) {
-  if (!offenders || offenders.offenders.length === 0) {
+  if (!offenders) {
     return <div className="panel"><h6>Busiest aircraft</h6><p className="cap">Unavailable for this airport yet.</p></div>;
+  }
+  if (offenders.offenders.length === 0) {
+    return <div className="panel"><h6>Busiest aircraft</h6><p className="cap">No repeat aircraft recorded for this period.</p></div>;
   }
   const max = offenders.offenders[0].report_count || 1;
   return (

@@ -12,4 +12,9 @@ describe("AircraftPanel", () => {
     render(<AircraftPanel offenders={null} />);
     expect(screen.getByText(/unavailable/i)).toBeTruthy();
   });
+  it("distinguishes a real zero-result response from unavailable", () => {
+    render(<AircraftPanel offenders={{ airport_icao: "KLMO", offenders: [] }} />);
+    expect(screen.getByText(/no repeat aircraft/i)).toBeTruthy();
+    expect(screen.queryByText(/unavailable/i)).toBeNull();
+  });
 });
