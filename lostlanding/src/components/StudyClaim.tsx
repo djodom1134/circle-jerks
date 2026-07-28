@@ -76,9 +76,19 @@ export function StudyClaim({ data }: { data: LedgerResponse }) {
         the one lever big enough to reverse it: a landing fee worth a <strong>$1.16&nbsp;million</strong> swing.
       </p>
 
+      <p style={{ marginTop: "22px" }}>
+        And a second City-commissioned report — going to Council as Item 9.B on July 28 — finally replaced the FAA's
+        planning estimate with a real ADS-B count: <strong>137,452 operations</strong> in 2025, up 8.6% in a year, 91%
+        of them single-engine trainers. The runway that carried all of it collected <strong>$0</strong>, and the fee
+        study that priced the fix was built on last year's traffic.
+      </p>
+
       <p style={{ marginTop: "20px", display: "flex", flexWrap: "wrap", gap: "14px" }}>
         <a className="cta" href="/the-airport-is-in-trouble.html">
           The airport is in financial trouble →
+        </a>
+        <a className="cta" href="/what-the-airport-counted.html">
+          137,452 operations, zero collected →
         </a>
         <a className="cta" href="/what-the-70m-counts.html">
           What the "$73.6M" really counts →
