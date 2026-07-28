@@ -84,6 +84,9 @@ export function StudyClaim({ data }: { data: LedgerResponse }) {
       </p>
 
       <p style={{ marginTop: "20px", display: "flex", flexWrap: "wrap", gap: "14px" }}>
+        <a className="cta" href="/the-longmont-airport-file.html">
+          Start here: the whole file →
+        </a>
         <a className="cta" href="/the-airport-is-in-trouble.html">
           The airport is in financial trouble →
         </a>
