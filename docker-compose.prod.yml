@@ -14,12 +14,22 @@ services:
       CIRCLEJERK_ADMIN_USERNAME: ${CIRCLEJERK_ADMIN_USERNAME:-admin}
       CIRCLEJERK_ADMIN_PASSWORD: ${CIRCLEJERK_ADMIN_PASSWORD:-}
       CIRCLEJERK_ADMIN_PASSWORD_HASH: ${CIRCLEJERK_ADMIN_PASSWORD_HASH:-}
+      # Admin Google SSO. This file enumerates every variable explicitly, so a
+      # var present in .env but missing HERE never reaches the container - and
+      # the failure is silent: /admin/auth/methods reports google:false and the
+      # login screen renders with no Google button, which reads as a frontend
+      # bug. Adding a field to settings.py is not enough; list it here too.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
+      ADMIN_SUPERUSERS: ${ADMIN_SUPERUSERS:-}
       CIRCLEJERK_BUY_ME_COFFEE_URL: ${CIRCLEJERK_BUY_ME_COFFEE_URL:-https://buymeacoffee.com/djodom}
       CIRCLEJERK_LIVE_SOURCE_PRIORITY: ${CIRCLEJERK_LIVE_SOURCE_PRIORITY:-adsbx,self_hosted,adsb_lol,adsb_fi,airplanes_live,opensky}
       CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS: ${CIRCLEJERK_LIVE_POLL_INTERVAL_SECONDS:-10}
       CIRCLEJERK_LIVE_SOURCE_MAX_STALENESS_SECONDS: ${CIRCLEJERK_LIVE_SOURCE_MAX_STALENESS_SECONDS:-90}
       CIRCLEJERK_BBOX_MERGE_DISTANCE_NM: ${CIRCLEJERK_BBOX_MERGE_DISTANCE_NM:-5}
       CIRCLEJERK_OPENSKY_HISTORICAL_ENABLED: ${CIRCLEJERK_OPENSKY_HISTORICAL_ENABLED:-false}
+      CIRCLEJERK_HISTORY_DATABASE_PATH: ${CIRCLEJERK_HISTORY_DATABASE_PATH:-/app/data/klmo_history.sqlite3}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       OPENSKY: ${OPENSKY:-}
       OPENSKY_CLIENT_ID: ${OPENSKY_CLIENT_ID:-}
@@ -74,6 +84,7 @@ services:
       FLIGHTAWARE_COLD_START_ENABLED: ${FLIGHTAWARE_COLD_START_ENABLED:-true}
       FLIGHTAWARE_COLD_START_MIN_SAMPLES: ${FLIGHTAWARE_COLD_START_MIN_SAMPLES:-500}
       FLIGHTAWARE_COLD_START_DAILY_BUDGET: ${FLIGHTAWARE_COLD_START_DAILY_BUDGET:-5}
+      CIRCLEJERK_HISTORY_DATABASE_PATH: ${CIRCLEJERK_HISTORY_DATABASE_PATH:-/app/data/klmo_history.sqlite3}
     volumes:
       - /srv/circlejerk/data:/app/data
     depends_on:

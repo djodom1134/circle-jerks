@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     # view reads up to this many days back; prune deletes older. Bounded by
     # disk, not Redis memory — safe to keep a week of a single field's traffic.
     track_archive_horizon_days: int = 7
+    # Long-term ("cold") track store: a separate, never-pruned SQLite file on the
+    # same track_archive schema, holding the backfilled year + everything that
+    # ages out of the hot archive. None = feature off (behaves as before).
+    history_database_path: str | None = None
+    permanent_history_airports: list[str] = ["KLMO"]
     event_ttl_seconds: int = 14_400
     description_ttl_seconds: int = 600
     # Master switch for FlightAware AeroAPI. Set FLIGHTAWARE_ENABLED=false in

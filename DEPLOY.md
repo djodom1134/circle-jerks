@@ -142,6 +142,16 @@ curl -sS https://circlejerks.live/healthz
 curl -sS "https://circlejerks.live/api/reverse_geocode?lat=40.167&lon=-105.102"
 ```
 
+### The KLMO cold store (history_store)
+
+`/v1/operations` and `/v1/tracks` fall through to a long-term SQLite file
+(`/app/data/klmo_history.sqlite3`, ~7.4 GB, a year of KLMO history) via
+`CIRCLEJERK_HISTORY_DATABASE_PATH`. The file is **data, not code** — it lives in
+the `/app/data` volume and is never in git or rsynced. The code that serves it
+is now in the branch, so an `rsync --delete` no longer threatens it. After a
+deploy, the first prune cycle runs `archive_to_history_once`, which holds a write
+lock while syncing the aging tail — watch the first cycle on a fresh deploy.
+
 ## Routing notes (so you don't misroute new endpoints)
 
 `Caddyfile` strips `/api/` before forwarding to the backend, and the frontend

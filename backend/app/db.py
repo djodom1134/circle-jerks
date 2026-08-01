@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo
 
-from . import admin_users, api_keys
+from . import admin_users, api_keys, faa_operations
 from .geo import Point, distance_nm
 
 
@@ -678,33 +678,245 @@ def read_operations_page(
     runway_id: str | None = None,
     after: tuple[int, str] | None = None,
     limit: int = 500,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
 ) -> list[sqlite3.Row]:
     """One keyset-paginated page of operations, ordered by (timestamp, id).
 
     Keyset rather than OFFSET: an offset scan re-walks every skipped row, which
     turns a deep page over a year of KLMO history into a full table scan on the
     same connection that serves the live site.
+
+    When `history_path` is set and the window reaches older than `hot_cutoff_ts`,
+    the page also draws from the long-term ("cold") store: cold serves timestamps
+    < the cutoff, hot serves >= the cutoff (time-disjoint), and the two result
+    sets are merged by (timestamp, id). Rows are accessed by column name, so the
+    two tables' column order need not match. With no history_path (or a recent
+    window) this is byte-identical to the operational-only read.
     """
-    query = (
-        "SELECT * FROM operations "
-        "WHERE icao = ? AND timestamp >= ? AND timestamp <= ?"
+    def _page(table: str, lo: int, hi: int) -> tuple[str, list]:
+        q = f"SELECT * FROM {table} WHERE icao = ? AND timestamp >= ? AND timestamp <= ?"
+        a: list = [icao.upper(), int(lo), int(hi)]
+        if types:
+            q += f" AND type IN ({','.join('?' for _ in types)})"
+            a.extend(types)
+        if icao24:
+            q += " AND icao24 = ?"
+            a.append(icao24.lower())
+        if runway_id:
+            q += " AND runway_id = ?"
+            a.append(runway_id)
+        if after is not None:
+            q += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+            a.extend([after[0], after[0], after[1]])
+        q += " ORDER BY timestamp ASC, id ASC LIMIT ?"
+        a.append(int(limit))
+        return q, a
+
+    use_cold = (
+        history_path is not None
+        and hot_cutoff_ts is not None
+        and int(start_ts) < int(hot_cutoff_ts)
     )
-    args: list = [icao.upper(), int(start_ts), int(end_ts)]
-    if types:
-        query += f" AND type IN ({','.join('?' for _ in types)})"
-        args.extend(types)
-    if icao24:
-        query += " AND icao24 = ?"
-        args.append(icao24.lower())
-    if runway_id:
-        query += " AND runway_id = ?"
-        args.append(runway_id)
-    if after is not None:
-        query += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
-        args.extend([after[0], after[0], after[1]])
-    query += " ORDER BY timestamp ASC, id ASC LIMIT ?"
-    args.append(int(limit))
-    return conn.execute(query, args).fetchall()
+    if not use_cold:
+        q, a = _page("operations", start_ts, end_ts)
+        return conn.execute(q, a).fetchall()
+
+    cutoff = int(hot_cutoff_ts)
+    rows: list = []
+    attached = False
+    try:
+        conn.execute("ATTACH ? AS hist", (history_path,))
+        attached = True
+        cold_hi = min(int(end_ts), cutoff - 1)
+        if int(start_ts) <= cold_hi:  # older slice -> cold
+            q, a = _page("hist.operations", start_ts, cold_hi)
+            rows.extend(conn.execute(q, a).fetchall())
+        if int(end_ts) >= cutoff:  # recent slice -> hot
+            q, a = _page("operations", max(int(start_ts), cutoff), end_ts)
+            rows.extend(conn.execute(q, a).fetchall())
+    finally:
+        if attached:
+            conn.execute("DETACH hist")
+    rows.sort(key=lambda r: (r["timestamp"], r["id"]))
+    return rows[: int(limit)]
+
+
+def _runway_ops_with_spans(conn: sqlite3.Connection, table: str, icao: str) -> list[tuple]:
+    """(start, end, icao24, id, type) for every runway operation of an airport in
+    one table. A touch-and-go recovers its lap span from the circle it derives
+    from (same icao24+timestamp); a low approach is a zero-length point. Computed
+    over the airport's FULL history — the greedy suppression below depends on
+    where the scan starts, so a windowed slice would decide one lap differently on
+    two pages of the same site."""
+    rows = conn.execute(
+        # Only a touch-and-go carries a lap span (recovered from the circle it
+        # derives from). A low approach is a zero-length POINT — giving it a
+        # span, even from a circle that coincidentally shares its timestamp,
+        # would let it suppress DISTINCT later laps. Mirrors ledger laps.py,
+        # which only ever spans `touch_and_go`.
+        f"SELECT r.id AS id, r.icao24 AS icao24, r.timestamp AS ts, r.type AS type, "
+        f"       CASE WHEN r.type = 'touch_and_go' THEN "
+        f"         (SELECT MAX(c.time_total_s) FROM {table} c "
+        f"           WHERE c.icao = r.icao AND c.type = 'circle' "
+        f"             AND c.icao24 = r.icao24 AND c.timestamp = r.timestamp) "
+        f"       END AS lap_seconds "
+        f"FROM {table} r "
+        f"WHERE r.icao = ? AND r.type IN ('touch_and_go','low_approach') AND r.icao24 IS NOT NULL",
+        (icao.upper(),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        end = int(row["ts"])
+        dur = row["lap_seconds"]
+        start = end - int(dur) if dur is not None and int(dur) > 0 else end
+        out.append((start, end, row["icao24"], row["id"], row["type"]))
+    return out
+
+
+def duplicate_runway_op_ids(
+    conn: sqlite3.Connection,
+    *,
+    icao: str,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
+) -> set[str]:
+    """`operations.id` of every runway op that is a re-detection of another lap by
+    the same aircraft — the read-time floor that stops one physical lap counting
+    twice. Generalises `ledger-api/app/laps.py` to BOTH runway-op types: an
+    aircraft cannot fly two overlapping laps, so any touch-and-go OR low approach
+    that begins before an already-kept lap of the same aircraft ended is a
+    duplicate (a sliding-window re-detection of the touch-and-go, or a low
+    approach that is really that lap's own touchdown). Unprovable duplicates —
+    zero-length ops whose span can't be recovered — are kept, so the result is a
+    FLOOR: real activity is never under-reported."""
+    icao = icao.upper()
+    laps = _runway_ops_with_spans(conn, "operations", icao)
+    use_cold = history_path is not None and hot_cutoff_ts is not None
+    if use_cold:
+        attached = False
+        try:
+            conn.execute("ATTACH ? AS hist", (history_path,))
+            attached = True
+            cutoff = int(hot_cutoff_ts)
+            cold = _runway_ops_with_spans(conn, "hist.operations", icao)
+            # Seam: cold owns timestamps < cutoff, hot owns >= cutoff (mirrors
+            # read_operations_page), so an archival-lag copy is never seen twice.
+            laps = [lap for lap in laps if lap[1] >= cutoff] + [lap for lap in cold if lap[1] < cutoff]
+        finally:
+            if attached:
+                conn.execute("DETACH hist")
+
+    laps.sort()  # by (start, end, icao24, id, type) — order-independent result
+    suppressed: set[str] = set()
+    kept_end: dict[str, int] = {}
+    for start, end, icao24, op_id, _type in laps:
+        prev_end = kept_end.get(icao24)
+        if prev_end is not None and start < prev_end:
+            suppressed.add(op_id)  # begins before the kept lap ended -> same lap
+            continue
+        kept_end[icao24] = end
+    return suppressed
+
+
+def faa_operations_summary(
+    conn: sqlite3.Connection,
+    *,
+    icao: str,
+    start_ts: int,
+    end_ts: int,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
+) -> dict:
+    """Weighted FAA-operation totals for an airport over [start_ts, end_ts].
+
+    Mirrors read_operations_page's hot/cold seam: when history_path is set and
+    the window reaches older than hot_cutoff_ts, the older slice is summed from
+    the cold store (timestamp < cutoff) and the recent slice from hot
+    (timestamp >= cutoff). The two slices are time-disjoint, so summing their
+    weighted counts never double-counts the boundary. With no history_path (or a
+    fully-recent window) only the hot `operations` table is read.
+
+    Returns keys: faa_operations, arrivals, departures, low_approach_touchdowns,
+    and by_event_type (a {type: count} map over every observed type).
+    """
+    icao = icao.upper()
+
+    # Read-time lap-duplicate suppression (the FLOOR): a phantom set of op ids
+    # that re-detect a lap already counted, so one physical lap never scores
+    # twice. Computed once, globally, then excluded from every slice below.
+    suppressed = duplicate_runway_op_ids(
+        conn, icao=icao, history_path=history_path, hot_cutoff_ts=hot_cutoff_ts
+    )
+    conn.execute("DROP TABLE IF EXISTS temp._phantom_ops")
+    conn.execute("CREATE TEMP TABLE _phantom_ops (id TEXT PRIMARY KEY)")
+    if suppressed:
+        conn.executemany("INSERT OR IGNORE INTO _phantom_ops VALUES (?)", [(i,) for i in suppressed])
+    _excl = " AND id NOT IN (SELECT id FROM _phantom_ops)"
+
+    def _slice(table: str, lo: int, hi: int) -> dict:
+        agg = conn.execute(
+            f"SELECT {faa_operations.FAA_OPS_SUM_SQL} AS faa_operations, "
+            f"{faa_operations.FAA_ARRIVALS_SUM_SQL} AS arrivals, "
+            f"{faa_operations.FAA_DEPARTURES_SUM_SQL} AS departures, "
+            f"{faa_operations.LOW_APPROACH_TOUCHDOWN_COUNT_SQL} AS low_approach_touchdowns "
+            f"FROM {table} WHERE icao = ? AND timestamp >= ? AND timestamp <= ?{_excl}",
+            (icao, int(lo), int(hi)),
+        ).fetchone()
+        by_type = {
+            r["type"]: r["n"]
+            for r in conn.execute(
+                f"SELECT type, COUNT(*) AS n FROM {table} "
+                f"WHERE icao = ? AND timestamp >= ? AND timestamp <= ?{_excl} GROUP BY type",
+                (icao, int(lo), int(hi)),
+            ).fetchall()
+        }
+        return {
+            "faa_operations": agg["faa_operations"] or 0,   # SUM over 0 rows is NULL
+            "arrivals": agg["arrivals"] or 0,
+            "departures": agg["departures"] or 0,
+            "low_approach_touchdowns": agg["low_approach_touchdowns"] or 0,
+            "by_event_type": by_type,
+        }
+
+    def _merge(a: dict, b: dict) -> dict:
+        by_type = dict(a["by_event_type"])
+        for t, n in b["by_event_type"].items():
+            by_type[t] = by_type.get(t, 0) + n
+        return {
+            "faa_operations": a["faa_operations"] + b["faa_operations"],
+            "arrivals": a["arrivals"] + b["arrivals"],
+            "departures": a["departures"] + b["departures"],
+            "low_approach_touchdowns": a["low_approach_touchdowns"] + b["low_approach_touchdowns"],
+            "by_event_type": by_type,
+        }
+
+    use_cold = (
+        history_path is not None
+        and hot_cutoff_ts is not None
+        and int(start_ts) < int(hot_cutoff_ts)
+    )
+    if not use_cold:
+        return _slice("operations", start_ts, end_ts)
+
+    cutoff = int(hot_cutoff_ts)
+    result = {
+        "faa_operations": 0, "arrivals": 0, "departures": 0,
+        "low_approach_touchdowns": 0, "by_event_type": {},
+    }
+    attached = False
+    try:
+        conn.execute("ATTACH ? AS hist", (history_path,))
+        attached = True
+        cold_hi = min(int(end_ts), cutoff - 1)
+        if int(start_ts) <= cold_hi:  # older slice -> cold
+            result = _merge(result, _slice("hist.operations", start_ts, cold_hi))
+        if int(end_ts) >= cutoff:  # recent slice -> hot
+            result = _merge(result, _slice("operations", max(int(start_ts), cutoff), end_ts))
+    finally:
+        if attached:
+            conn.execute("DETACH hist")
+    return result
 
 
 def read_track_archive_page(
@@ -716,26 +928,74 @@ def read_track_archive_page(
     bbox: tuple[float, float, float, float] | None = None,
     after: tuple[int, str] | None = None,
     limit: int = 500,
+    history_path: str | None = None,
+    hot_cutoff_ts: int | None = None,
 ) -> list[sqlite3.Row]:
     """One keyset-paginated page of raw track samples, ordered by
     (timestamp, icao24) — which is also the cursor tuple.
 
     `bbox` is (min_lat, min_lon, max_lat, max_lon).
+
+    When `history_path` is set and the window reaches older than `hot_cutoff_ts`,
+    the page also draws from the long-term ("cold") store: the hot table serves
+    timestamps >= the cutoff, the cold table serves timestamps < the cutoff, so
+    the two are strictly time-disjoint and the keyset cursor stays valid across
+    both. With no history_path (or a fully-recent window) this is byte-identical
+    to the operational-only read.
     """
-    query = "SELECT * FROM track_archive WHERE timestamp >= ? AND timestamp <= ?"
-    args: list = [int(start_ts), int(end_ts)]
-    if icao24:
-        query += " AND icao24 = ?"
-        args.append(icao24.lower())
-    if bbox is not None:
-        query += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
-        args.extend([bbox[0], bbox[2], bbox[1], bbox[3]])
-    if after is not None:
-        query += " AND (timestamp > ? OR (timestamp = ? AND icao24 > ?))"
-        args.extend([after[0], after[0], after[1]])
-    query += " ORDER BY timestamp ASC, icao24 ASC LIMIT ?"
+    def _filters(lo: int, hi: int) -> tuple[str, list]:
+        q = "WHERE timestamp >= ? AND timestamp <= ?"
+        a: list = [int(lo), int(hi)]
+        if icao24:
+            q += " AND icao24 = ?"
+            a.append(icao24.lower())
+        if bbox is not None:
+            q += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
+            a.extend([bbox[0], bbox[2], bbox[1], bbox[3]])
+        if after is not None:
+            q += " AND (timestamp > ? OR (timestamp = ? AND icao24 > ?))"
+            a.extend([after[0], after[0], after[1]])
+        return q, a
+
+    use_cold = (
+        history_path is not None
+        and hot_cutoff_ts is not None
+        and int(start_ts) < int(hot_cutoff_ts)
+    )
+    if not use_cold:
+        where, args = _filters(start_ts, end_ts)
+        args.append(int(limit))
+        return conn.execute(
+            f"SELECT * FROM track_archive {where} ORDER BY timestamp ASC, icao24 ASC LIMIT ?",
+            args,
+        ).fetchall()
+
+    cols = ", ".join(_TRACK_ARCHIVE_COLUMNS)
+    cutoff = int(hot_cutoff_ts)
+    parts: list[str] = []
+    args = []
+    cold_hi = min(int(end_ts), cutoff - 1)
+    if int(start_ts) <= cold_hi:  # older slice -> cold store
+        w, a = _filters(start_ts, cold_hi)
+        parts.append(f"SELECT {cols} FROM hist.track_archive {w}")
+        args += a
+    if int(end_ts) >= cutoff:  # recent slice -> hot store
+        w, a = _filters(max(int(start_ts), cutoff), end_ts)
+        parts.append(f"SELECT {cols} FROM track_archive {w}")
+        args += a
+    union = " UNION ALL ".join(parts)
     args.append(int(limit))
-    return conn.execute(query, args).fetchall()
+    attached = False
+    try:
+        conn.execute("ATTACH ? AS hist", (history_path,))
+        attached = True
+        return conn.execute(
+            f"SELECT * FROM ({union}) ORDER BY timestamp ASC, icao24 ASC LIMIT ?",
+            args,
+        ).fetchall()
+    finally:
+        if attached:
+            conn.execute("DETACH hist")
 
 
 def existing_operation_ids(

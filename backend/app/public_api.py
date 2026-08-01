@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import api_keys, db, vnap
+from . import api_keys, db, history_store, v1_schemas, vnap
 from .api_keys import ApiKeyContext
 from .db import db_session
 from .geo import bbox_for_radius
@@ -349,29 +349,28 @@ def decode_cursor(raw: str) -> tuple[int, str]:
         raise ApiError(400, "invalid_request", "cursor is not valid") from exc
 
 
-def paged(rows: list[dict], limit: int, cursor_of) -> dict:
-    """Wrap a page of rows, emitting next_cursor only when the page was full."""
+def paged(rows: list, limit: int, cursor_of) -> dict:
+    """Wrap a page of rows, emitting next_cursor only when the page was full.
+
+    `rows` is whatever the caller is about to publish as `data` — a list of
+    dicts or of Pydantic models, either works. `cursor_of` is supplied by the
+    caller and reads the cursor fields off one element of `rows`; it decides
+    how (dict subscript, attribute access, ...), so this stays agnostic to
+    the row shape.
+    """
     next_cursor = cursor_of(rows[-1]) if len(rows) == limit and rows else None
     return {"data": rows, "next_cursor": next_cursor}
 
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
-@router.get("/meta", summary="Describe the calling key")
-async def meta(ctx: Annotated[ApiKeyContext, Depends(resolve_key)]) -> dict:
+@router.get("/meta", summary="Describe the calling key", response_model=v1_schemas.MetaOut)
+async def meta(
+    ctx: Annotated[ApiKeyContext, Depends(resolve_key)],
+) -> v1_schemas.MetaOut:
     """Echoes this key's own scopes and airport restriction, so a 403 can be
     diagnosed without contacting us."""
-    return {
-        "version": API_VERSION,
-        "name": ctx.name,
-        "scopes": sorted(ctx.scopes),
-        "airports": sorted(ctx.airports) if ctx.airports is not None else None,
-        "limits": {
-            "requests_per_minute": RATE_LIMIT_PER_MINUTE,
-            "max_page_size": MAX_PAGE_SIZE,
-            "max_track_span_seconds": MAX_TRACK_SPAN_SECONDS,
-        },
-    }
+    return v1_schemas.meta_out(ctx)
 
 
 _OPENAPI_DOCUMENT_PATH = Path(__file__).resolve().parent / "generated" / "openapi.json"
@@ -483,22 +482,6 @@ async def public_docs() -> HTMLResponse:
 # Default lookback when the caller supplies no range.
 DEFAULT_LOOKBACK_SECONDS = 7 * 86400
 
-# Frozen on purpose: new columns on `operations` must not silently appear in
-# the public contract.
-_OPERATION_FIELDS = (
-    "id", "icao24", "callsign", "registration", "type", "timestamp",
-    "runway_id", "turn_direction", "min_altitude_ft_agl", "emitter_category",
-    "deviation_mean_nm", "deviation_peak_nm", "pct_off_pattern",
-    "wind_from_deg", "wind_speed_kt", "origin_airport_icao", "origin_label",
-    "operator", "flight_school",
-)
-
-
-def operation_row(row) -> dict:
-    out = {field: row[field] for field in _OPERATION_FIELDS}
-    out["airport_icao"] = row["icao"]
-    return out
-
 
 def resolve_range(
     since: str | None, until: str | None, *, now: int, max_span: int | None = None
@@ -521,7 +504,10 @@ def resolve_range(
     return start_ts, end_ts
 
 
-@router.get("/operations", summary="Classified operations for an airport")
+@router.get(
+    "/operations", summary="Classified operations for an airport",
+    response_model=v1_schemas.OperationPage,
+)
 async def list_operations(
     ctx: Annotated[ApiKeyContext, Depends(require_scope("ops:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
@@ -533,7 +519,7 @@ async def list_operations(
     runway: str | None = None,
     cursor: str | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
-) -> dict:
+) -> v1_schemas.OperationPage:
     with db_session(settings.database_path) as conn:
         # `_known_airport`, the same gate the aggregates and the ledger proxy
         # use: the key's restriction is enforced BEFORE existence, so an
@@ -545,6 +531,11 @@ async def list_operations(
         size = page_limit(limit)
         after = decode_cursor(cursor) if cursor else None
 
+        hist_path = (
+            settings.history_database_path
+            if history_store.available(settings) and history_store.airport_allowed(icao, settings)
+            else None
+        )
         rows = db.read_operations_page(
             conn,
             icao=icao,
@@ -555,30 +546,61 @@ async def list_operations(
             runway_id=runway,
             after=after,
             limit=size,
+            history_path=hist_path,
+            hot_cutoff_ts=int(time.time()) - settings.track_archive_horizon_days * 86400,
         )
 
-    return paged(
-        [operation_row(row) for row in rows],
-        size,
-        lambda row: encode_cursor(row["timestamp"], row["id"]),
+    # `v1_schemas.operation_out` expects `airport_icao`; the stored column is
+    # `icao` (internal dict keys are not part of the /v1 contract and stay as
+    # they are). The rename happens here, at the serialization boundary, same
+    # as it always has.
+    data = [
+        v1_schemas.operation_out({**dict(row), "airport_icao": row["icao"]})
+        for row in rows
+    ]
+    return v1_schemas.OperationPage(
+        **paged(data, size, lambda item: encode_cursor(item.timestamp_ts, item.id))
     )
+
+
+@router.get(
+    "/operations/summary", summary="FAA operation totals for an airport",
+    response_model=v1_schemas.OperationsSummaryOut,
+)
+async def operations_summary(
+    ctx: Annotated[ApiKeyContext, Depends(require_scope("ops:read"))],
+    settings: Annotated[Settings, Depends(settings_from_app)],
+    airport: str,
+    since: str | None = None,
+    until: str | None = None,
+) -> v1_schemas.OperationsSummaryOut:
+    with db_session(settings.database_path) as conn:
+        icao = _known_airport(conn, ctx, airport)
+        start_ts, end_ts = resolve_range(since, until, now=int(time.time()))
+        hist_path = (
+            settings.history_database_path
+            if history_store.available(settings) and history_store.airport_allowed(icao, settings)
+            else None
+        )
+        summary = db.faa_operations_summary(
+            conn,
+            icao=icao,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            history_path=hist_path,
+            hot_cutoff_ts=int(time.time()) - settings.track_archive_horizon_days * 86400,
+        )
+    return v1_schemas.operations_summary_out(icao, start_ts, end_ts, summary)
 
 
 # Matches the scan ring used by the historical track-density view.
 TRACK_RING_NM = 8.0
 
-_TRACK_FIELDS = (
-    "icao24", "timestamp", "lat", "lon", "altitude_ft", "baro_altitude_ft",
-    "geo_altitude_ft", "heading_deg", "vertical_rate_fpm", "callsign",
-    "emitter_category", "source",
+
+@router.get(
+    "/tracks", summary="Raw ADS-B position samples",
+    response_model=v1_schemas.TrackPage,
 )
-
-
-def track_row(row) -> dict:
-    return {field: row[field] for field in _TRACK_FIELDS}
-
-
-@router.get("/tracks", summary="Raw ADS-B position samples")
 async def list_tracks(
     ctx: Annotated[ApiKeyContext, Depends(require_scope("tracks:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
@@ -588,7 +610,7 @@ async def list_tracks(
     airport: str | None = None,
     cursor: str | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
-) -> dict:
+) -> v1_schemas.TrackPage:
     if not icao24 and not airport:
         raise ApiError(400, "invalid_request", "one of icao24 or airport is required")
     # A key restricted to specific airports must not be able to reach raw
@@ -620,9 +642,11 @@ async def list_tracks(
     after = decode_cursor(cursor) if cursor else None
 
     bbox = None
+    airport_icao = None
     with db_session(settings.database_path) as conn:
         if airport:
             icao = require_airport(ctx, airport)
+            airport_icao = icao
             found = db.get_airport(conn, icao)
             if found is None:
                 raise ApiError(404, "not_found", f"unknown airport {icao}")
@@ -631,6 +655,12 @@ async def list_tracks(
             )
             bbox = (min_lat, min_lon, max_lat, max_lon)
 
+        hist_path = (
+            settings.history_database_path
+            if history_store.available(settings)
+            and history_store.airport_allowed(airport_icao, settings)
+            else None
+        )
         rows = db.read_track_archive_page(
             conn,
             start_ts=start_ts,
@@ -639,12 +669,13 @@ async def list_tracks(
             bbox=bbox,
             after=after,
             limit=size,
+            history_path=hist_path,
+            hot_cutoff_ts=int(time.time()) - settings.track_archive_horizon_days * 86400,
         )
 
-    return paged(
-        [track_row(row) for row in rows],
-        size,
-        lambda row: encode_cursor(row["timestamp"], row["icao24"]),
+    data = [v1_schemas.track_sample_out(row) for row in rows]
+    return v1_schemas.TrackPage(
+        **paged(data, size, lambda item: encode_cursor(item.timestamp_ts, item.icao24))
     )
 
 
@@ -654,9 +685,9 @@ async def list_tracks(
 # helpers. main.py is shaped for the frontend and free to change with it; the
 # /v1 contract must not shift underneath partners when it does. Keeping a
 # second copy of `_STATS_WINDOWS` (as `_WINDOWS`) and of `_pattern_response`
-# (as `_pattern_out`) is the deliberate cost of that decoupling — main.py
-# imports this module, never the reverse, so importing from main.py here would
-# also create a circular import.
+# (as `v1_schemas.patterns_out`/`PatternOut`) is the deliberate cost of that
+# decoupling — main.py imports this module, never the reverse, so importing
+# from main.py here would also create a circular import.
 
 # Mirrors main.py's _STATS_WINDOWS so the public windows match the site's.
 _WINDOWS = {"1d": (86400, 3600), "7d": (7 * 86400, 86400),
@@ -682,37 +713,26 @@ def _known_airport(conn, ctx: ApiKeyContext, icao: str) -> str:
     return normalized
 
 
-def _pattern_out(row) -> dict:
-    return {
-        "id": row["id"],
-        "airport_icao": row["icao"],
-        "runway_id": row["runway_id"],
-        "version": row["version"],
-        "name": row["name"],
-        "locked": bool(row["locked"]),
-        "geometry": json.loads(row["geometry_json"]),
-        "created_at": row["created_at"],
-    }
-
-
-@router.get("/airports/{icao}/stats", summary="Operation counts and buckets")
+@router.get(
+    "/airports/{icao}/stats", summary="Operation counts and buckets",
+    response_model=v1_schemas.AirportStatsOut,
+)
 async def airport_stats(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
     window: str = "7d",
-) -> dict:
+) -> v1_schemas.AirportStatsOut:
     now = int(time.time())
     start_ts, end_ts, bucket = _window(window, now)
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         stats = db.airport_stats(conn, normalized, start_ts, end_ts, bucket_seconds=bucket)
-    return {
-        "airport_icao": normalized,
-        "window": {"code": window, "start_ts": start_ts, "end_ts": end_ts,
-                   "bucket_seconds": bucket},
-        **stats,
-    }
+    return v1_schemas.airport_stats_out(
+        normalized,
+        {"code": window, "start_ts": start_ts, "end_ts": end_ts, "bucket_seconds": bucket},
+        stats,
+    )
 
 
 def _suppress_foreign_fallback(conn, ctx: ApiKeyContext, requested: str,
@@ -745,13 +765,16 @@ def _suppress_foreign_fallback(conn, ctx: ApiKeyContext, requested: str,
     }
 
 
-@router.get("/airports/{icao}/worst-offenders", summary="Most-reported aircraft")
+@router.get(
+    "/airports/{icao}/worst-offenders", summary="Most-reported aircraft",
+    response_model=v1_schemas.WorstOffendersOut,
+)
 async def airport_worst_offenders(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
     limit: int = 5,
-) -> dict:
+) -> v1_schemas.WorstOffendersOut:
     now = int(time.time())
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
@@ -759,78 +782,106 @@ async def airport_worst_offenders(
             conn, normalized, now=now, limit=max(1, min(int(limit), 10))
         )
         offenders = _suppress_foreign_fallback(conn, ctx, normalized, offenders)
-    # airport_icao last: build_worst_offenders returns a whole response body in
-    # main.py, so it may already carry the key. Ours is the normalized one.
-    return {**offenders, "airport_icao": normalized}
+    return v1_schemas.worst_offenders_out(
+        normalized,
+        offenders["resolved_icao"],
+        offenders["resolved_label"],
+        offenders["is_fallback"],
+        offenders["offenders"],
+    )
 
 
-@router.get("/airports/{icao}/operations-trends", summary="Twelve-month trends")
+@router.get(
+    "/airports/{icao}/operations-trends", summary="Twelve-month trends",
+    response_model=v1_schemas.TrendsOut,
+)
 async def airport_operations_trends(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.TrendsOut:
     now = int(time.time())
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         trends = db.airport_operations_trends(conn, normalized, now_ts=now, months=12)
-    return {"airport_icao": normalized, **trends}
+    return v1_schemas.trends_out(
+        normalized,
+        trends["timezone"],
+        trends["data_since"],
+        trends["recent_days"],
+        trends["monthly"],
+        trends["time_of_day"],
+    )
 
 
-@router.get("/airports/{icao}/vnap-compliance", summary="Per-aircraft VNAP compliance")
+@router.get(
+    "/airports/{icao}/vnap-compliance", summary="Per-aircraft VNAP compliance",
+    response_model=v1_schemas.VnapComplianceOut,
+)
 async def airport_vnap_compliance(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
     window: str = "7d",
-) -> dict:
+) -> v1_schemas.VnapComplianceOut:
     now = int(time.time())
     start_ts, end_ts, _bucket = _window(window, now)
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         compliance = vnap.compute_aircraft_compliance(conn, normalized, start_ts, end_ts)
-    return {
-        "airport_icao": normalized,
-        "window": {"code": window, "start_ts": start_ts, "end_ts": end_ts},
-        **compliance,
-    }
+    return v1_schemas.vnap_compliance_out(
+        normalized,
+        {"code": window, "start_ts": start_ts, "end_ts": end_ts},
+        compliance["axes"],
+        compliance["averages"],
+        compliance["aircraft"],
+    )
 
 
-@router.get("/airports/{icao}/runways", summary="Runway geometry")
+@router.get(
+    "/airports/{icao}/runways", summary="Runway geometry",
+    response_model=v1_schemas.RunwaysOut,
+)
 async def airport_runways(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.RunwaysOut:
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         runways = db.runways_for_airport(conn, normalized)
-    return {"airport_icao": normalized, "runways": runways}
+    return v1_schemas.runways_out(normalized, runways)
 
 
-@router.get("/airports/{icao}/patterns", summary="Current traffic patterns")
+@router.get(
+    "/airports/{icao}/patterns", summary="Current traffic patterns",
+    response_model=v1_schemas.PatternsOut,
+)
 async def airport_patterns(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.PatternsOut:
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         rows = db.current_patterns_for_airport(conn, normalized)
-    return {"airport_icao": normalized, "patterns": [_pattern_out(row) for row in rows]}
+    return v1_schemas.patterns_out(normalized, rows)
 
 
-@router.get("/airports/{icao}/flow", summary="Active runway and recent changes")
+@router.get(
+    "/airports/{icao}/flow", summary="Active runway and recent changes",
+    response_model=v1_schemas.FlowOut,
+)
 async def airport_flow(
     icao: str,
     ctx: Annotated[ApiKeyContext, Depends(require_scope("aggregates:read"))],
     settings: Annotated[Settings, Depends(settings_from_app)],
-) -> dict:
+) -> v1_schemas.FlowOut:
     with db_session(settings.database_path) as conn:
         normalized = _known_airport(conn, ctx, icao)
         active = db.current_flow(conn, normalized)
         changes = db.recent_runway_changes(conn, normalized, 20)
-    return {"airport_icao": normalized, "active": active, "recent_changes": changes}
+    return v1_schemas.flow_out(normalized, active, changes)
 
 
 # ─── Ledger proxy ────────────────────────────────────────────────────────────

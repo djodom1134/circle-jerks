@@ -15,3 +15,9 @@ backend/.venv/
 
 .gstack/
 .superpowers/
+
+# Local scratch / research material (not code)
+/full_real.png
+/real_pic.jpg
+/lostlanding/data/
+/docs/how-the-ledger-works.html

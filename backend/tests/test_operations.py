@@ -405,3 +405,24 @@ def test_circles_are_closed_laps_only_no_line_crossings():
     events = detect_circles(track, ap, params)
 
     assert events == []
+
+
+def test_suppress_coincident_low_approach_dedups_same_lap():
+    from app.detectors import _suppress_coincident_low_approaches
+    circles = [{"icao24": "a1", "over_runway": ("29", 290),
+                "start_timestamp": 1000, "end_timestamp": 1300}]
+    las = [
+        {"icao24": "a1", "timestamp": 1150, "type": "low_approach"},  # inside lap -> drop
+        {"icao24": "a1", "timestamp": 1500, "type": "low_approach"},  # after lap  -> keep
+        {"icao24": "a2", "timestamp": 1150, "type": "low_approach"},  # other a/c  -> keep
+    ]
+    kept = _suppress_coincident_low_approaches(circles, las)
+    assert sorted((la["icao24"], la["timestamp"]) for la in kept) == [("a1", 1500), ("a2", 1150)]
+
+
+def test_suppress_is_a_noop_without_over_runway_circles():
+    from app.detectors import _suppress_coincident_low_approaches
+    circles = [{"icao24": "a1", "over_runway": None,
+                "start_timestamp": 1000, "end_timestamp": 1300}]
+    las = [{"icao24": "a1", "timestamp": 1150, "type": "low_approach"}]
+    assert _suppress_coincident_low_approaches(circles, las) == las

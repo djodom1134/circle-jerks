@@ -940,6 +940,42 @@ def detect_passes_over_period(
     return _pass_events_from_inside(samples, airport, params, inside)
 
 
+def _suppress_coincident_low_approaches(
+    circles: list[dict], low_approaches: list[dict]
+) -> list[dict]:
+    """Drop a `low_approach` that occurred DURING a circle-over-runway lap by the
+    same aircraft.
+
+    A circle whose loop crossed the runway is already counted as a `touch_and_go`
+    (touch_and_gos_from_circles). When that same lap also dipped low enough to
+    trip the runway-contact episode detector, that episode is the lap's OWN
+    touchdown — counting its `low_approach` too double-counts one physical lap
+    (the FAA weighting scores the pair 2 + 2 instead of 2). A low approach that
+    falls OUTSIDE every runway-crossing lap (a straight-in low pass, or a
+    touch-and-go the circle detector missed) is a real, distinct operation and is
+    kept. Circles crossing the runway at altitude never trip the low-episode
+    detector, so their high loops are unaffected.
+    """
+    spans: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for circle in circles:
+        if not circle.get("over_runway"):
+            continue
+        start = circle.get("start_timestamp")
+        end = circle.get("end_timestamp")
+        if start is None or end is None:
+            continue
+        spans[circle["icao24"]].append((int(start), int(end)))
+    if not spans:
+        return low_approaches
+    kept = []
+    for la in low_approaches:
+        ts = int(la["timestamp"])
+        if any(s <= ts <= e for s, e in spans.get(la["icao24"], ())):
+            continue  # inside a runway-crossing lap -> the lap's own touchdown
+        kept.append(la)
+    return kept
+
+
 def detect_events(track: list[dict], airport: Airport, runways: list[dict], params: ScanParams) -> list[dict]:
     if not track:
         return []
@@ -947,10 +983,13 @@ def detect_events(track: list[dict], airport: Airport, runways: list[dict], para
     circles = detect_circles(track, airport, params, runways)
     events.extend(circles)
     # A touch-and-go is a circle whose loop crossed the runway (see
-    # touch_and_gos_from_circles); the episode detector below now emits only
-    # low approaches and landings, never touch-and-gos.
+    # touch_and_gos_from_circles). The episode detector below emits low
+    # approaches and landings; a low approach that is really this lap's own
+    # touchdown (already counted as the touch-and-go) is suppressed so one
+    # physical lap is never counted twice.
     events.extend(touch_and_gos_from_circles(circles))
-    events.extend(detect_touch_and_gos(track, airport, runways))
+    events.extend(_suppress_coincident_low_approaches(
+        circles, detect_touch_and_gos(track, airport, runways)))
     events.extend(detect_passes(track, airport, params))
     return events
 
@@ -973,7 +1012,13 @@ def detect_events_over_period(
         events_by_id[event["id"]] = event
     for event in touch_and_gos_from_circles(circles):
         events_by_id[event["id"]] = event
-    for event in detect_touch_and_gos_over_period(samples, airport, runways, start_ts, end_ts):
+    # Suppress a low approach that is really a runway-crossing lap's own
+    # touchdown (already counted as that lap's touch-and-go) — see
+    # _suppress_coincident_low_approaches. Keeps genuine low passes and the
+    # touch-and-goes the circle detector missed.
+    for event in _suppress_coincident_low_approaches(
+        circles, detect_touch_and_gos_over_period(samples, airport, runways, start_ts, end_ts)
+    ):
         events_by_id[event["id"]] = event
     for event in detect_landings_over_period(samples, airport, runways, start_ts, end_ts):
         events_by_id[event["id"]] = event

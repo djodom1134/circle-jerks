@@ -45,6 +45,36 @@ FORWARDED_ONLY_PARAMS = {"days"}
 SELF_DESCRIBING_PATHS = ("openapi.json", "docs")
 
 
+def _find_corrupted_flow_descriptions(node: object, path: str, in_scope: bool) -> list[str]:
+    """Guard against `description: foo, bar` inside a YAML flow mapping (e.g.
+    `icao24: { type: string, description: 24-bit ICAO, lowercase hex. }`):
+    the unquoted comma parses as a key separator, truncating the description
+    and leaving a garbage null-valued sibling key (here `lowercase hex.`)
+    behind. Scoped to descendants of a `properties`/`schemas` key, and only
+    keys that look like a description fragment (a space, or a trailing
+    period), so a legitimately-null field is never flagged.
+    """
+    hits: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if (
+                in_scope
+                and value is None
+                and isinstance(key, str)
+                and (" " in key or key.endswith("."))
+            ):
+                hits.append(f"{path}/{key}")
+            hits.extend(
+                _find_corrupted_flow_descriptions(
+                    value, f"{path}/{key}", in_scope or key in ("properties", "schemas")
+                )
+            )
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            hits.extend(_find_corrupted_flow_descriptions(item, f"{path}[{i}]", in_scope))
+    return hits
+
+
 def main() -> int:
     live = get_openapi(title="verify", version=API_VERSION, routes=router.routes)
     doc = yaml.safe_load(DOC.read_text())
@@ -78,6 +108,54 @@ def main() -> int:
     for section, name in sorted(set(re.findall(r"#/components/(\w+)/(\w+)", raw))):
         if name not in doc.get("components", {}).get(section, {}):
             problems.append(f"dangling $ref: #/components/{section}/{name}")
+
+    for hit in sorted(_find_corrupted_flow_descriptions(doc, "", False)):
+        problems.append(
+            f"corrupted description (unquoted comma in a flow-mapping "
+            f"`description:`, quote the value): {hit}"
+        )
+
+    # Bind the served shape to the published one. The checks above cover
+    # paths, parameters, and $refs -- none of them compared response BODIES,
+    # which is how /runways shipped an undocumented `icao` with the suite
+    # green.
+    #
+    # Scope: the ten top-level response bodies only. Nested component
+    # schemas (AxisScore, StopBreakdown, ActiveFlow, RunwayChange,
+    # VnapAircraft, Offender, Window) are NOT separately compared
+    # field-by-field here -- they are sub-objects referenced by these ten,
+    # not response bodies of their own; a rename that ripples up into one of
+    # the ten's own declared properties is still caught, but their internal
+    # shape is not independently checked. `Error` (the shared error
+    # envelope) and `LedgerEnvelope` (the sidecar pass-through placeholder,
+    # declared `extra="allow"` with no fields of its own) are excluded on
+    # purpose: neither is wired to a route via `response_model=`.
+    #
+    # Imported here rather than at module scope, after sys.path already has
+    # `backend/` on it (see above) -- mirroring how this script's own
+    # top-level app imports are ordered relative to that same sys.path setup.
+    from app import v1_schemas  # noqa: E402
+
+    MODEL_FOR_SCHEMA = {
+        "Meta": v1_schemas.MetaOut,
+        "Operation": v1_schemas.OperationOut,
+        "TrackSample": v1_schemas.TrackSampleOut,
+        "AirportStats": v1_schemas.AirportStatsOut,
+        "Runway": v1_schemas.RunwayOut,
+        "WorstOffenders": v1_schemas.WorstOffendersOut,
+        "OperationsTrends": v1_schemas.TrendsOut,
+        "VnapCompliance": v1_schemas.VnapComplianceOut,
+        "Flow": v1_schemas.FlowOut,
+        "Pattern": v1_schemas.PatternOut,
+    }
+    for schema_name, model in MODEL_FOR_SCHEMA.items():
+        declared = set((doc["components"]["schemas"].get(schema_name, {})
+                        .get("properties") or {}).keys())
+        actual = set(model.model_fields)
+        for missing in sorted(actual - declared):
+            problems.append(f"{schema_name}: model field '{missing}' is not documented")
+        for extra in sorted(declared - actual):
+            problems.append(f"{schema_name}: documented '{extra}' is not a model field")
 
     # The committed JSON is what the admin docs panel and /v1/openapi.json
     # serve. If it drifts from the YAML, partners read one contract while the

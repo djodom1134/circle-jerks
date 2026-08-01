@@ -182,7 +182,7 @@ paths:
         any resolved operator or flight school.
 
         Requires the `ops:read` scope. Keyset-paginated, ordered by
-        `(timestamp, id)` ascending.
+        `(timestamp_ts, id)` ascending.
       operationId: listOperations
       parameters:
         - name: airport
@@ -203,7 +203,7 @@ paths:
           description: Restrict to one operation type.
           schema:
             type: string
-            enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
+            enum: [touch_and_go, circle, low_approach, landing, takeoff, pass_over_user]
         - name: icao24
           in: query
           description: Restrict to one aircraft by its 24-bit ICAO address.
@@ -246,14 +246,17 @@ paths:
                     callsign: N333RX
                     registration: N333RX
                     type: touch_and_go
-                    timestamp: 1784664115
+                    faa_operation_count: 2
+                    timestamp_ts: 1784664115
                     runway_id: "11"
                     turn_direction: right
                     min_altitude_ft_agl: 900
                     emitter_category: null
                     deviation_mean_nm: null
                     deviation_peak_nm: null
-                    pct_off_pattern: null
+                    fraction_off_pattern: null
+                    time_off_pattern_s: null
+                    time_total_s: null
                     wind_from_deg: null
                     wind_speed_kt: null
                     origin_airport_icao: null
@@ -261,6 +264,63 @@ paths:
                     operator: null
                     flight_school: null
                 next_cursor: MTc4NDY2NDExNjpvcC0wMDE
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/operations/summary:
+    get:
+      tags: [operations]
+      summary: FAA operation totals for an airport
+      description: |
+        Window totals in the canonical FAA sense of an operation — one takeoff
+        or one landing. A takeoff or landing counts 1, a touch-and-go counts 2,
+        a low approach counts 2 when it was a real touchdown
+        (min_altitude_ft_agl <= 25) else 0, and circles / passes count 0.
+        `arrivals + departures == faa_operations`. Draws from the long-term
+        (cold) store, so it covers the full retained history, not just the hot
+        window. Requires the `ops:read` scope.
+      operationId: operationsSummary
+      parameters:
+        - name: airport
+          in: query
+          required: true
+          description: ICAO code, case-insensitive.
+          schema: { type: string, example: KLMO }
+        - name: since
+          in: query
+          description: Start of range, inclusive. Defaults to 7 days before `until`.
+          schema: { type: string, example: "2025-07-21T00:00:00Z" }
+        - name: until
+          in: query
+          description: End of range, inclusive. Defaults to now.
+          schema: { type: string, example: "1784667715" }
+      responses:
+        "200":
+          description: FAA operation totals for the window.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationsSummary" }
+              example:
+                airport_icao: KLMO
+                since_ts: 1721520000
+                until_ts: 1753056000
+                faa_operations: 142712
+                arrivals: 70406
+                departures: 72306
+                by_event_type:
+                  landing: 14005
+                  takeoff: 15905
+                  touch_and_go: 28591
+                  low_approach: 30976
+                  circle: 31000
+                low_approach_touchdowns: 27810
+                low_approach_touchdown_max_agl_ft: 25
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -287,7 +347,7 @@ paths:
         Selecting by `airport` uses a bounding box around the field, so aircraft
         operating at a nearby airport inside that radius can appear.
 
-        Ordered by `(timestamp, icao24)` ascending; the cursor encodes that pair.
+        Ordered by `(timestamp_ts, icao24)` ascending; the cursor encodes that pair.
       operationId: listTracks
       parameters:
         - name: since
@@ -333,10 +393,11 @@ paths:
               example:
                 data:
                   - icao24: a1b2c3
-                    timestamp: 1784664115
+                    timestamp_ts: 1784664115
                     lat: 39.9088
                     lon: -105.1172
                     altitude_ft: 6500.0
+                    altitude_datum: barometric
                     baro_altitude_ft: 6480.0
                     geo_altitude_ft: 6520.0
                     heading_deg: 110.0
@@ -354,11 +415,11 @@ paths:
   /v1/airports/{icao}/stats:
     get:
       tags: [aggregates]
-      summary: Operation counts, buckets, and derived breakdowns
+      summary: Operation counts, buckets, and stop classification
       description: |
-        Counters, an operations-over-time series, stop classification, wind
-        breakdown, deviation summary, runway usage, and recent runway changes for
-        one airport. Requires `aggregates:read`.
+        Counters, an operations-over-time series, runway usage, and per-aircraft
+        stop classification for one airport and window. Requires
+        `aggregates:read`.
       operationId: getAirportStats
       parameters:
         - $ref: "#/components/parameters/IcaoPath"
@@ -384,6 +445,9 @@ paths:
                   - { bucket: 1784592000, count: 3 }
                 runway_usage:
                   - { runway_id: "11", total: 3, upwind: 0, crosswind: 0, downwind: 0, no_wind_data: 3 }
+                stop_classification:
+                  all: { total: 3, stopped: 1, did_not_stop: 2, fraction_stopped: 0.333 }
+                  pattern: { total: 3, stopped: 1, did_not_stop: 2, fraction_stopped: 0.333 }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -400,8 +464,8 @@ paths:
 
         When the requested airport has no scored aircraft, the underlying view falls
         back to the nearest neighbouring airport and sets `is_fallback: true` with
-        `resolved_icao` naming the substitute — always check those two fields before
-        attributing the result. **If your key is restricted, a fallback to an
+        `resolved_airport_icao` naming the substitute — always check those two fields
+        before attributing the result. **If your key is restricted, a fallback to an
         airport outside your scope is suppressed**: you receive an empty list with
         `is_fallback: false`, never another field's data.
       operationId: getWorstOffenders
@@ -418,10 +482,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/WorstOffenders" }
               example:
-                airport_icao: KBJC
-                source_icao: KBJC
-                resolved_icao: KBDU
-                resolved_label: "Boulder, CO"
+                requested_airport_icao: KBJC
+                resolved_airport_icao: KBDU
+                resolved_airport_label: "Boulder, CO"
                 is_fallback: true
                 offenders: []
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -442,12 +505,7 @@ paths:
           description: Trend series for the last twelve months.
           content:
             application/json:
-              schema:
-                type: object
-                required: [airport_icao]
-                properties:
-                  airport_icao: { type: string }
-                additionalProperties: true
+              schema: { $ref: "#/components/schemas/OperationsTrends" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -459,7 +517,11 @@ paths:
       summary: Per-aircraft VNAP compliance
       description: |
         Voluntary Noise Abatement Procedure compliance scored per aircraft over the
-        window. Requires `aggregates:read`.
+        window, 0..100 on every axis and on `vnap_score`/`composite_score` (see
+        /v1/meta's constants.axis_score_scale and constants.vnap_score_scale).
+        Axis codes vary by airport — a preferred-runway axis is coded `runway_29`
+        at KLMO — but the shape around each axis, and around this whole response,
+        never does: see VnapCompliance. Requires `aggregates:read`.
       operationId: getVnapCompliance
       parameters:
         - $ref: "#/components/parameters/IcaoPath"
@@ -469,13 +531,7 @@ paths:
           description: Compliance scoring for the window.
           content:
             application/json:
-              schema:
-                type: object
-                required: [airport_icao, window]
-                properties:
-                  airport_icao: { type: string }
-                  window: { $ref: "#/components/schemas/Window" }
-                additionalProperties: true
+              schema: { $ref: "#/components/schemas/VnapCompliance" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -506,8 +562,7 @@ paths:
               example:
                 airport_icao: KBJC
                 runways:
-                  - icao: KBJC
-                    runway_id: 12L
+                  - runway_id: 12L
                     lat_threshold: 39.9215
                     lon_threshold: -105.1321
                     heading_deg: 120.0
@@ -551,7 +606,8 @@ paths:
       summary: Active runway and recent changes
       description: |
         The runway currently in use and the last twenty runway changes. `active` is
-        null when no flow has been established. Requires `aggregates:read`.
+        null when no flow has been established yet for this airport. Requires
+        `aggregates:read`.
       operationId: getFlow
       parameters:
         - $ref: "#/components/parameters/IcaoPath"
@@ -560,17 +616,7 @@ paths:
           description: Current flow and recent changes.
           content:
             application/json:
-              schema:
-                type: object
-                required: [airport_icao, active, recent_changes]
-                properties:
-                  airport_icao: { type: string }
-                  active:
-                    type: [object, "null"]
-                    additionalProperties: true
-                  recent_changes:
-                    type: array
-                    items: { type: object, additionalProperties: true }
+              schema: { $ref: "#/components/schemas/Flow" }
               example:
                 airport_icao: KBJC
                 active: null
@@ -617,7 +663,7 @@ paths:
           description: Ledger payload, passed through from the sidecar.
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema: { $ref: "#/components/schemas/LedgerEnvelope" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -692,7 +738,7 @@ components:
 
     Meta:
       type: object
-      required: [version, name, scopes, airports, limits]
+      required: [version, name, scopes, airports, limits, constants]
       properties:
         version: { type: string, example: v1 }
         name:
@@ -711,28 +757,75 @@ components:
             requests_per_minute: { type: integer }
             max_page_size: { type: integer }
             max_track_span_seconds: { type: integer }
+        constants:
+          type: object
+          description: |
+            Values a consumer needs in order to interpret other responses.
+            Published once here rather than repeated on every row.
+          required: [pattern_corridor_nm, vnap_score_scale, axis_score_scale]
+          properties:
+            pattern_corridor_nm:
+              type: number
+              description: |
+                Perpendicular distance from the published pattern beyond which an
+                aircraft counts as "off pattern". `fraction_off_pattern` on
+                /v1/operations is measured against this.
+              example: 0.25
+            vnap_score_scale:
+              type: string
+              description: Range of every `vnap_score`.
+              example: "0..100"
+            axis_score_scale:
+              type: string
+              description: Range of every per-axis `score`.
+              example: "0..100"
 
     Operation:
       type: object
       description: One detected operation. Field set is frozen; new database columns do not appear here.
-      required: [id, airport_icao, type, timestamp]
+      required: [id, airport_icao, type, timestamp_ts, faa_operation_count]
       properties:
-        id: { type: string, description: Stable identifier, also half of the cursor. }
+        id: { type: string, description: "Stable identifier, also half of the cursor." }
         airport_icao: { type: string }
-        icao24: { type: [string, "null"], description: 24-bit ICAO address, lowercase hex. }
+        icao24: { type: [string, "null"], description: "24-bit ICAO address, lowercase hex." }
         callsign: { type: [string, "null"] }
-        registration: { type: [string, "null"], description: Tail number, when resolvable. }
+        registration: { type: [string, "null"], description: "Tail number, when resolvable." }
         type:
           type: string
-          enum: [touch_and_go, circle, low_approach, landing, pass_over_user]
-        timestamp: { type: integer, description: Unix seconds. }
+          enum: [touch_and_go, circle, low_approach, landing, takeoff, pass_over_user]
+        faa_operation_count:
+          type: integer
+          enum: [0, 1, 2]
+          description: |
+            FAA operations this event represents: a takeoff or a landing is 1, a
+            touch-and-go is 2, a low approach is 2 when it was a real touchdown
+            (min_altitude_ft_agl <= 25) else 0, and circles / passes are 0.
+            Derived from `type` and `min_altitude_ft_agl`; not a stored column.
+        timestamp_ts: { type: integer, description: Unix seconds. }
         runway_id: { type: [string, "null"] }
         turn_direction: { type: [string, "null"], enum: [left, right, null] }
         min_altitude_ft_agl: { type: [integer, "null"] }
         emitter_category: { type: [string, "null"] }
         deviation_mean_nm: { type: [number, "null"], description: Mean lateral deviation from the published pattern. }
         deviation_peak_nm: { type: [number, "null"] }
-        pct_off_pattern: { type: [number, "null"] }
+        fraction_off_pattern:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: |
+            Time-weighted fraction of the lap spent farther than
+            `constants.pattern_corridor_nm` from the selected published pattern.
+            A fraction in 0..1 — 0.42 means 42%. Null when no pattern was matched.
+          example: 0.42
+        time_off_pattern_s:
+          type: integer
+          nullable: true
+          description: Seconds spent outside the corridor. Numerator of `fraction_off_pattern`.
+        time_total_s:
+          type: integer
+          nullable: true
+          description: Seconds of lap track measured. Denominator of `fraction_off_pattern`.
         wind_from_deg: { type: [integer, "null"] }
         wind_speed_kt: { type: [number, "null"] }
         origin_airport_icao: { type: [string, "null"] }
@@ -740,16 +833,48 @@ components:
         operator: { type: [string, "null"] }
         flight_school: { type: [string, "null"] }
 
+    OperationsSummary:
+      type: object
+      description: FAA operation totals for a window. Derived, not stored.
+      required:
+        [airport_icao, since_ts, until_ts, faa_operations, arrivals, departures,
+         by_event_type, low_approach_touchdowns, low_approach_touchdown_max_agl_ft]
+      properties:
+        airport_icao: { type: string }
+        since_ts: { type: integer, description: "Unix seconds, inclusive." }
+        until_ts: { type: integer, description: "Unix seconds, inclusive." }
+        faa_operations:
+          type: integer
+          description: Total FAA operations (takeoffs + landings; a touch-and-go is 2).
+        arrivals: { type: integer, description: Landings + touch-and-gos + low-approach touchdowns. }
+        departures: { type: integer, description: Takeoffs + touch-and-gos + low-approach touchdowns. }
+        by_event_type:
+          type: object
+          additionalProperties: { type: integer }
+          description: Raw event count per detector type in the window (for transparency).
+        low_approach_touchdowns:
+          type: integer
+          description: Low approaches counted as touchdowns (each worth 2 operations).
+        low_approach_touchdown_max_agl_ft:
+          type: integer
+          description: The AGL threshold at or below which a low approach is a touchdown.
+
     TrackSample:
       type: object
       description: One raw position sample. Field set is frozen.
-      required: [icao24, timestamp]
+      required: [icao24, timestamp_ts]
       properties:
         icao24: { type: string }
-        timestamp: { type: integer, description: Unix seconds. }
+        timestamp_ts: { type: integer, description: Unix seconds. }
         lat: { type: [number, "null"] }
         lon: { type: [number, "null"] }
         altitude_ft: { type: [number, "null"] }
+        altitude_datum:
+          type: string
+          enum: [barometric, geometric, unknown]
+          description: |
+            The datum `altitude_ft` is measured against. Varies by `source`;
+            `unknown` when no altitude is present or the source does not say.
         baro_altitude_ft: { type: [number, "null"] }
         geo_altitude_ft: { type: [number, "null"] }
         heading_deg: { type: [number, "null"] }
@@ -769,6 +894,7 @@ components:
 
     AirportStats:
       type: object
+      description: Field set is frozen; new database columns do not appear here.
       required: [airport_icao, window]
       properties:
         airport_icao: { type: string }
@@ -792,30 +918,261 @@ components:
               count: { type: integer }
         runway_usage:
           type: array
-          items: { type: object, additionalProperties: true }
-      additionalProperties: true
+          items:
+            type: object
+            properties:
+              runway_id: { type: string }
+              total: { type: integer }
+              upwind: { type: integer }
+              crosswind: { type: integer }
+              downwind: { type: integer }
+              no_wind_data: { type: integer }
+        stop_classification:
+          type: object
+          description: |
+            Per-aircraft (not per-operation) stop rate: of the distinct tails
+            seen, how many landed at least once. `all` counts every tail in
+            the window; `pattern` counts only tails that worked the pattern
+            (circle/touch-and-go/low-approach/landing), excluding pure
+            overflights.
+          properties:
+            all: { $ref: "#/components/schemas/StopBreakdown" }
+            pattern: { $ref: "#/components/schemas/StopBreakdown" }
+
+    StopBreakdown:
+      type: object
+      required: [total, stopped, did_not_stop]
+      properties:
+        total: { type: integer }
+        stopped: { type: integer }
+        did_not_stop: { type: integer }
+        fraction_stopped:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: |
+            Fraction of `total` that stopped (landed at least once). Was
+            `stopped_pct`, a real percent (28.9) that shared a "pct" prefix
+            with /operations' fraction_off_pattern despite holding a
+            different scale. Null when `total` is 0 (no aircraft in the
+            window) rather than a divide-by-zero artifact.
+          example: 0.289
 
     WorstOffenders:
       type: object
-      required: [airport_icao, source_icao, resolved_icao, is_fallback, offenders]
+      required: [requested_airport_icao, resolved_airport_icao, resolved_airport_label, is_fallback, offenders]
       properties:
-        airport_icao: { type: string, description: The airport you requested. }
-        source_icao: { type: string, description: Same as airport_icao. }
-        resolved_icao:
+        requested_airport_icao: { type: string, description: The airport you requested. }
+        resolved_airport_icao:
           type: string
-          description: The airport the offenders actually come from. Differs when is_fallback is true.
-        resolved_label: { type: string }
+          description: |
+            The airport the offenders actually come from. Differs from
+            requested_airport_icao when is_fallback is true.
+        resolved_airport_label: { type: string, description: Human-readable label (city or name) for resolved_airport_icao. }
         is_fallback:
           type: boolean
           description: True when the requested airport had no scored aircraft and a neighbour was substituted.
         offenders:
           type: array
-          items: { type: object, additionalProperties: true }
+          items: { $ref: "#/components/schemas/Offender" }
+
+    Offender:
+      type: object
+      description: |
+        One ranked aircraft. Ranking is by `vnap_score` × `total_circles`;
+        that product itself is not published here — it is the internal sort
+        key, not a property of the aircraft.
+      required: [icao24, registration, owner_class, total_circles, report_count, vnap_score]
+      properties:
+        icao24: { type: string, description: "24-bit ICAO address, lowercase hex." }
+        registration:
+          type: string
+          description: |
+            Display identifier: an N-number when one is resolvable from the
+            aircraft's callsign or registry entry, else the uppercase ICAO
+            hex. Was `tail`; /v1/operations already calls this same concept
+            `registration`.
+        aircraft_type: { type: [string, "null"], description: "Airframe model from the registry, when known." }
+        owner_class: { type: string, description: "e.g. flight_school, private, commercial, unknown." }
+        total_circles: { type: integer }
+        report_count: { type: integer, description: "Lifetime public report count for this aircraft. Same value as `reports` on /v1/airports/{icao}/vnap-compliance." }
+        vnap_score:
+          type: number
+          description: 0..100. See /v1/meta's constants.vnap_score_scale.
+        worst_axis: { type: [string, "null"], description: Name of the VNAP axis with the aircraft's highest violation score. }
+        worst_axis_score: { type: [number, "null"], description: 0..100. Null exactly when worst_axis is null. }
+        last_reported_at_ts:
+          type: [integer, "null"]
+          description: Unix seconds of the most recent public report against this aircraft, or null if it has never been reported.
+
+    AxisScore:
+      type: object
+      description: |
+        One VNAP axis. The set of codes varies by airport — KLMO's
+        preferred-runway axis is coded `runway_29`, KBJC's would be
+        `runway_11` — but this object's own shape never does: every axis in
+        every /v1 response is {code, label, score, scale}.
+      required: [code, label, scale]
+      properties:
+        code: { type: string, description: "Stable per-axis identifier." }
+        label: { type: string, description: "Human-readable name for the axis." }
+        score:
+          type: [number, "null"]
+          description: |
+            0..100. See /v1/meta's constants.axis_score_scale. Null when the
+            axis's inputs are absent for this row (e.g. no wind data for a
+            runway-preference axis, or too few laps to score tightness).
+        scale: { type: string, example: "0..100" }
+
+    VnapAircraft:
+      type: object
+      required:
+        - icao24
+        - callsign
+        - owner_class
+        - operations
+        - circles
+        - touch_and_gos
+        - reports
+        - runway_changes_initiated
+        - vnap_score
+        - axes
+      properties:
+        icao24: { type: string, description: "24-bit ICAO address, lowercase hex." }
+        registration: { type: [string, "null"], description: "Tail number, when resolvable." }
+        callsign: { type: string }
+        aircraft_type: { type: [string, "null"], description: "Airframe model from the registry, when known." }
+        owner_class: { type: string, description: "e.g. flight_school, private, commercial, unknown." }
+        operations: { type: integer }
+        circles: { type: integer }
+        touch_and_gos: { type: integer }
+        reports: { type: integer, description: "Lifetime public report count for this aircraft. Same value as `report_count` on /v1/airports/{icao}/worst-offenders." }
+        runway_changes_initiated:
+          type: integer
+          description: |
+            Count of runway changes in the window that this aircraft
+            triggered, wind-favored or not. Was `cowboy_count` — not a count
+            of violations, and distinct from the `operations` table.
+        deviation_mean_nm:
+          type: [number, "null"]
+          description: |
+            Mean lateral deviation from the published pattern, averaged over
+            this aircraft's scored circles. Null when it flew none.
+        vnap_score:
+          type: number
+          description: 0..100. See /v1/meta's constants.vnap_score_scale.
+        axes:
+          type: array
+          description: This aircraft's own score per axis.
+          items: { $ref: "#/components/schemas/AxisScore" }
+
+    VnapCompliance:
+      type: object
+      description: |
+        Per-aircraft VNAP compliance for the window. `axes` (airport-wide
+        averages) and each aircraft's own `axes` are the SAME shape at every
+        airport — a list of {code, label, score, scale} — even though the
+        codes, and how many of them there are, vary by airport. Was an
+        inline object whose properties literally changed name per airport
+        (`averages.runway29` at KLMO, `averages.runway11` at KBJC); no
+        schema could describe that honestly.
+      required: [airport_icao, window, axes, aircraft]
+      properties:
+        airport_icao: { type: string }
+        window: { $ref: "#/components/schemas/Window" }
+        composite_score:
+          type: [number, "null"]
+          description: |
+            0..100, the mean of every scored aircraft's vnap_score. Null
+            when no aircraft were scored in the window.
+        axes:
+          type: array
+          description: Airport-wide average score per axis.
+          items: { $ref: "#/components/schemas/AxisScore" }
+        aircraft:
+          type: array
+          items: { $ref: "#/components/schemas/VnapAircraft" }
+
+    OperationsTrends:
+      type: object
+      description: Field set is frozen; new database columns do not appear here.
+      required: [airport_icao, timezone, data_since_ts, recent_days, monthly, time_of_day]
+      properties:
+        airport_icao: { type: string }
+        timezone: { type: string, description: "IANA tz name used to bucket local days, months, and hours." }
+        data_since_ts:
+          type: [integer, "null"]
+          description: Unix seconds of this airport's earliest classified operation, or null if it has none yet.
+        recent_days:
+          type: array
+          description: Last 10 local days with at least one classified operation, oldest first.
+          items:
+            type: object
+            required: [date, operations, fraction_light_aircraft, fraction_touch_and_go]
+            properties:
+              date: { type: string, description: "Local calendar date, YYYY-MM-DD." }
+              operations: { type: integer }
+              fraction_light_aircraft:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Fraction of the day's operations flown by an ICAO emitter
+                  category A1 (light) aircraft. 0.0, not null, on a day with
+                  zero operations.
+              fraction_touch_and_go:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Fraction of the day's operations that were touch-and-gos.
+                  0.0, not null, on a day with zero operations.
+        monthly:
+          type: array
+          description: One entry per local calendar month with at least one classified operation, oldest first.
+          items:
+            type: object
+            required: [month, total, landings, takeoffs, touch_and_gos, fraction_touch_and_go, by_type, by_emitter]
+            properties:
+              month: { type: string, description: "Local calendar month, YYYY-MM." }
+              total: { type: integer }
+              landings: { type: integer }
+              takeoffs: { type: integer }
+              touch_and_gos: { type: integer, description: Was `tg`. }
+              fraction_touch_and_go:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Fraction of the month's total that were touch-and-gos.
+                  0.0, not null, in a month with zero operations.
+              by_type:
+                type: object
+                additionalProperties: { type: integer }
+                description: Operation count per airframe model; models outside the top 8 for the window collapse into "Other".
+              by_emitter:
+                type: object
+                additionalProperties: { type: integer }
+                description: Operation count per ICAO emitter-category bucket (A1, A2, A6, B1, B4); anything else collapses into "Other".
+        time_of_day:
+          type: array
+          description: All 24 local hours, always fully populated (zero-filled), covering the whole window.
+          items:
+            type: object
+            required: [hour, operations]
+            properties:
+              hour: { type: integer, minimum: 0, maximum: 23, description: Local hour of day. }
+              operations: { type: integer }
 
     Runway:
       type: object
+      description: |
+        No `icao` here: it duplicates the envelope's `airport_icao` and is
+        internal-only. All four geometry fields are non-null — the underlying
+        `runways` table declares them NOT NULL and every row is fully seeded.
+      required: [runway_id, lat_threshold, lon_threshold, heading_deg, length_ft]
       properties:
-        icao: { type: string }
         runway_id: { type: string }
         lat_threshold: { type: number }
         lon_threshold: { type: number }
@@ -844,6 +1201,73 @@ components:
                   lon: { type: number }
             closed: { type: boolean }
         created_at: { type: integer }
+
+    Flow:
+      type: object
+      description: |
+        The runway currently established as active for this airport, and its
+        last twenty runway changes (newest first). `active` is null when no
+        flow has been established yet — too little recent touch-and-go/low-
+        approach traffic to establish one.
+      required: [airport_icao, active, recent_changes]
+      properties:
+        airport_icao: { type: string }
+        active:
+          oneOf:
+            - $ref: "#/components/schemas/ActiveFlow"
+            - type: "null"
+        recent_changes:
+          type: array
+          items: { $ref: "#/components/schemas/RunwayChange" }
+
+    ActiveFlow:
+      type: object
+      description: |
+        `active_runway_id` and `established_at_ts` are always present together
+        — the row is only ever written once a runway is actually established.
+        `ended_at_ts` is always null in practice (this route only ever returns
+        the currently-open row), but stays nullable because the underlying
+        record is. `op_count` is reserved and always 0 today; it is not
+        derived from the operations table.
+      required: [active_runway_id, established_at_ts, op_count]
+      properties:
+        active_runway_id: { type: string }
+        established_at_ts: { type: integer, description: "Unix seconds." }
+        ended_at_ts: { type: [integer, "null"], description: "Unix seconds." }
+        wind_from_deg: { type: [integer, "null"] }
+        wind_speed_kt: { type: [number, "null"] }
+        op_count: { type: integer }
+
+    RunwayChange:
+      type: object
+      description: |
+        One historical runway change, newest first. `triggering_callsign`,
+        `triggering_icao24`, and `triggering_registration` (formerly
+        `cowboy_*`) identify the aircraft whose trailing run of touch-and-gos
+        or low approaches triggered the change — null together when no such
+        aircraft was recorded for that transition.
+      required: [changed_at_ts, to_runway_id]
+      properties:
+        changed_at_ts: { type: integer, description: "Unix seconds." }
+        from_runway_id: { type: [string, "null"] }
+        to_runway_id: { type: string }
+        wind_favored_new:
+          type: [boolean, "null"]
+          description: "Whether the new runway was the headwind-favored choice."
+        wind_from_deg: { type: [integer, "null"] }
+        wind_speed_kt: { type: [number, "null"] }
+        triggering_callsign: { type: [string, "null"] }
+        triggering_icao24: { type: [string, "null"], description: "24-bit ICAO address, lowercase hex." }
+        triggering_registration: { type: [string, "null"] }
+
+    LedgerEnvelope:
+      type: object
+      description: >-
+        Pass-through: the exact JSON body returned by the ledger-api sidecar,
+        forwarded as-is. This API does not define or validate its shape here —
+        only that it is a JSON object. See the `resource` parameter above for
+        what `ledger` and `aircraft-fees` contain.
+      additionalProperties: true
 
   responses:
     Unauthorized:

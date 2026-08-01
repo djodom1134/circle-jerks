@@ -41,6 +41,17 @@ def test_aggregates_honour_the_airport_restriction(tmp_path, monkeypatch, path):
         assert resp.json()["error"]["code"] == "forbidden_airport"
 
 
+# worst-offenders' /v1 envelope has no single `airport_icao` — it publishes
+# `requested_airport_icao` (what you asked for) and `resolved_airport_icao`
+# (what the offenders actually came from, which can differ on a fallback),
+# so the field that always equals the path's airport for THIS test is
+# `requested_airport_icao`. Every other aggregate endpoint still calls it
+# `airport_icao`.
+_AIRPORT_ICAO_FIELD = {
+    "/v1/airports/KBJC/worst-offenders": "requested_airport_icao",
+}
+
+
 @pytest.mark.parametrize("path", PATHS)
 def test_aggregates_answer_for_a_seeded_airport(tmp_path, monkeypatch, path):
     db_path = configure(tmp_path, monkeypatch)
@@ -48,7 +59,8 @@ def test_aggregates_answer_for_a_seeded_airport(tmp_path, monkeypatch, path):
     with TestClient(app) as client:
         resp = client.get(path, headers=auth(key))
         assert resp.status_code == 200
-        assert resp.json()["airport_icao"] == "KBJC"
+        field = _AIRPORT_ICAO_FIELD.get(path, "airport_icao")
+        assert resp.json()[field] == "KBJC"
 
 
 @pytest.mark.parametrize(
@@ -241,12 +253,12 @@ def test_worst_offenders_reflects_only_the_requested_airports_aircraft(tmp_path,
         kbjc = client.get("/v1/airports/KBJC/worst-offenders", headers=auth(key)).json()
         klmo = client.get("/v1/airports/KLMO/worst-offenders", headers=auth(key)).json()
 
-    assert kbjc["resolved_icao"] == "KBJC"
+    assert kbjc["resolved_airport_icao"] == "KBJC"
     assert kbjc["is_fallback"] is False
     assert [o["icao24"] for o in kbjc["offenders"]] == ["aaaaaa"]
     assert kbjc["offenders"][0]["total_circles"] == 3
 
-    assert klmo["resolved_icao"] == "KLMO"
+    assert klmo["resolved_airport_icao"] == "KLMO"
     assert klmo["is_fallback"] is False
     assert [o["icao24"] for o in klmo["offenders"]] == ["bbbbbb"]
     assert klmo["offenders"][0]["total_circles"] == 5
@@ -292,8 +304,8 @@ def test_restricted_key_never_receives_another_airports_fallback_offenders(
     body = resp.json()
     assert body["offenders"] == []
     assert body["is_fallback"] is False
-    assert body["resolved_icao"] == "KLMO"
-    assert body["airport_icao"] == "KLMO"
+    assert body["resolved_airport_icao"] == "KLMO"
+    assert body["requested_airport_icao"] == "KLMO"
     # The leak itself: not one byte of the neighbour's data, by any field.
     assert FALLBACK_ICAO not in json.dumps(body)
     assert "cccccc" not in json.dumps(body)
@@ -315,7 +327,7 @@ def test_unrestricted_key_still_gets_the_neighbour_fallback(tmp_path, monkeypatc
     assert resp.status_code == 200
     body = resp.json()
     assert body["is_fallback"] is True
-    assert body["resolved_icao"] == FALLBACK_ICAO
+    assert body["resolved_airport_icao"] == FALLBACK_ICAO
     assert [o["icao24"] for o in body["offenders"]] == ["cccccc"]
 
 
@@ -331,7 +343,7 @@ def test_a_key_scoped_to_both_airports_keeps_the_fallback(tmp_path, monkeypatch)
         body = client.get("/v1/airports/KLMO/worst-offenders", headers=auth(key)).json()
 
     assert body["is_fallback"] is True
-    assert body["resolved_icao"] == FALLBACK_ICAO
+    assert body["resolved_airport_icao"] == FALLBACK_ICAO
     assert [o["icao24"] for o in body["offenders"]] == ["cccccc"]
 
 
@@ -402,3 +414,41 @@ def test_flow_reflects_the_requested_airports_flow_and_changes(tmp_path, monkeyp
     assert klmo["active"]["active_runway_id"] == "11"
     assert [c["to_runway_id"] for c in kbjc["recent_changes"]] == ["12L"]
     assert [c["to_runway_id"] for c in klmo["recent_changes"]] == ["11"]
+
+
+def test_vnap_compliance_axes_are_airport_independent_on_the_wire(tmp_path, monkeypatch):
+    """End-to-end version of the v1_schemas unit tests: a real KLMO aircraft
+    scored through the actual route must publish `runway29` as `runway_29`
+    (KLMO's preferred-runway axis code, per vnap.py's AXES), never leak
+    `metrics`/`tail`/`owner_source`, and rename `cowboy_count` to
+    `runway_changes_initiated` -- proving the wiring, not just the builder."""
+    db_path = configure(tmp_path, monkeypatch)
+    now = int(time.time())
+    _seed_scored_aircraft(db_path, "KLMO", "aaaaaa", now)
+    key = mint(db_path, scopes=["aggregates:read"])
+
+    with TestClient(app) as client:
+        resp = client.get("/v1/airports/KLMO/vnap-compliance", headers=auth(key))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["airport_icao"] == "KLMO"
+
+    top_codes = [a["code"] for a in body["axes"]]
+    assert "runway_29" in top_codes
+    assert "runway29" not in top_codes
+
+    assert len(body["aircraft"]) == 1
+    ac = body["aircraft"][0]
+    assert ac["icao24"] == "aaaaaa"
+    ac_codes = [a["code"] for a in ac["axes"]]
+    assert "runway_29" in ac_codes
+    assert "runway29" not in ac_codes
+    assert "runway_changes_initiated" in ac
+    # The three fields dropped at the model layer, by key -- not a substring
+    # scan of the whole body, which could false-positive on an unrelated
+    # field name.
+    assert "metrics" not in ac
+    assert "tail" not in ac
+    assert "owner_source" not in ac
+    assert "cowboy_count" not in ac

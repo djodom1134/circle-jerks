@@ -18,7 +18,10 @@ def configure(tmp_path, monkeypatch, superusers=None):
     if superusers:
         monkeypatch.setenv("ADMIN_SUPERUSERS", superusers)
     else:
-        monkeypatch.delenv("ADMIN_SUPERUSERS", raising=False)
+        # Use empty string instead of delenv: pydantic-settings reads from the
+        # .env file on disk even when a variable is deleted from os.environ.
+        # Explicitly setting to empty string takes precedence over .env.
+        monkeypatch.setenv("ADMIN_SUPERUSERS", "")
     get_settings.cache_clear()
 
 

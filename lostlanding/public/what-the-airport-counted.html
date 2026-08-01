@@ -1,0 +1,1196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>What the Airport Counted &mdash; The Lost Landing (KLMO)</title>
+<meta name="description" content="Longmont finally counted its own runway. The 2026 Noise Program Assessment replaces the FAA's estimate with 137,452 real ADS-B operations — and every number in it is a funding number. The count, the growth, and the $0 the runway collects.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@500;600;700&display=swap" rel="stylesheet">
+<style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;padding:0}img{max-width:100%}</style>
+</head>
+<body>
+<style>
+:root {
+  --ink: #071c26;
+  --navy: #061c25;
+  --teal: #0b3b47;
+  --teal2: #145e68;
+  --gold: #d9a441;
+  --gold2: #f4d37b;
+  --cream: #f5edda;
+  --paper: #ece0c5;
+  --rust: #a74d2a;
+  --white: #fffdf5;
+  --ok-green: #4c7a5a;
+  --line: #d9a44155;
+  --line-strong: #d9a441aa;
+  --serif: "Cormorant Garamond", Georgia, "Times New Roman", serif;
+  --sans: "Barlow Condensed", "Roboto Condensed", "Arial Narrow", system-ui, sans-serif;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+.ledger-doc {
+  font-family: var(--sans);
+  color: var(--ink);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  position: relative;
+}
+
+.page-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background: var(--cream);
+  pointer-events: none;
+}
+.sunburst {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.07;
+  pointer-events: none;
+  background: repeating-conic-gradient(from 0deg at 50% 10%, var(--gold) 0deg 3deg, transparent 3deg 10deg);
+}
+
+.ledger-doc a { color: inherit; }
+.ledger-doc a:focus-visible,
+.ledger-doc button:focus-visible {
+  outline: 3px solid var(--gold2);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+/* ---------- topbar ---------- */
+.topbar {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  padding: 14px 6vw;
+  background: #061c25f2;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(10px);
+}
+.brand {
+  color: var(--gold2);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-decoration: none;
+  font-size: 1.05rem;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+.wing { font-size: 0.7em; margin: 0 0.5em; color: var(--gold); }
+.topbar nav { display: flex; gap: 22px; flex-wrap: wrap; }
+.topbar nav a {
+  color: #fff9e8;
+  text-decoration: none;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.86rem;
+}
+.topbar nav a:hover, .topbar nav a:focus-visible { color: var(--gold2); }
+.topbar nav a.topbar-back {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 5px 14px;
+  color: var(--gold2);
+  font-weight: 700;
+}
+.topbar nav a.topbar-back:hover, .topbar nav a.topbar-back:focus-visible {
+  background: var(--gold2);
+  color: var(--ink);
+}
+
+/* ---------- type + section scaffolding ---------- */
+.eyebrow, .kicker {
+  color: var(--gold);
+  letter-spacing: 0.22em;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin: 0 0 0.6em;
+  font-size: 0.92rem;
+}
+.dark-panel .kicker, .dark-panel .eyebrow { color: var(--gold2); }
+
+.section-pad { padding: 70px max(7vw, calc((100% - 1300px) / 2)); position: relative; }
+.section-pad.tight { padding-top: 36px; }
+
+.note-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 24px 40px; margin-top: 30px; }
+.note-pair .note { margin-top: 0; max-width: none; }
+
+.section-heading { max-width: 46rem; margin-bottom: 30px; }
+.section-heading h2 {
+  font-family: var(--serif);
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  line-height: 0.98;
+  margin: 0.15em 0 0.35em;
+  text-wrap: balance;
+}
+.section-heading .dek {
+  font-size: 1.18rem;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 46rem;
+}
+
+.prose { max-width: 44rem; }
+.prose p { margin: 0 0 1.1em; font-size: 1.14rem; }
+.prose p:last-child { margin-bottom: 0; }
+.prose strong { font-weight: 700; }
+.prose em { font-style: italic; }
+
+.dark-panel {
+  background: var(--ink);
+  color: var(--white);
+  position: relative;
+}
+.dark-panel .prose p { color: #efe6cf; }
+.dark-panel::before {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  border: 1px solid var(--line);
+  pointer-events: none;
+}
+.dark-panel > * { position: relative; }
+
+.gold-rule {
+  border: none;
+  border-top: 1px solid var(--line-strong);
+  max-width: 1200px;
+  margin: 0 7vw;
+}
+
+/* ---------- hero ---------- */
+.hero {
+  position: relative;
+  background: var(--navy);
+  color: var(--white);
+  overflow: hidden;
+}
+.hero-bg {
+  position: absolute;
+  inset: 0;
+  background: url(/how-it-works-hero.jpg) 68% 44% / cover no-repeat;
+  filter: saturate(1.03) contrast(1.05);
+}
+.hero-overlay {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, #061c25f4 0%, #061c25d6 32%, #061c256e 58%, #061c251a 80%, transparent),
+    linear-gradient(0deg, #061c25e6, transparent 46%);
+}
+.hero-inner {
+  position: relative;
+  width: min(1300px, 100% - 14vw);
+  margin-inline: auto;
+  padding: 76px 0 44px;
+}
+.hero-copy { max-width: 42rem; }
+.hero .eyebrow { color: var(--gold2); }
+.hero h1 {
+  font-family: var(--serif);
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: clamp(2.6rem, 6vw, 5rem);
+  line-height: 0.92;
+  margin: 0.1em 0 0.28em;
+  text-shadow: 0 4px 20px #0008;
+  text-wrap: balance;
+}
+.hero h1 .sub {
+  display: block;
+  color: var(--gold2);
+  font-size: 0.4em;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  margin-top: 0.5em;
+  text-transform: uppercase;
+  text-shadow: none;
+}
+.hero-lede {
+  font-size: 1.28rem;
+  line-height: 1.5;
+  max-width: 40rem;
+  color: #efe6cf;
+  margin: 0 0 1.1em;
+}
+.hero-lede strong { color: var(--gold2); font-weight: 700; }
+
+.floor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  border: 1px solid var(--gold2);
+  color: var(--gold2);
+  padding: 8px 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.floor-chip::before { content: "\25B2"; font-size: 0.8em; }
+
+.hero-meter-wrap {
+  position: relative;
+  background: #061c25ea;
+  border-top: 1px solid var(--line-strong);
+}
+.hero-meter {
+  width: min(1300px, 100% - 14vw);
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+.hero-meter > div { padding: 22px 30px; border-right: 1px solid var(--line); }
+.hero-meter > div:first-child { padding-left: 0; }
+.hero-meter > div:last-child { padding-right: 0; border-right: none; }
+.hero-meter .label {
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--gold2);
+  font-size: 0.82rem;
+  margin-bottom: 4px;
+}
+.hero-meter strong {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 1.5rem;
+  display: block;
+  line-height: 1.1;
+}
+.hero-meter .val-sans { font-family: var(--sans); font-size: 1.7rem; letter-spacing: 0.01em; font-variant-numeric: tabular-nums; }
+.hero-meter .sub { display: block; font-size: 0.8rem; color: #cfead2; opacity: 0.85; margin-top: 4px; }
+
+/* ---------- callouts / notes ---------- */
+.note {
+  border-left: 4px solid var(--gold);
+  padding: 4px 0 4px 20px;
+  font-size: 1.06rem;
+  line-height: 1.55;
+  max-width: 44rem;
+  margin: 24px 0 0;
+}
+.note strong { color: var(--rust); }
+.dark-panel .note strong { color: var(--gold2); }
+.dark-panel .note { color: #efe6cf; }
+
+.floor-callout {
+  margin-top: 34px;
+  background: #0b2530;
+  color: var(--white);
+  border: 1px solid var(--gold);
+  padding: 24px 28px;
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  max-width: 940px;
+}
+.floor-callout .glyph { font-size: 2rem; color: var(--gold2); line-height: 1; }
+.floor-callout p { margin: 0; font-size: 1.14rem; line-height: 1.5; font-weight: 500; }
+.floor-callout strong { color: var(--gold2); }
+
+.money-card {
+  padding: 26px 28px;
+  background: linear-gradient(145deg, var(--teal), var(--navy));
+  color: var(--white);
+  box-shadow: 8px 8px 0 var(--gold);
+  border: 1px solid var(--line-strong);
+}
+.money-card .m-label {
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.86rem;
+  color: var(--gold2);
+}
+.money-card .m-figure {
+  display: block;
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(2.8rem, 7vw, 4.4rem);
+  color: var(--gold2);
+  line-height: 1;
+  margin: 8px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+.money-card .m-sub { font-size: 0.95rem; color: #cfead2; }
+.money-card .m-alt {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+}
+.money-card .m-alt div span { display: block; }
+.money-card .m-alt .a-fee { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gold2); }
+.money-card .m-alt .a-val { font-weight: 700; font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+
+.grant {
+  background: var(--ink);
+  color: var(--white);
+  border: 1px solid var(--line-strong);
+  padding: 30px 34px;
+  max-width: none;
+}
+.grant .g-figure {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(2.2rem, 5vw, 3.4rem);
+  color: var(--gold2);
+  margin: 0 0 0.1em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.grant .g-detail { margin: 0; font-size: 1.14rem; line-height: 1.5; color: #efe6cf; font-style: italic; font-family: var(--serif); }
+.grant .g-kicker {
+  margin: 16px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 1.12rem;
+  color: #efe6cf;
+  line-height: 1.45;
+}
+.grant .g-kicker strong { color: var(--gold2); }
+
+/* ---------- footer ---------- */
+.site-footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  padding: 28px 7vw;
+  background: #031117;
+  color: var(--gold);
+  letter-spacing: 0.06em;
+  font-size: 0.9rem;
+}
+.site-footer .disclaimer { max-width: 70ch; color: #b9a978; letter-spacing: 0.02em; line-height: 1.5; }
+
+/* ---------- shared components carried from the ledger design ---------- */
+.claim-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:28px 0 8px}
+.claim-stats .cell{background:#fffaf0;color:var(--ink);border:1px solid #c39237;box-shadow:6px 6px 0 var(--teal);padding:20px 18px}
+.claim-stats .cell.lead{background:var(--ink);color:#fff;box-shadow:6px 6px 0 var(--gold)}
+.claim-stats .big{font-family:var(--serif);font-weight:700;font-size:clamp(1.9rem,3.6vw,2.9rem);line-height:1;display:block}
+.claim-stats .cell.lead .big{color:var(--gold2)}
+.claim-stats .cap{display:block;margin-top:8px;font-size:.86rem;line-height:1.35;color:#5b4a2a}
+.claim-stats .cell.lead .cap{color:#e9e0ca}
+@media(max-width:820px){.claim-stats{grid-template-columns:repeat(2,1fr)}}
+
+.vintage{width:100%;border-collapse:collapse;margin-top:18px;font-size:.98rem}
+.vintage th,.vintage td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.vintage th{text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;color:var(--teal2)}
+.vintage tr td:first-child{font-weight:700}
+.vintage caption{caption-side:bottom;text-align:left;padding-top:10px;font-size:.82rem;color:#7a6a48}
+.vintage td.num{font-variant-numeric:tabular-nums;font-weight:700}
+.vintage td.neg{color:var(--rust)}
+.vintage td.pos{color:var(--teal2)}
+
+.calc{background:rgba(0,0,0,.22);border:1px solid var(--line);margin:22px 0 6px}
+.calc .crow{display:grid;grid-template-columns:1fr auto;gap:16px;padding:13px 18px;border-bottom:1px solid rgba(217,164,65,.18)}
+.calc .crow:last-child{border-bottom:0}
+.calc .crow.tot{background:rgba(217,164,65,.12)}
+.calc .k{color:#e9e0ca;font-size:.98rem;line-height:1.4}
+.calc .v{font-family:var(--serif);font-weight:700;font-size:1.5rem;white-space:nowrap;color:#fff;font-variant-numeric:tabular-nums}
+.calc .crow.tot .v{color:var(--gold2)}
+.calc .crow.tot .k{color:#fff;font-weight:600}
+
+.funnel{margin:22px 0;display:flex;flex-direction:column;gap:10px}
+.funnel .row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:14px}
+.funnel .bar{min-height:52px;background:linear-gradient(135deg,var(--teal),var(--navy));display:flex;align-items:center;padding:8px 16px;color:#fff;font-weight:600;border-left:4px solid var(--gold);line-height:1.25}
+.funnel .row.warn .bar{background:linear-gradient(135deg,var(--rust),#7a3419)}
+.funnel .row.good .bar{background:linear-gradient(135deg,var(--gold2),var(--gold));color:var(--ink);border-left-color:var(--ink)}
+.funnel .num{font-family:var(--serif);font-size:1.7rem;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums}
+.funnel .lbl{font-size:.8rem;color:#6a5a38;text-transform:uppercase;letter-spacing:.06em;padding-left:2px;margin-top:-2px}
+
+.reductio{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:24px 0}
+.reductio .card{border:1px solid var(--line-strong);padding:22px;background:#06222b;color:#fff}
+.reductio .q{font-size:.98rem;color:#cfe3d3;line-height:1.45}
+.reductio .a{font-family:var(--serif);font-weight:700;font-size:clamp(2rem,4.6vw,3.1rem);color:var(--gold2);display:block;margin:8px 0;font-variant-numeric:tabular-nums}
+.reductio .foot{font-size:.86rem;color:#b9c9bd;line-height:1.5}
+@media(max-width:720px){.reductio{grid-template-columns:1fr}}
+
+.pull{font-family:var(--serif);font-size:clamp(1.5rem,3.2vw,2.2rem);line-height:1.2;color:var(--ink);border-left:4px solid var(--gold);padding:6px 0 6px 20px;margin:30px 0;max-width:52rem}
+.dark-panel .pull{color:#fff;border-left-color:var(--gold2)}
+.pull strong{color:var(--rust)}
+.dark-panel .pull strong{color:var(--gold2)}
+
+.sources{font-size:.92rem;line-height:1.6}
+.sources li{margin:5px 0}
+
+.roster{display:grid;gap:2px;margin:22px 0;border:1px solid var(--line)}
+.roster .r{display:grid;grid-template-columns:190px 1fr;gap:18px;padding:16px 18px;background:rgba(0,0,0,.2)}
+.roster .r .who{font-weight:700;color:var(--gold2);text-transform:uppercase;letter-spacing:.05em;font-size:.82rem;line-height:1.35}
+.roster .r .what{color:#e9e0ca;font-size:.98rem;line-height:1.55}
+.roster .r .what strong{color:#fff}
+@media(max-width:640px){.roster .r{grid-template-columns:1fr;gap:5px}}
+
+.admit{margin:20px 0;padding:16px 22px;border-left:4px solid var(--rust);background:#fff8ec}
+.admit p{font-family:var(--serif);font-size:clamp(1.25rem,2.5vw,1.65rem);line-height:1.35;color:var(--ink);margin:0}
+.admit cite{display:block;margin-top:10px;font-style:normal;font-size:.82rem;color:#7a6a48;text-transform:uppercase;letter-spacing:.05em}
+
+.cta-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:26px}
+.cta{display:inline-block;background:var(--ink);color:var(--gold2);border:1px solid var(--gold);padding:13px 22px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:.07em;font-size:.9rem}
+.cta:hover,.cta:focus-visible{background:var(--gold2);color:var(--ink)}
+.cta.alt{background:transparent;color:var(--teal2);border-color:var(--line-strong)}
+.cta.alt:hover,.cta.alt:focus-visible{background:var(--teal2);color:#fff}
+.dark-panel .cta{background:var(--gold2);color:var(--ink);border-color:var(--gold2)}
+.dark-panel .cta:hover,.dark-panel .cta:focus-visible{background:transparent;color:var(--gold2)}
+.dark-panel .cta.alt{background:transparent;color:#e9dfc6;border-color:var(--line-strong)}
+.dark-panel .cta.alt:hover,.dark-panel .cta.alt:focus-visible{background:#e9dfc6;color:var(--ink)}
+
+.smallnote{margin:16px 0 0;font-size:.9rem;color:#7a6a48;line-height:1.55;border-left:2px solid var(--line-strong);padding-left:14px;max-width:46rem}
+.dark-panel .smallnote{color:#c9bd99;border-left-color:var(--line)}
+.checklist{list-style:none;padding:0;margin:14px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:8px 26px;max-width:none}
+.checklist li{position:relative;padding-left:22px;font-size:.98rem;color:#e9dfc6;line-height:1.4}
+.checklist li::before{content:"\25B8";position:absolute;left:0;color:var(--gold2)}
+@media(max-width:640px){.checklist{grid-template-columns:1fr}}
+
+.fee-top{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:30px;align-items:center;margin-top:34px}
+
+/* ---------- page-specific additions ---------- */
+
+/* estimate vs. count ladder */
+.ladder{margin:26px 0 4px;border:1px solid #c39237;background:#fffaf0;box-shadow:6px 6px 0 var(--teal)}
+.ladder .hd,.ladder .row{display:grid;grid-template-columns:170px minmax(0,1fr) 132px;gap:14px;align-items:center;padding:13px 20px}
+.ladder .hd{border-bottom:1px solid var(--line-strong);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--teal2);font-weight:700}
+.ladder .hd .amt{text-align:right;font-family:var(--sans);font-size:.72rem;font-weight:700}
+.ladder .row{border-bottom:1px solid var(--line)}
+.ladder .row:last-child{border-bottom:0}
+.ladder .src{font-weight:700;font-size:.95rem;line-height:1.3}
+.ladder .src small{display:block;font-weight:400;font-size:.78rem;color:#7a6a48;letter-spacing:.04em;text-transform:uppercase;margin-top:2px}
+.ladder .track{display:block;height:24px;background:#ece0c5}
+.ladder .bar{display:block;height:24px;background:linear-gradient(90deg,var(--teal2),var(--teal))}
+.ladder .row.est .bar{background:repeating-linear-gradient(45deg,#b8a67e,#b8a67e 6px,#cbbb96 6px,#cbbb96 12px)}
+.ladder .row.count .bar{background:linear-gradient(90deg,var(--gold),#b9832c)}
+.ladder .amt{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;font-family:var(--serif);font-size:1.35rem}
+.ladder .row.count .amt{color:var(--rust)}
+.ladder-cap{font-size:.82rem;color:#7a6a48;line-height:1.5;margin:10px 2px 0;max-width:56rem}
+@media(max-width:620px){
+  .ladder .hd,.ladder .row{grid-template-columns:110px 1fr 92px;gap:9px;padding:11px 12px}
+  .ladder .amt{font-size:1.05rem}
+}
+
+/* growth composition */
+.growth{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin:26px 0 6px}
+.growth .g{border:1px solid var(--line-strong);background:#06222b;padding:24px}
+.growth .g .n{font-family:var(--serif);font-weight:700;font-size:clamp(2.4rem,5.4vw,3.4rem);line-height:1;color:var(--gold2);font-variant-numeric:tabular-nums}
+.growth .g .n.down{color:#e8b9a3}
+.growth .g .t{display:block;margin:8px 0 12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-size:.84rem;color:#fff}
+.growth .g p{margin:0;font-size:.99rem;line-height:1.5;color:#e9dfc6}
+@media(max-width:900px){.growth{grid-template-columns:1fr}}
+
+/* the agenda strip */
+.agenda{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:26px 0 6px}
+.agenda .a{background:#fffaf0;border:1px solid #c39237;box-shadow:6px 6px 0 var(--teal);padding:18px}
+.agenda .a .k{display:block;font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;color:var(--teal2);font-weight:700}
+.agenda .a .v{display:block;font-family:var(--serif);font-weight:700;font-size:clamp(1.4rem,2.6vw,2rem);line-height:1.05;margin-top:6px}
+.agenda .a.na .v{color:var(--rust)}
+@media(max-width:820px){.agenda{grid-template-columns:repeat(2,1fr)}}
+
+/* quote bank */
+.quotes{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:24px 0 6px}
+.quotes blockquote{margin:0;padding:20px 22px;background:rgba(0,0,0,.22);border:1px solid var(--line);color:#fff}
+.quotes blockquote p{margin:0;font-family:var(--serif);font-size:1.18rem;line-height:1.35}
+.quotes blockquote cite{display:block;margin-top:10px;font-style:normal;font-size:.78rem;letter-spacing:.05em;text-transform:uppercase;color:var(--gold2)}
+.quotes blockquote.against{background:rgba(167,77,42,.18);border-color:#a74d2a88}
+.quotes blockquote.against cite{color:#e8b9a3}
+@media(max-width:820px){.quotes{grid-template-columns:1fr}}
+
+/* the ask */
+.ask{margin:24px 0 6px;border:1px solid var(--gold);background:#0b2530;color:#fff;padding:26px 30px}
+.ask .a-lab{display:block;font-size:.76rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold2);font-weight:700;margin-bottom:12px}
+.ask ol{margin:0;padding-left:1.3em}
+.ask li{margin:0 0 12px;font-size:1.08rem;line-height:1.5;color:#efe6cf}
+.ask li:last-child{margin-bottom:0}
+.ask li strong{color:var(--gold2)}
+
+/* light contrast cards */
+.tcards{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:26px 0 6px}
+.tcards .t{padding:22px 24px;border:1px solid #c39237;background:#fffaf0}
+.tcards .t.no{border-color:var(--rust);background:#fdf1e9}
+.tcards .t h3{margin:0 0 10px;font-family:var(--serif);font-size:1.5rem;text-transform:uppercase;font-weight:700;color:var(--teal2);line-height:1}
+.tcards .t.no h3{color:var(--rust)}
+.tcards .t ul{margin:0;padding-left:1.1em}
+.tcards .t li{margin:0 0 7px;font-size:1rem;line-height:1.45}
+@media(max-width:820px){.tcards{grid-template-columns:1fr}}
+
+@media (max-width: 620px) {
+  .section-pad { padding: 52px 7vw; }
+  .topbar nav { gap: 14px; }
+  .hero-meter { grid-template-columns: 1fr; }
+  .hero-meter > div { border-right: none; border-bottom: 1px solid var(--line); padding: 16px 0; }
+  .hero-meter > div:last-child { border-bottom: none; }
+}
+@media (max-width: 820px) {
+  .note-pair { grid-template-columns: 1fr; }
+  .fee-top { grid-template-columns: 1fr; }
+}
+</style>
+
+<div class="ledger-doc">
+  <div class="page-bg"></div>
+  <div class="sunburst"></div>
+
+  <header class="topbar">
+    <a class="brand" href="/">The Lost Landing <span class="wing">&#9992;</span> KLMO</a>
+    <nav aria-label="Sections">
+      <a class="topbar-back" href="/">&larr; The Ledger</a>
+      <a href="#count">The count</a>
+      <a href="#shape">What is flying</a>
+      <a href="#growth">Where the growth is</a>
+      <a href="#stale">The stale baseline</a>
+      <a href="#funding">The funding gap</a>
+      <a href="#fees">The fee section</a>
+      <a href="#platform">One platform, two jobs</a>
+      <a href="#bottom-line">Bottom line</a>
+    </nav>
+  </header>
+
+  <main>
+    <!-- HERO -->
+    <section class="hero" id="top">
+      <div class="hero-bg" role="img" aria-label="Aerial view of Vance Brand Municipal Airport"></div>
+      <div class="hero-overlay"></div>
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <p class="eyebrow">Longmont, Colorado &bull; Council Item 9.B &bull; Tuesday, July&nbsp;28,&nbsp;2026</p>
+          <h1>137,452 Operations. Zero Collected.
+            <span class="sub">The City finally counted its own runway. The count is a funding document &mdash; and it arrives at Council with &ldquo;fiscal impact: N/A.&rdquo;</span>
+          </h1>
+          <p class="hero-lede">
+            Longmont hired <strong>Airport Monitoring Systems</strong> to assess the airport&rsquo;s noise program. What
+            it actually delivered is the first real <em>count</em> of Vance Brand: ADS-B-derived operations data
+            replacing the FAA estimate everyone had been quoting. The counted 2025 total is
+            <strong>137,452 operations</strong> &mdash; up <strong>8.6%</strong> in one year, <strong>91%</strong> of it
+            single-engine training aircraft. The runway that carried all of it collected <strong>$0</strong>. And every
+            recommendation in the report &ldquo;<strong>will require Council direction and additional funding.</strong>&rdquo;
+          </p>
+          <span class="floor-chip">Every figure here is the City&rsquo;s own report &mdash; page-cited</span>
+        </div>
+      </div>
+
+      <div class="hero-meter-wrap">
+        <div class="hero-meter">
+          <div>
+            <span class="label">Counted operations, 2025</span>
+            <strong class="val-sans">137,452</strong>
+            <span class="sub">up from 126,607 in 2024 &mdash; +10,845, about 8.6% (p.&nbsp;7)</span>
+          </div>
+          <div>
+            <span class="label">Charged to the runway for it</span>
+            <strong class="val-sans">$0</strong>
+            <span class="sub">no landing fee, no runway fee, no touch-and-go fee &mdash; on any of it</span>
+          </div>
+          <div>
+            <span class="label">Fiscal impact on Tuesday&rsquo;s agenda</span>
+            <strong class="val-sans">&ldquo;N/A&rdquo;</strong>
+            <span class="sub">a presentation only &mdash; while the recommendations need money the item does not request</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- THE COUNT -->
+    <section class="section-pad" id="count">
+      <div class="section-heading">
+        <p class="kicker">The count</p>
+        <h2>For the first time, these are counts &mdash; not estimates</h2>
+        <p class="dek">
+          This is the part of the report that matters most and will get the least attention on Tuesday. Vance Brand is
+          non-towered, so its operations have always been a <em>planning estimate</em>. The consultant threw that
+          estimate out and counted instead &mdash; and said plainly why.
+        </p>
+      </div>
+
+      <blockquote class="admit">
+        <p>&ldquo;FAA provides operations data for airports across the United States; however, for non-towered
+        airports, <strong>this data is based on estimates and is not considered reliable enough for this
+        project</strong>.&rdquo;</p>
+        <cite>&mdash; Noise Program Assessment Baseline Report (p.&nbsp;7)</cite>
+      </blockquote>
+
+      <div class="prose" style="max-width:46rem">
+        <p>
+          What replaced it: because LMO sits inside Denver&rsquo;s Mode&nbsp;C Veil, nearly every aircraft operating
+          there is required to carry <strong>operable ADS-B Out equipment</strong>. AMS receives and processes those
+          position reports directly. The platform came online in <strong>Q4&nbsp;2023</strong>; 2024 is the first
+          complete year of data. That is the entire basis of the report &mdash; and it is the same public ADS-B signal
+          this ledger has been counting from the ground.
+        </p>
+      </div>
+
+      <div class="ladder" role="img" aria-label="Comparison of operations figures for KLMO: 2013 master plan estimate 18,535 itinerant; CDOT 2020 study 72,939 in 2018; FAA 5010 planning estimate about 120,000; Rates and Charges Study Exhibit E about 126,600; counted 2024 126,607; counted 2025 137,452.">
+        <div class="hd">
+          <span>Source</span>
+          <span>Relative scale</span>
+          <span class="amt">Operations / yr</span>
+        </div>
+        <div class="row est">
+          <span class="src">CDOT 2020 study<small>estimate &middot; data year 2018</small></span>
+          <span class="track"><span class="bar" style="width:53%"></span></span>
+          <span class="amt">72,939</span>
+        </div>
+        <div class="row est">
+          <span class="src">FAA Form 5010<small>planning estimate &middot; quoted for years</small></span>
+          <span class="track"><span class="bar" style="width:87%"></span></span>
+          <span class="amt">~120,000</span>
+        </div>
+        <div class="row est">
+          <span class="src">Rates &amp; Charges Study<small>Exhibit E &middot; the fee model&rsquo;s input</small></span>
+          <span class="track"><span class="bar" style="width:92%"></span></span>
+          <span class="amt">~126,600</span>
+        </div>
+        <div class="row count">
+          <span class="src">AMS counted, 2024<small>ADS-B &middot; first full year</small></span>
+          <span class="track"><span class="bar" style="width:92%"></span></span>
+          <span class="amt">126,607</span>
+        </div>
+        <div class="row count">
+          <span class="src">AMS counted, 2025<small>ADS-B &middot; the current number</small></span>
+          <span class="track"><span class="bar" style="width:100%"></span></span>
+          <span class="amt">137,452</span>
+        </div>
+      </div>
+      <p class="ladder-cap">
+        Counted figures from the Noise Program Assessment Baseline Report, p.&nbsp;7. The CDOT and Form&nbsp;5010
+        figures are the estimates this ledger has documented elsewhere; the ~126,600 is the operations input behind the
+        City&rsquo;s 2026 Rates and Charges Study (Exhibit&nbsp;E, p.&nbsp;67) &mdash; which lands within seven flights
+        of the counted 2024 total. Two City consultants, one year apart, the same number.
+      </p>
+
+      <p class="pull">
+        The airport&rsquo;s traffic volume is no longer a matter of opinion. It is a measured quantity &mdash; and a
+        measured quantity can be billed.
+      </p>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- WHAT IS FLYING -->
+    <section class="section-pad dark-panel" id="shape">
+      <div class="section-heading">
+        <p class="kicker">What the count is made of</p>
+        <h2 style="color:#fff;">A training field, on the data</h2>
+        <p class="dek" style="color:#e9e0ca;">
+          Volume alone is only half the story. The composition is what determines who a fee would fall on &mdash; and
+          the composition is unambiguous.
+        </p>
+      </div>
+
+      <div class="claim-stats">
+        <div class="cell lead">
+          <span class="big">91%</span>
+          <span class="cap">of 2025 operations were single-engine fixed-wing &mdash; 125,666 of 137,452 (pp.&nbsp;10&ndash;11)</span>
+        </div>
+        <div class="cell">
+          <span class="big">~40%</span>
+          <span class="cap">are <strong>local</strong> operations &mdash; roughly 55,000 pattern flights a year (pp.&nbsp;8&ndash;9)</span>
+        </div>
+        <div class="cell">
+          <span class="big">C172<br>PA-28</span>
+          <span class="cap">the most common aircraft on the field &mdash; both are flight-training standards (p.&nbsp;11)</span>
+        </div>
+        <div class="cell">
+          <span class="big">~3%</span>
+          <span class="cap">Mile High Skydiving&rsquo;s share of annual operations &mdash; 3,945 flights in 2025 (p.&nbsp;11)</span>
+        </div>
+      </div>
+
+      <table class="vintage" style="margin-top:34px">
+        <caption style="color:#c9bd99;">Operations by aircraft category, from the report&rsquo;s Figure&nbsp;10 (p.&nbsp;11). Category totals sum to within four flights of the reported annual totals.</caption>
+        <thead><tr>
+          <th style="color:var(--gold2)">Category</th>
+          <th style="color:var(--gold2)">2024</th>
+          <th style="color:var(--gold2)">2025</th>
+          <th style="color:var(--gold2)">Change</th>
+          <th style="color:var(--gold2)">Share of 2025</th>
+        </tr></thead>
+        <tbody style="color:#e9dfc6">
+          <tr><td style="color:#fff">Fixed wing, single engine</td><td class="num">116,716</td><td class="num">125,666</td><td class="num" style="color:var(--gold2)">+8,950</td><td class="num">91.4%</td></tr>
+          <tr><td style="color:#fff">Fixed wing, multi engine</td><td class="num">8,488</td><td class="num">9,395</td><td class="num" style="color:var(--gold2)">+907</td><td class="num">6.8%</td></tr>
+          <tr><td style="color:#fff">Rotorcraft</td><td class="num">312</td><td class="num">825</td><td class="num" style="color:var(--gold2)">+513</td><td class="num">0.6%</td></tr>
+          <tr><td style="color:#fff">Glider</td><td class="num">423</td><td class="num">547</td><td class="num">+124</td><td class="num">0.4%</td></tr>
+          <tr><td style="color:#fff">Data unavailable</td><td class="num">480</td><td class="num">670</td><td class="num">+190</td><td class="num">0.5%</td></tr>
+          <tr><td style="color:#fff">Other</td><td class="num">188</td><td class="num">345</td><td class="num">+157</td><td class="num">0.3%</td></tr>
+        </tbody>
+      </table>
+
+      <div class="note-pair">
+        <p class="note">
+          <strong>Mid-week is the peak &mdash; a training signature, not a recreation one.</strong> The busiest days in
+          2025 were Wednesday (16.8%) and Thursday (16.4%); the quietest were Sunday (12.4%) and Saturday (12.6%)
+          (p.&nbsp;9). A field dominated by weekend recreational flying looks like the opposite. This one looks like a
+          business operating on a schedule.
+        </p>
+        <p class="note">
+          <strong>Runway&nbsp;29 takes about 65% of it,</strong> with Runway&nbsp;11 taking 35% &mdash; a split the
+          report says is &ldquo;consistent with the wind direction and frequency&rdquo; for 2024&ndash;2025
+          (p.&nbsp;12). Aircraft land into the wind. For fee-design purposes what matters is that the report now knows
+          the split, by runway, by hour, by aircraft.
+        </p>
+      </div>
+
+      <p class="pull">
+        Nine in ten movements at Vance Brand are a single-engine trainer. Whatever else the airport is, on the data it
+        is a flight school&rsquo;s runway.
+      </p>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- WHERE THE GROWTH IS -->
+    <section class="section-pad" id="growth">
+      <div class="section-heading">
+        <p class="kicker">Where the growth came from</p>
+        <h2>The airport grew by 10,845 flights. Skydiving shrank.</h2>
+        <p class="dek">
+          This is the single most useful thing in the report for anyone arguing about the airport&rsquo;s finances,
+          because it settles who the added traffic belongs to. Break the 2024&ndash;2025 change into its parts and the
+          answer is not ambiguous.
+        </p>
+      </div>
+
+      <div class="growth">
+        <div class="g">
+          <span class="n">+8,950</span>
+          <span class="t">Single-engine fixed wing</span>
+          <p>
+            <strong style="color:var(--gold2)">82.5% of all growth</strong> came from one category &mdash; the Cessna
+            172 / Piper PA-28 class the report identifies as the field&rsquo;s most common aircraft, and the standard
+            equipment of flight training.
+          </p>
+        </div>
+        <div class="g">
+          <span class="n">+907</span>
+          <span class="t">Multi-engine fixed wing</span>
+          <p>
+            Up 10.7% year on year &mdash; the fastest-growing fixed-wing category in percentage terms. The report names
+            the Beech&nbsp;76 among the most common multis; it is also a training aircraft.
+          </p>
+        </div>
+        <div class="g">
+          <span class="n down">&minus;534</span>
+          <span class="t">Mile High Skydiving</span>
+          <p>
+            Skydiving operations <strong style="color:var(--gold2)">fell 11.9%</strong>, from 4,479 flights in 2024 to
+            3,945 in 2025, while the field overall grew 8.6%. Whatever is driving the increase, it is not the drop
+            zone.
+          </p>
+        </div>
+      </div>
+      <p class="ladder-cap" style="margin-top:18px">
+        Category figures are the report&rsquo;s Figure&nbsp;10 (p.&nbsp;11). The skydiving totals are the sum of the
+        monthly values in Figure&nbsp;12 (p.&nbsp;12): 4,479 operations in 2024 and 3,945 in 2025 &mdash; consistent
+        with the report&rsquo;s statement that Mile High accounts for &ldquo;about 3% of annual operations.&rdquo;
+      </p>
+
+      <div class="note-pair">
+        <p class="note">
+          <strong>The growth is imported, by the report&rsquo;s own account.</strong> The report classifies an operation
+          as <em>local</em> only when the aircraft takes off from LMO and returns within 75 minutes (p.&nbsp;8). An
+          aircraft that departs another field, works the pattern at Vance Brand, and flies home is
+          <strong>itinerant</strong> &mdash; and the report records that the dominant community-reported issue is
+          &ldquo;repetitive touch-and-go operations, especially from aircraft perceived to originate from Rocky Mountain
+          Metropolitan Airport&rdquo; (p.&nbsp;26).
+        </p>
+        <p class="note">
+          <strong>Which is precisely the fee-relevant slice.</strong> Transient, non-based aircraft are the category
+          every landing-fee model treats separately &mdash; and the category Longmont&rsquo;s own hangar tenants are
+          not in. The count now gives that slice a size for the first time: roughly
+          <strong>82,000 itinerant operations a year</strong> at the report&rsquo;s ~60% figure.
+        </p>
+      </div>
+
+      <p class="smallnote">
+        One caution before anyone builds a revenue model on that 82,000: &ldquo;itinerant&rdquo; is defined by the
+        75-minute rule, not by where the aircraft is based, and an <em>operation</em> is not the same as a
+        <em>landing</em>. The report does not publish a based-versus-visiting split, and it does not publish a
+        touch-and-go count. Those are exactly the two figures the recommended conformance analytics would produce
+        &mdash; and exactly why funding them matters.
+      </p>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- THE STALE BASELINE -->
+    <section class="section-pad dark-panel" id="stale">
+      <div class="section-heading">
+        <p class="kicker">What the count does to the fee math</p>
+        <h2 style="color:#fff;">The City&rsquo;s fee study was built on last year&rsquo;s traffic</h2>
+        <p class="dek" style="color:#e9e0ca;">
+          Here is where the two City documents collide productively. The 2026 <em>Rates and Charges Study</em> priced
+          three landing-fee scenarios against an operations base of about <strong>126,600</strong> &mdash; effectively
+          the 2024 figure. The noise report&rsquo;s counted 2025 total is <strong>137,452</strong>. Every revenue
+          projection in the fee study is therefore sized to a field that no longer exists.
+        </p>
+      </div>
+
+      <div class="calc" role="table" aria-label="Landing fee revenue scenarios rescaled to counted 2025 operations">
+        <div class="crow"><span class="k">Rates Study, $2&nbsp;/&nbsp;1,000&nbsp;lb, transient aircraft only, net of the 20% collection charge (pp.&nbsp;28&ndash;29)</span><span class="v">$162,195</span></div>
+        <div class="crow"><span class="k">The same scenario scaled to counted 2025 volume (&times;&nbsp;137,452&nbsp;/&nbsp;126,607)</span><span class="v">~$176,100</span></div>
+        <div class="crow"><span class="k">Rates Study combined total &mdash; transient plus based aircraft</span><span class="v">$237,690</span></div>
+        <div class="crow tot"><span class="k">Combined, scaled to counted 2025 volume</span><span class="v">~$258,000</span></div>
+      </div>
+      <p class="smallnote">
+        This is a straight linear rescale, shown to size the gap &mdash; not a re-run of the study&rsquo;s model. The
+        study&rsquo;s scenarios also depend on aircraft weight mix and the share of operations that are billable
+        landings, neither of which scales cleanly with total volume. The honest claim is directional, and it is enough:
+        <strong>the fee study understates its own revenue because it was written before the count existed.</strong>
+      </p>
+
+      <p class="note">
+        <strong>And the deficit it was written to solve has not moved.</strong> The same study projects the Airport
+        Fund&rsquo;s working capital turning negative in <strong>2028</strong> and reaching a status the study itself
+        labels <strong>&ldquo;Critical&rdquo;</strong> by 2030. Its own conclusion: the fund &ldquo;requires deliberate
+        fiscal intervention to reverse the projected decline and restore long-term solvency.&rdquo; More traffic across
+        a runway that charges nothing does not improve that. It is the problem in a sentence.
+      </p>
+
+      <div class="cta-row">
+        <a class="cta" href="/the-airport-is-in-trouble.html">Read the fiscal case in full &rarr;</a>
+      </div>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- THE FUNDING GAP -->
+    <section class="section-pad" id="funding">
+      <div class="section-heading">
+        <p class="kicker">The funding gap on Tuesday&rsquo;s agenda</p>
+        <h2>A report full of recommendations, arriving with no money</h2>
+        <p class="dek">
+          Item&nbsp;9.B is a presentation. The Council Communication is explicit: recommended action &ldquo;N/A,&rdquo;
+          fiscal impact &ldquo;N/A.&rdquo; And in the same document, three lines earlier:
+        </p>
+      </div>
+
+      <div class="agenda">
+        <div class="a">
+          <span class="k">Item</span>
+          <span class="v">9.B</span>
+        </div>
+        <div class="a">
+          <span class="k">Type of item</span>
+          <span class="v">General Business</span>
+        </div>
+        <div class="a na">
+          <span class="k">Recommended action</span>
+          <span class="v">N/A</span>
+        </div>
+        <div class="a na">
+          <span class="k">Fiscal impact</span>
+          <span class="v">N/A</span>
+        </div>
+      </div>
+
+      <blockquote class="admit">
+        <p>&ldquo;This is a presentation only. <strong>Some recommendations from the VNAP will require Council
+        direction and additional funding to move forward.</strong>&rdquo;</p>
+        <cite>&mdash; City Council Communication, Item 9.B, July&nbsp;28,&nbsp;2026</cite>
+      </blockquote>
+
+      <div class="tcards">
+        <div class="t">
+          <h3>What the recommendations actually cost money to do</h3>
+          <ul>
+            <li>Expand flight tracking and operations analytics to measure conformance <strong>by operator, flight school, and flying club</strong>.</li>
+            <li>Launch a <strong>public dashboard</strong> showing trends over time.</li>
+            <li>Set <strong>measurable targets against the 2025 baseline</strong>.</li>
+            <li>Build structured complaint tracking with a resident feedback loop, and publish recurring transparency reports.</li>
+            <li>Evaluate <strong>dedicated staffing or contracted support</strong> to administer the program.</li>
+          </ul>
+        </div>
+        <div class="t no">
+          <h3>What is attached to pay for any of it</h3>
+          <ul>
+            <li>Nothing. Fiscal impact: <strong>N/A</strong>.</li>
+            <li>No recommended action, so no vote to authorize spending.</li>
+            <li>The Airport Fund that would carry the cost is the same fund the City&rsquo;s other consultant projects insolvent by 2028.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="ask">
+        <span class="a-lab">The concrete ask &mdash; all of it is a funding ask</span>
+        <ol>
+          <li><strong>Fund the analytics.</strong> Direct staff to return with a costed proposal for the operator-level
+          conformance and operations analytics the report recommends &mdash; the same system that produces the
+          based-versus-transient and touch-and-go counts nobody currently has.</li>
+          <li><strong>Adopt 2025 as the baseline.</strong> 137,452 counted operations is the measurement floor. Put it
+          in the record so every future year is compared against a counted number rather than an estimate.</li>
+          <li><strong>Fund the collection side too.</strong> The Rates and Charges Study prices the revenue lever; the
+          noise report supplies the traffic data it needs. Ask that the two be costed together, not in separate
+          budget cycles.</li>
+          <li><strong>Put a date on it.</strong> A report-back date, with the analytics scope and price attached.
+          Without one, &ldquo;will require additional funding&rdquo; becomes another year of estimates.</li>
+        </ol>
+      </div>
+
+      <p class="pull">
+        The City just paid to learn exactly how much traffic crosses its runway. The next question is the only one that
+        follows: <strong>what is that traffic worth, and who is paying for it now?</strong>
+      </p>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- THE FEE SECTION -->
+    <section class="section-pad dark-panel" id="fees">
+      <div class="section-heading">
+        <p class="kicker">The report&rsquo;s own landing-fee section</p>
+        <h2 style="color:#fff;">Two pages on fees, and they argue against</h2>
+        <p class="dek" style="color:#e9e0ca;">
+          The noise report contains a <strong>Landing-Fees</strong> subsection (pp.&nbsp;20&ndash;21). It records the
+          local perception that Vance Brand carries more traffic because it charges light general aviation nothing to
+          land &mdash; and then, carefully, pushes back on it. Know the argument before it is made at you.
+        </p>
+      </div>
+
+      <table class="vintage">
+        <caption style="color:#c9bd99;">Noise Program Assessment Baseline Report, &ldquo;Landing-Fees&rdquo; (pp.&nbsp;20&ndash;21).</caption>
+        <thead><tr>
+          <th style="color:var(--gold2)">What the report says</th>
+          <th style="color:var(--gold2)">What it actually establishes</th>
+        </tr></thead>
+        <tbody style="color:#e9dfc6">
+          <tr>
+            <td style="color:#fff">Most Colorado airports charge landing fees only at or above <strong>12,500&nbsp;lb</strong> maximum landing weight.</td>
+            <td>True, and a reason to build LMO&rsquo;s rate on documented airfield cost recovery rather than on regional precedent.</td>
+          </tr>
+          <tr>
+            <td style="color:#fff">Light GA aircraft &mdash; &ldquo;<strong>over 90% of the operations at Vance Brand</strong>&rdquo; &mdash; weigh under 3,000&nbsp;lb.</td>
+            <td>The report confirming, in the fee section, that nine-tenths of the traffic is exactly the class that currently pays nothing.</td>
+          </tr>
+          <tr>
+            <td style="color:#fff">Only four Colorado airports charge light-GA landing fees &mdash; Denver, Aspen, Gunnison&ndash;Crested Butte, Telluride &mdash; all <strong>commercial service</strong> airports, &ldquo;differentiating them significantly from the operational model of Vance Brand.&rdquo;</td>
+            <td>The sentence that will be quoted at Council. It is also the report framing a revenue question it was not commissioned to answer &mdash; the City has a separate, dedicated study for that.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="note">
+        <strong>The comparison it does not make.</strong> A commercial-service airport has airline landing fees,
+        passenger facility charges, concessions, and parking. Vance Brand has hangar rent and a ground lease on a cell
+        tower. The four Colorado airports charging light-GA fees are not more dependent on that revenue than LMO
+        &mdash; they are far less. Being unlike them is an argument for a fee, not against one.
+      </p>
+
+      <div class="section-heading" style="margin-top:46px;max-width:46rem">
+        <p class="kicker">What residents volunteered, unprompted</p>
+        <h2 style="color:#fff;font-size:clamp(1.6rem,3vw,2.4rem)">Funding was the most common self-generated proposal</h2>
+      </div>
+
+      <div class="quotes">
+        <blockquote>
+          <p>&ldquo;It seems like operating a money losing operation like the airport would benefit from landing fees.
+          Lots of airports do it.&rdquo;</p>
+          <cite>Survey open comment &mdash; p.&nbsp;72</cite>
+        </blockquote>
+        <blockquote>
+          <p>&ldquo;Why does the Longmont area have to bear the burden of so many flight schools operating here,
+          particularly when they don&rsquo;t pay a penny to use the facilities. At the very least, they should be paying
+          landing fees.&rdquo;</p>
+          <cite>Survey open comment &mdash; p.&nbsp;67</cite>
+        </blockquote>
+        <blockquote>
+          <p>&ldquo;We need to install touch-and-go fees (and landing fees, and higher hangar rentals) &hellip;
+          <em>to pay for itself</em>. Citizens should not have to subsidize activities that disrupt our daily
+          lives.&rdquo;</p>
+          <cite>Survey open comment &mdash; p.&nbsp;67</cite>
+        </blockquote>
+        <blockquote>
+          <p>&ldquo;Taxpayers &hellip; contribute nearly $400,000 annually to airport operations &hellip; the lack of
+          appropriate landing fees are inadequate to cover the impact and need to be instituted at the earliest possible
+          opportunity.&rdquo;</p>
+          <cite>Survey open comment &mdash; p.&nbsp;73</cite>
+        </blockquote>
+      </div>
+
+      <p class="note">
+        <strong>And the opposing comment, which is the more useful one.</strong> A respondent opposed to fees set out
+        the exact trap that sinks them: &ldquo;There are only two possible purposes for landing fees: 1) Make the fees
+        so high that airport activity is decreased &hellip; 2) Add another juicy revenue source for the City while not
+        solving the issue at hand&rdquo; (p.&nbsp;72). The first half of that is a real legal risk and the second half
+        is not &mdash; because <em>cost recovery at a fund the City&rsquo;s consultant projects insolvent</em> is not
+        &ldquo;juicy revenue,&rdquo; it is Grant Assurance&nbsp;24.
+      </p>
+
+      <div class="floor-callout">
+        <span class="glyph" aria-hidden="true">&#9650;</span>
+        <p>
+          <strong>The line that matters.</strong> A fee engineered to deter or selectively limit aeronautical activity
+          is an unlawful access restriction at a federally obligated airport. A fee built up from documented airfield
+          costs &mdash; runway and taxiway upkeep, lighting, snow removal, pavement management, insurance &mdash; and
+          justified on <strong>self-sustainability and cost recovery</strong> is the ordinary practice the FAA&rsquo;s
+          own rates and charges policy contemplates. Same fee. Only one version survives a challenge. Keep the counted
+          operations data where it belongs: as the <em>measurement basis</em> for the rate, never as an argument that
+          the point is less traffic.
+        </p>
+      </div>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- ONE PLATFORM, TWO JOBS -->
+    <section class="section-pad" id="platform">
+      <div class="section-heading">
+        <p class="kicker">The part nobody has said out loud</p>
+        <h2>The measurement system and the metering system are the same system</h2>
+        <p class="dek">
+          The report&rsquo;s central recommendation is to fund expanded flight tracking and operations analytics so the
+          airport can measure conformance &ldquo;by operator, flight school, and flying club.&rdquo; Read that as a
+          finance officer would. Identifying <em>which operator</em> flew <em>which movement</em> at <em>what time</em>
+          is not only how you measure a noise program. It is how you bill for a runway.
+        </p>
+      </div>
+
+      <div class="fee-top">
+        <div class="money-card">
+          <span class="m-label">One investment, two returns</span>
+          <span class="m-figure" style="font-size:clamp(2.2rem,5vw,3.4rem)">One&nbsp;system</span>
+          <span class="m-sub">the ADS-B operations platform the report asks Council to fund is also the operator-level record a landing fee requires</span>
+          <div class="m-alt">
+            <div><span class="a-fee">Return one</span><span class="a-val">Conformance</span></div>
+            <div><span class="a-fee">Return two</span><span class="a-val">Cost recovery</span></div>
+          </div>
+        </div>
+        <div class="funnel" aria-label="What operator-level tracking produces">
+          <div class="row"><div class="bar">Counted operations, by operator and hour</div><div><span class="num">have it</span><div class="lbl">2024&ndash;2025, ADS-B</div></div></div>
+          <div class="row"><div class="bar">Based vs. transient split, touch-and-go counts</div><div><span class="num">missing</span><div class="lbl">the recommended expansion</div></div></div>
+          <div class="row good"><div class="bar">A defensible, auditable billing record</div><div><span class="num">follows</span><div class="lbl">same data, same platform</div></div></div>
+        </div>
+      </div>
+
+      <p class="note">
+        <strong>This is the strongest version of the funding argument.</strong> Council is not being asked to buy a
+        noise report&rsquo;s wishlist. It is being asked to fund the only piece of infrastructure that both closes the
+        accountability gap the report identifies <em>and</em> supplies the operator-level records the City&rsquo;s
+        separate Rates and Charges Study says a defensible fee needs &mdash; written policy, documented methodology,
+        consistent application across similar users, and record-keeping. One line item. Two problems.
+      </p>
+
+      <p class="pull">
+        The City has spent two consultancies establishing that it cannot measure its airport and cannot fund it. Both
+        answers turn out to be the same purchase.
+      </p>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- BOTTOM LINE -->
+    <section class="section-pad dark-panel" id="bottom-line">
+      <div class="section-heading">
+        <p class="kicker">What it adds up to</p>
+        <h2 style="color:#fff;">The count is the asset</h2>
+      </div>
+      <div class="prose">
+        <p style="color:#efe6cf">
+          Strip the assessment down to what it changed and one thing survives: Vance Brand&rsquo;s traffic is now a
+          <strong>counted number</strong> rather than an FAA planning estimate. <strong>137,452</strong> operations in
+          2025, up 8.6% in a year, 91% of them single-engine trainers, with more than four-fifths of the growth in that
+          one category and skydiving actually declining. That is not a noise finding. It is an asset-utilization
+          finding, and it belongs in a budget conversation.
+        </p>
+        <p style="color:#efe6cf">
+          Against it sits the other half of the City&rsquo;s own record: an Airport Fund its consultant projects
+          negative by 2028 and &ldquo;Critical&rdquo; by 2030, total lease revenue of $597,370 a year, and
+          <strong>$0</strong> collected from the runway that carried all 137,452 movements. The fee study that priced
+          the fix was built on 126,600 operations &mdash; the traffic level of the year before.
+        </p>
+        <p style="color:#efe6cf">
+          So the ask on Tuesday is a funding ask, and it is small: cost the analytics, adopt the counted 2025 figure as
+          the baseline, and require that the measurement build and the rate structure be scoped together rather than in
+          separate budget cycles. The City has already paid to find out what crosses its runway. It has not yet decided
+          to find out what that is worth.
+        </p>
+      </div>
+
+      <div class="floor-callout">
+        <span class="glyph" aria-hidden="true">&#9650;</span>
+        <p>
+          <strong>None of this is a proposal or a legal opinion.</strong> It is a close reading of two City documents
+          &mdash; the AMS Noise Program Assessment Baseline Report and the Council Communication for Item&nbsp;9.B,
+          July&nbsp;28,&nbsp;2026 &mdash; with the fiscal figures drawn from the City&rsquo;s 2026 Rates and Charges
+          Study as cited on the companion page.
+        </p>
+      </div>
+
+      <div class="cta-row">
+        <a class="cta" href="/the-longmont-airport-file.html">Start here: the whole file &rarr;</a>
+        <a class="cta" href="/the-airport-is-in-trouble.html">The airport is in financial trouble &rarr;</a>
+        <a class="cta" href="/what-the-70m-counts.html">What the &ldquo;$73.6&nbsp;million&rdquo; really counts &rarr;</a>
+        <a class="cta alt" href="/">Open the live runway-use ledger &rarr;</a>
+      </div>
+    </section>
+
+    <hr class="gold-rule" />
+
+    <!-- SOURCES -->
+    <section class="section-pad tight" id="sources">
+      <div class="section-heading">
+        <p class="kicker">Sources &amp; method</p>
+        <h2>Show your work</h2>
+      </div>
+      <div class="prose">
+        <p>
+          Operations figures and quotations are from the <em>Noise Program Assessment &mdash; Baseline Report</em>
+          (Airport Monitoring Systems, prepared for the City of Longmont, 2026) and the <em>City Council
+          Communication</em> for Item&nbsp;9.B, meeting date July&nbsp;28,&nbsp;2026. Page numbers are the
+          report&rsquo;s own printed pagination, which runs two behind the PDF page count. Fiscal figures are from the
+          City&rsquo;s 2026 <em>Rates and Charges Study</em> (Bolton&nbsp;&amp;&nbsp;Menk) and are documented on the
+          companion page. Arithmetic performed here &mdash; category shares, growth composition, skydiving totals, and
+          the rescaled fee scenarios &mdash; is stated with its inputs so it can be checked.
+        </p>
+        <ul class="sources">
+          <li>FAA operations data for non-towered airports &ldquo;is based on estimates and is not considered reliable enough for this project&rdquo;; Mode&nbsp;C Veil ADS-B requirement; AMS platform online Q4&nbsp;2023, first full year 2024 &mdash; report pp.&nbsp;6&ndash;7.</li>
+          <li>Annual operations 126,607 (2024) &rarr; 137,452 (2025), an increase of approximately 8%; monthly range 7,400&ndash;13,700; peak just over 15,000 in October 2025 &mdash; report pp.&nbsp;7&ndash;8.</li>
+          <li>Approximately 40% of operations are GA local, defined as departing LMO and returning within 75 minutes; close to 99% of operations are general aviation &mdash; report pp.&nbsp;8&ndash;9.</li>
+          <li>Operations by day of week, 2025: Sunday 12.4%, Monday 13.9%, Tuesday 13.4%, Wednesday 16.8%, Thursday 16.4%, Friday 14.5%, Saturday 12.6% &mdash; report p.&nbsp;9.</li>
+          <li>Approximately 88% of 2025 operations fell in the 8&nbsp;AM&ndash;8&nbsp;PM preferred window, 12% outside it &mdash; roughly 16,500 flights a year, about 45 a day &mdash; report p.&nbsp;10.</li>
+          <li>Operations by aircraft category (Figure&nbsp;10): single engine 116,716 &rarr; 125,666; multi engine 8,488 &rarr; 9,395; rotorcraft 312 &rarr; 825; glider 423 &rarr; 547; data unavailable 480 &rarr; 670; other 188 &rarr; 345. Most common types Cessna&nbsp;172, Piper&nbsp;PA-28, Beech&nbsp;76 &mdash; report pp.&nbsp;10&ndash;11.</li>
+          <li>Mile High Skydiving operations (Figure&nbsp;12), monthly, summing to 4,479 in 2024 and 3,945 in 2025 &mdash; a decline of 534 flights, or 11.9% &mdash; against the report&rsquo;s statement that skydiving is &ldquo;about 3% of annual operations&rdquo; &mdash; report pp.&nbsp;11&ndash;12.</li>
+          <li>Runway use approximately 65% Runway&nbsp;29 / 35% Runway&nbsp;11, &ldquo;consistent with the wind direction and frequency for the period of 2024 and 2025&rdquo; &mdash; report p.&nbsp;12.</li>
+          <li>&ldquo;Landing-Fees&rdquo; subsection: the local perception; the 12,500&nbsp;lb threshold at most Colorado airports; light GA under 3,000&nbsp;lb as &ldquo;over 90% of the operations at Vance Brand&rdquo;; the four commercial-service airports charging light-GA fees &mdash; report pp.&nbsp;20&ndash;21.</li>
+          <li>&ldquo;Repetitive touch-and-go operations, especially from aircraft perceived to originate from Rocky Mountain Metropolitan Airport&rdquo; &mdash; report p.&nbsp;26.</li>
+          <li>Survey open comments on landing fees, taxpayer subsidy, and self-sustainability, quoted to their printed pages &mdash; report Appendix&nbsp;I, pp.&nbsp;67, 72, 73.</li>
+          <li>Presentation only; &ldquo;Some recommendations from the VNAP will require Council direction and additional funding to move forward&rdquo;; recommended action and fiscal impact both &ldquo;N/A&rdquo;; full recommendation list including operator-level conformance analytics, public dashboard, 2025 baseline targets, complaint tracking, transparency reports, and dedicated staffing &mdash; Council Communication, Item&nbsp;9.B, July&nbsp;28,&nbsp;2026, pp.&nbsp;1&ndash;3.</li>
+          <li>Landing-fee scenarios ($162,195 transient-only and $237,690 combined at $2 per 1,000&nbsp;lb, net of the 20% collection charge); working capital turning negative in 2028 and &ldquo;Critical&rdquo; by 2030; &ldquo;requires deliberate fiscal intervention&rdquo;; Exhibit&nbsp;E operations of ~126,600; the defensible-fee checklist &mdash; City of Longmont 2026 <em>Rates and Charges Study</em> (Bolton&nbsp;&amp;&nbsp;Menk), pp.&nbsp;28&ndash;38, 67, as documented on <a href="/the-airport-is-in-trouble.html">the companion page</a>.</li>
+          <li>Total airport lease revenue of $597,370 across 122 hangar and ground leases, 2026 &mdash; City of Longmont Airport Leasing Document, as documented on <a href="/what-the-70m-counts.html">the economic-impact page</a>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer class="site-footer">
+      <span>A civic transparency ledger for Longmont / Vance Brand Airport (KLMO)</span>
+      <span class="disclaimer">
+        This page summarizes a City-commissioned airport operations assessment and the Council Communication
+        accompanying it. Figures and quotations are the documents&rsquo; own; nothing here is a proposal, a bill, or a
+        legal opinion.
+      </span>
+    </footer>
+  </main>
+</div>
+</body>
+</html>

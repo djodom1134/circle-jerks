@@ -14,7 +14,10 @@ def configure(tmp_path, monkeypatch):
     monkeypatch.setenv("CIRCLEJERK_REDIS_URL", "memory://")
     monkeypatch.setenv("CIRCLEJERK_ENVIRONMENT", "test")
     monkeypatch.setenv("CIRCLEJERK_ADMIN_PASSWORD", PASSWORD)
-    monkeypatch.delenv("ADMIN_SUPERUSERS", raising=False)
+    # Use empty string instead of delenv: pydantic-settings reads from the
+    # .env file on disk even when a variable is deleted from os.environ.
+    # Explicitly setting to empty string takes precedence over .env.
+    monkeypatch.setenv("ADMIN_SUPERUSERS", "")
     get_settings.cache_clear()
 
 
