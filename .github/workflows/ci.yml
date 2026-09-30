@@ -1,0 +1,155 @@
+name: CI
+
+# Runs on every PR and on pushes to main. Also callable from deploy.yml so a
+# production deploy never ships a ref that hasn't passed the same checks.
+#
+# Each component job skips itself when its directory isn't in the checked-out
+# ref (main currently predates ledger-api/ and lostlanding/), so this file
+# works on every branch without edits.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect components
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.d.outputs.backend }}
+      ledger: ${{ steps.d.outputs.ledger }}
+      frontend: ${{ steps.d.outputs.frontend }}
+      lostlanding: ${{ steps.d.outputs.lostlanding }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
+      - id: d
+        run: |
+          has() { [ -f "$1" ] && echo true || echo false; }
+          {
+            echo "backend=$(has backend/requirements-dev.txt)"
+            echo "ledger=$(has ledger-api/requirements-dev.txt)"
+            echo "frontend=$(has frontend/package-lock.json)"
+            echo "lostlanding=$(has lostlanding/package-lock.json)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  python:
+    name: Python (${{ matrix.dir }})
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: backend
+            key: backend
+          - dir: ledger-api
+            key: ledger
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.detect.outputs[matrix.key] == 'true'
+        with:
+          ref: ${{ inputs.ref || '' }}
+      - uses: actions/setup-python@v5
+        if: needs.detect.outputs[matrix.key] == 'true'
+        with:
+          # Matches the python:3.12-slim runtime image.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ${{ matrix.dir }}/requirements*.txt
+      - name: Install
+        if: needs.detect.outputs[matrix.key] == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt ruff
+      - name: Lint (syntax errors and undefined names)
+        if: needs.detect.outputs[matrix.key] == 'true'
+        working-directory: ${{ matrix.dir }}
+        # Deliberately narrow: the codebase has no linter config yet, and a
+        # broader rule set reports ~240 style findings today. Widen once a
+        # ruff config is agreed on.
+        run: ruff check --isolated --select E9,F63,F7,F82 .
+      - name: Test
+        if: needs.detect.outputs[matrix.key] == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: python -m pytest -q
+      - name: Skipped
+        if: needs.detect.outputs[matrix.key] != 'true'
+        run: echo "${{ matrix.dir }} is not in this ref; nothing to check."
+
+  node:
+    name: Node (${{ matrix.dir }})
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: frontend
+            key: frontend
+          - dir: lostlanding
+            key: lostlanding
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.detect.outputs[matrix.key] == 'true'
+        with:
+          ref: ${{ inputs.ref || '' }}
+      - uses: actions/setup-node@v4
+        if: needs.detect.outputs[matrix.key] == 'true'
+        with:
+          # Matches the node:22-alpine build stage.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+      - name: Install
+        if: needs.detect.outputs[matrix.key] == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: npm ci --no-audit --no-fund
+      - name: Test
+        if: needs.detect.outputs[matrix.key] == 'true' && hashFiles(format('{0}/src/**/*.test.ts*', matrix.dir)) != ''
+        working-directory: ${{ matrix.dir }}
+        run: npm test
+      - name: Typecheck and build
+        if: needs.detect.outputs[matrix.key] == 'true'
+        working-directory: ${{ matrix.dir }}
+        # `build` is `tsc && vite build`, so this is also the type check.
+        run: npm run build
+      - name: Skipped
+        if: needs.detect.outputs[matrix.key] != 'true'
+        run: echo "${{ matrix.dir }} is not in this ref; nothing to check."
+
+  docker:
+    name: Docker images build
+    needs: [detect, python, node]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
+      - name: Validate compose file
+        run: |
+          # Every ${VAR:-default} has a fallback, so this needs no .env.
+          docker compose -f docker-compose.prod.yml config --quiet
+      - name: Build every image the compose file defines
+        # The droplet is 2 vCPU / 2 GB and wedges when it builds everything at
+        # once (see DEPLOY.md). Catching a broken Dockerfile here means a bad
+        # build never gets as far as the box.
+        run: docker compose -f docker-compose.prod.yml build

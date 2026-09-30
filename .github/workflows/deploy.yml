@@ -1,0 +1,215 @@
+name: Deploy to production
+
+# Automates the manual procedure in DEPLOY.md, step for step:
+#   1. rsync a clean checkout of <ref> to /srv/circlejerk/app (never .env)
+#   2. recreate Caddy FIRST when asked, so log redaction for API/MCP keys is
+#      live before the app can issue one ("Deploy order constraints")
+#   3. rebuild the chosen services ONE AT A TIME under nice/ionice, detached,
+#      because building everything at once wedges the 2 vCPU / 2 GB droplet
+#   4. wait for DONE_ALL, then check the public health endpoints
+#
+# Manual only (workflow_dispatch). There is deliberately no push trigger: main
+# is far behind what production runs today, and an automatic deploy of main
+# would roll production back. Add `push: branches: [main]` once main is the
+# branch production actually ships from.
+#
+# Required repository (or `production` environment) secrets:
+#   DEPLOY_SSH_KEY       private key authorized for root@<DEPLOY_HOST>
+#   DEPLOY_KNOWN_HOSTS   output of `ssh-keyscan -t ed25519 <DEPLOY_HOST>`
+# Optional repository variables:
+#   DEPLOY_HOST          SSH target (default: the reserved IP 137.184.244.248)
+#   PUBLIC_URL           default https://circlejerks.live
+#   LEDGER_URL           default https://ledger.circlejerks.live
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to deploy (required on purpose; main is stale)
+        required: true
+        type: string
+      services:
+        description: Services to rebuild, in order, space-separated. Only list what changed.
+        required: true
+        default: "api worker mcp web"
+        type: string
+      recreate_caddy:
+        description: Recreate Caddy before the app (needed when Caddyfile or CADDY_* env changed)
+        type: boolean
+        default: false
+      dry_run:
+        description: rsync --dry-run only; build and restart nothing
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '137.184.244.248' }}
+  APP_DIR: /srv/circlejerk/app
+  COMPOSE: docker compose -f docker-compose.prod.yml
+  PUBLIC_URL: ${{ vars.PUBLIC_URL || 'https://circlejerks.live' }}
+  LEDGER_URL: ${{ vars.LEDGER_URL || 'https://ledger.circlejerks.live' }}
+
+jobs:
+  ci:
+    name: CI on the ref being deployed
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ inputs.ref }}
+
+  deploy:
+    name: Deploy ${{ inputs.ref }}${{ inputs.dry_run && ' (dry run)' || '' }}
+    needs: ci
+    runs-on: ubuntu-latest
+    # Add required reviewers to this environment in repo settings to gate
+    # every production deploy on a human click.
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_URL || 'https://circlejerks.live' }}
+    timeout-minutes: 60
+    steps:
+      - name: Validate inputs
+        env:
+          SERVICES: ${{ inputs.services }}
+        run: |
+          allowed=" api worker mcp web ledger-api ledger-worker web-ledger "
+          for s in $SERVICES; do
+            case "$allowed" in *" $s "*) ;; *) echo "::error::Unknown service '$s'"; exit 1;; esac
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$DEPLOY_SSH_KEY" ] || [ -z "$DEPLOY_KNOWN_HOSTS" ]; then
+            echo "::error::DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS secrets are required"; exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host prod
+            HostName $DEPLOY_HOST
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 15
+            ServerAliveCountMax 8
+          EOF
+          ssh prod 'echo connected to $(hostname)'
+
+      - name: Pre-flight on the droplet
+        run: |
+          ssh prod "APP_DIR=$APP_DIR bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$APP_DIR"
+          test -f .env || { echo "::error::$APP_DIR/.env is missing"; exit 1; }
+          # The app refuses to start with the built-in dev secret, but the
+          # compose fallback (replace-with-a-long-random-string) slips past that
+          # guard, so check the real value here before anything restarts.
+          secret=$(grep -E '^APP_SECRET=' .env | tail -1 | cut -d= -f2- || true)
+          case "$secret" in
+            ""|replace-with-a-long-random-string|local-development-secret)
+              echo "::error::APP_SECRET in the droplet .env is unset or a public default"; exit 1;;
+          esac
+          free -m | awk '/Swap/ { if ($2 < 1024) { print "::warning::swap is only " $2 "MB; builds may wedge the box" } }'
+          if pgrep -f 'docker-compose.prod.yml build' >/dev/null; then
+            echo "::error::another deploy appears to be running on the droplet"; exit 1
+          fi
+          REMOTE
+
+      - name: Sync code (rsync)
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          # Same excludes as DEPLOY.md step 1. Excluded paths are also protected
+          # from --delete, which is what keeps the droplet's .env and any
+          # droplet-only data dirs intact.
+          flags="-az --delete --itemize-changes"
+          [ "$DRY_RUN" = "true" ] && flags="$flags --dry-run"
+          rsync $flags -e ssh \
+            --exclude '.git' --exclude '.github' \
+            --exclude '.venv' --exclude 'backend/.venv' \
+            --exclude '.env' --exclude '.circlejerk-admin-password' \
+            --exclude 'frontend/node_modules' --exclude 'frontend/dist' --exclude 'frontend/.vite' \
+            --exclude '**/node_modules' --exclude '**/__pycache__' --exclude '*.pyc' \
+            --exclude '.pytest_cache' --exclude '.benchmarks' \
+            --exclude '/data/' --exclude '/backend/data/' --exclude '/lostlanding/data/' \
+            --exclude '*.sqlite3*' \
+            --exclude '.DS_Store' --exclude '.gstack' --exclude '.superpowers' --exclude '*.log' \
+            --exclude '.claude' --exclude '.vscode' \
+            ./ prod:"$APP_DIR"/
+
+      - name: Recreate Caddy first
+        if: ${{ !inputs.dry_run && inputs.recreate_caddy }}
+        run: |
+          ssh prod "cd $APP_DIR && $COMPOSE up -d --no-deps --force-recreate caddy && sleep 5 && $COMPOSE ps caddy"
+
+      - name: Rebuild services one at a time (detached)
+        if: ${{ !inputs.dry_run }}
+        env:
+          SERVICES: ${{ inputs.services }}
+        run: |
+          # Build a single chained command exactly like DEPLOY.md step 2, then
+          # run it under nohup on the droplet so a dropped runner connection
+          # cannot abort a half-finished rebuild.
+          chain=""
+          for s in $SERVICES; do
+            step="nice -n 15 ionice -c3 $COMPOSE build $s && $COMPOSE up -d --no-deps $s"
+            chain="${chain:+$chain && }$step"
+          done
+          chain="$chain && echo DONE_ALL || echo DEPLOY_FAILED"
+          ssh prod "cd $APP_DIR && : > /tmp/circlejerk-deploy.log && \
+            nohup bash -c '$chain' >> /tmp/circlejerk-deploy.log 2>&1 < /dev/null & disown"
+
+      - name: Wait for rebuild to finish
+        if: ${{ !inputs.dry_run }}
+        run: |
+          for i in $(seq 1 100); do
+            sleep 30
+            if ! out=$(ssh -o ConnectTimeout=20 prod 'tail -n 3 /tmp/circlejerk-deploy.log'); then
+              echo "::warning::SSH unreachable (attempt $i). The box may be under build load or wedged."
+              continue
+            fi
+            echo "$out"
+            case "$out" in
+              *DONE_ALL*) echo "Rebuild finished"; exit 0;;
+              *DEPLOY_FAILED*) ssh prod 'tail -n 80 /tmp/circlejerk-deploy.log'; echo "::error::Rebuild failed"; exit 1;;
+            esac
+          done
+          echo "::error::Timed out waiting for DONE_ALL. If SSH and ping are dead but healthz is 200, power-cycle per DEPLOY.md."
+          exit 1
+
+      - name: Verify
+        if: ${{ !inputs.dry_run }}
+        env:
+          SERVICES: ${{ inputs.services }}
+        run: |
+          ssh prod "cd $APP_DIR && $COMPOSE ps"
+          check() {
+            for i in $(seq 1 10); do
+              if curl -fsS --max-time 10 "$1"; then echo; return 0; fi
+              sleep 10
+            done
+            echo "::error::$1 did not return 2xx"; return 1
+          }
+          check "$PUBLIC_URL/healthz"
+          case " $SERVICES " in *" ledger-api "*|*" web-ledger "*) check "$LEDGER_URL/" >/dev/null ;; esac
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
